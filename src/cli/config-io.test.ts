@@ -437,7 +437,7 @@ describe('config-io', () => {
     expect(saved.preset).toBe('openai');
     expect(saved.presets.openai).toBeDefined();
     expect(saved.presets['opencode-go']).toBeDefined();
-    expect(saved.tmux.enabled).toBe(true);
+    expect(saved.multiplexer.type).toBe('tmux');
   });
 
   test('writeLiteConfig writes selected preset', () => {
@@ -568,7 +568,7 @@ describe('config-io', () => {
             librarian: { model: 'zai-coding-plan/glm-4.7' },
           },
         },
-        tmux: { enabled: true },
+        multiplexer: { type: 'tmux' },
       }),
     );
 
