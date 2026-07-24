@@ -65,8 +65,8 @@ export function createCouncilAgent(
   const prompt =
     resolvePrompt(
       'council',
-      undefined,
       customPrompt,
+      undefined,
       COUNCIL_AGENT_PROMPT,
       customAppendPrompt,
     ) + COUNCIL_SYNTHESIS_REINFORCEMENT;

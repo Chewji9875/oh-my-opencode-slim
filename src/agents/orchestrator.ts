@@ -14,7 +14,7 @@ export interface AgentDefinition {
  * Resolve agent prompt from inline/file/append inputs.
  *
  * Precedence: inline prompt > file prompt > fallback. An explicit inline
- * `override.prompt` wins over a `prompts/<agent>.md` file; the file is the
+ * `override.prompt` wins over a `<agent>.md` file; the file is the
  * shared default. `customAppendPrompt` always appends after whichever base
  * won. Deterministic per session (construction-time only) — cache-safe.
  */
@@ -27,7 +27,7 @@ export function resolvePrompt(
 ): string {
   if (inlinePrompt !== undefined && filePrompt !== undefined) {
     console.warn(
-      `[oh-my-opencode] Agent '${agentName}': inline prompt overrides prompt file (prompts/${agentName}.md). Remove the inline prompt to use the file.`,
+      `[oh-my-opencode] Agent '${agentName}': inline prompt overrides prompt file (${agentName}.md). Remove the inline prompt to use the file.`,
     );
   }
   const effectiveBase = inlinePrompt ?? filePrompt ?? fallback;

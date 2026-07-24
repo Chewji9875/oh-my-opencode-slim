@@ -59,8 +59,8 @@ export function createCouncillorAgent(
 ): AgentDefinition {
   const prompt = resolvePrompt(
     'councillor',
-    undefined,
     customPrompt,
+    undefined,
     COUNCILLOR_PROMPT,
     customAppendPrompt,
   );

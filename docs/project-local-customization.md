@@ -89,7 +89,7 @@ is **inline > file > built-in default**:
    `console.warn` is emitted at agent construction:
    ```
    [oh-my-opencode] Agent '<name>': inline prompt overrides prompt file
-   (prompts/<name>.md). Remove the inline prompt to use the file.
+   (<name>.md). Remove the inline prompt to use the file.
    ```
    This is informational — the inline prompt takes effect as expected. The
    warning surfaces the conflict so you know the file is being ignored.

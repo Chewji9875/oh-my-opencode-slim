@@ -43,7 +43,7 @@ describe('resolvePrompt conflict warning', () => {
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = warn.mock.calls[0][0] as string;
     expect(msg).toContain("'skeptic'");
-    expect(msg).toContain('prompts/skeptic.md');
+    expect(msg).toContain('skeptic.md');
     expect(msg).toContain('overrides');
   });
 
