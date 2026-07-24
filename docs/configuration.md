@@ -336,6 +336,85 @@ Notes:
 - Display names must be unique
 - Display names cannot conflict with internal agent names like `oracle` or `explorer`
 
+### Per-preset agent configuration
+
+To get per-preset behavior for any agent, built-in (`council`, `oracle`,
+`explorer`, `librarian`, `fixer`, `designer`, `observer`) or custom, define
+the agent override inside each preset block, not in root `agents`.
+
+```jsonc
+{
+  "presets": {
+    "balanced": {
+      "council": { "model": ["opencode/mimo-v2.5-free", "opencode-go/minimax-m3", "opencode/minimax-m3"] },
+      "oracle": { "model": "opencode/big-pickle", "variant": "high" },
+      "skeptic": { "model": ["opencode/big-pickle", "opencode-go/qwen3.7-plus"], "variant": "max" }
+    },
+    "nvidia-free": {
+      "council": { "model": ["nvidia/z-ai/glm-5.2", "nvidia/moonshotai/kimi-k2.6"] },
+      "oracle": { "model": "nvidia/deepseek-ai/deepseek-v4-pro", "variant": "high" },
+      "skeptic": { "model": ["nvidia/deepseek-ai/deepseek-v4-pro", "nvidia/mistralai/mistral-large-3-675b-instruct-2512"], "variant": "max" }
+    }
+  }
+}
+```
+
+#### Root `agents` wins the merge
+
+Do not also define the same agent in root `agents`. Presets merge into
+`config.agents` via `deepMerge(preset, config.agents)` at
+`src/config/loader.ts:365`, and root overrides win that merge. A root entry
+for an agent makes the preset value for that agent ignored, so the agent
+becomes global instead of per-preset. Root `agents` is the escape hatch for
+values that should never vary by preset.
+
+#### Sharing a prompt across presets (custom agents)
+
+A custom agent with a long prompt does not need the prompt duplicated into
+every preset block. Put the prompt in a file and define the agent in each
+preset with only `model` (and `variant` if needed):
+
+1. Create `<projectDir>/.opencode/oh-my-opencode-slim/<agentName>.md` with
+   the shared prompt.
+2. In each preset block, define the agent with only the model fields (no
+   `prompt`):
+
+```jsonc
+{
+  "presets": {
+    "balanced": {
+      "skeptic": { "model": ["opencode/big-pickle", "opencode-go/qwen3.7-plus"], "variant": "max" }
+    },
+    "nvidia-free": {
+      "skeptic": { "model": ["nvidia/deepseek-ai/deepseek-v4-pro", "nvidia/mistralai/mistral-large-3-675b-instruct-2512"], "variant": "max" }
+    }
+  }
+}
+```
+
+`loadAgentPrompt` (`src/config/loader.ts:418`) is preset-aware and reads
+`<agentName>.md` from the `oh-my-opencode-slim/` prompts directory. Lookup
+order:
+
+1. `<projectDir>/.opencode/oh-my-opencode-slim/<preset>/<agentName>.md` (project, preset-specific)
+2. `<projectDir>/.opencode/oh-my-opencode-slim/<agentName>.md` (project, preset-agnostic)
+3. `~/.config/opencode/oh-my-opencode-slim/<preset>/<agentName>.md` (user, preset-specific)
+4. `~/.config/opencode/oh-my-opencode-slim/<agentName>.md` (user, preset-agnostic)
+
+A preset block without `prompt` falls back to the file prompt (if one
+exists), not to a root `agents.<name>.prompt`. The project-level paths (1
+and 2) work universally and are the recommended location for shared
+prompts. User-level paths (3 and 4) can collide with a plugin install
+symlink if `~/.config/opencode/oh-my-opencode-slim/` is symlinked to the
+plugin source.
+
+> **⚠️ Known limitation (#899):** If you set an inline `prompt` in a preset
+> and a prompt file exists for that agent, the inline prompt is silently
+> dropped in favor of the file. Until #899 is fixed, the file-based shared
+> prompt pattern above is the safe path: keep the prompt in the file, and
+> put only `model`/`variant` in the preset blocks. Do not mix an inline
+> `prompt` with a prompt file for the same agent.
+
 ### Custom Agents
 
 Unknown keys under `agents` are treated as custom subagents. A custom agent needs
