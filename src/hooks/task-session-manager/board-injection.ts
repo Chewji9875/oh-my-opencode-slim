@@ -64,10 +64,16 @@ export type RetainedBoardSnapshotState = {
  * A board the `latest` strategy has already placed (and therefore already sent
  * to the provider) on a specific anchor message. Replayed byte-identically on
  * every later request once that anchor is no longer the tail, so a board that
- * was sent on a message the provider has cached never disappears. `anchorRole`
- * records how it was placed: a `user` anchor carried the board as a trailing
- * PART; an `assistant` anchor was followed by a separate synthetic board
- * message.
+ * was sent on a message the provider has cached never disappears.
+ *
+ * Only ONE placement is ever retained: a board that rode as a trailing PART on
+ * a USER anchor (`anchorRole: 'user'`). That is the only shape that can be
+ * reproduced later without inserting a message mid-array (A1) or grafting board
+ * text onto a non-user message (A3). `anchorRole` stays a plain string so
+ * legacy in-memory entries recorded by an earlier build (notably `'assistant'`,
+ * which was replayed by splicing a synthetic message directly after the anchor
+ * and could orphan a tool call from its result) are recognized and dropped
+ * instead of replayed.
  */
 type RetainedTailBoard = {
   anchorId: string;
@@ -112,6 +118,34 @@ function djb2Hash(str: string): string {
     hash = (hash << 5) + hash + str.charCodeAt(i);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * True when board text may ride on this message as a trailing PART.
+ *
+ * Board text may ONLY ever be appended to a `user` message. This is the single
+ * hard requirement behind the `AI_InvalidPromptError` this guard exists to
+ * prevent, and it is a property of the host's message conversion:
+ *
+ * - the USER branch of `MessageV2.toModelMessagesEffect` copies text parts as
+ *   `{ type: 'text', text }` and DISCARDS `part.metadata`;
+ * - the ASSISTANT branch copies it as
+ *   `{ type: 'text', text, providerMetadata: part.metadata }`, which
+ *   `convertToModelMessages` then forwards as `providerOptions`.
+ *
+ * `providerOptions` is validated as `Record<string, Record<string, JSONValue>>`.
+ * A board part's metadata is `{ '<metadataKey>': true }` — a boolean, not a
+ * nested record — so any board text landing on an assistant-role message fails
+ * `ModelMessage[]` validation and aborts the request before it is sent.
+ *
+ * Tool parts do not disqualify a user message: the user branch of the converter
+ * only emits text/file/compaction/subtask parts, so a user message's tool parts
+ * never become tool-call or tool-result content and cannot be separated from a
+ * pairing by appended text. Keeping such anchors eligible is what preserves the
+ * #889 tail-breakpoint placement (A4).
+ */
+function canCarryBoardPart(message: MessageWithParts): boolean {
+  return message.info.role === 'user';
 }
 
 function createOccurrenceId(
@@ -417,33 +451,54 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
 
   rememberInjectedTerminalJobs(state, sessionID);
 
-  // Placement rules (prompt-cache safety):
+  // Placement rules — correctness first, then prompt-cache safety.
+  //
+  // Correctness (invariants A1-A3): the transformed array is converted to
+  // `ModelMessage[]` and schema-validated before the request is sent, and a
+  // violation raises `AI_InvalidPromptError` ("The messages do not match the
+  // ModelMessage[] schema") before the HTTP call — a hard, unrecoverable turn
+  // failure. Two rules keep the array valid:
+  //
+  //   * board text only ever rides on a `user` message (A3). The assistant
+  //     branch of the host's converter forwards `part.metadata` as
+  //     `providerMetadata`/`providerOptions`, which must be a nested record; a
+  //     board part's `{ '<key>': true }` is a boolean and fails validation. The
+  //     user branch drops metadata entirely, so it is safe.
+  //   * a synthetic board MESSAGE is only ever appended at the very END of the
+  //     array (A1). Inserting one mid-array can land between an assistant
+  //     `task` tool_call and its tool_result and break the pairing the schema
+  //     requires (A2); appending at the end cannot (A2 holds by construction).
+  //
+  // Cache safety (within the above):
   //
   // Provider caches read from the last two messages (Anthropic:
   // provider/transform.ts applyCaching → final.slice(-2)), and the provider
   // SDK coalesces adjacent same-role messages. A board injected as its own
-  // trailing `user` message merges into a preceding user tool_result message,
+  // trailing `user` message merges into a preceding user text message,
   // collapsing both tail breakpoints onto the merged block — so the only
   // readable breakpoint sits on the volatile board. Because the board moves to
   // a new tail every request, the deepest reusable breakpoint regresses to the
   // stable system boundary and the entire tail re-writes as cache every call.
   //
-  // - If the tail is a user message, append the board as its trailing PART:
-  //   the message COUNT stays identical to a board-free render, so the second
-  //   tail breakpoint lands on the previous (byte-stable, real) message.
-  // - If the tail is an assistant message, a separate trailing user board
-  //   message does NOT merge (different role), so the assistant message keeps
-  //   its own readable breakpoint.
-  //
-  // Recording the placement under the tail's anchor id lets the NEXT request
-  // (once the tail advances) replay this exact board on this exact message, so
-  // the bytes the provider just cached for this message never change.
+  // - If the tail is a user message, append the board as its trailing PART: the
+  //   message COUNT stays identical to a board-free render, so the second tail
+  //   breakpoint lands on the previous (byte-stable, real) message. This is
+  //   also the only placement replayable later without inserting a message
+  //   mid-array, so it is the only one recorded for replay.
+  // - If the tail is an assistant message, a separate trailing USER board
+  //   message is appended at the very end of the array. It does not merge
+  //   (different role), so the assistant message keeps its own readable
+  //   breakpoint, and it uses the USER `trigger.info` — never `anchor.info` —
+  //   so the message carrying board text is genuinely user-role (A3).
   const recordId = anchorId ?? boardAnchorFallbackId(anchor);
-  if (anchor.info.role === 'user') {
+  if (canCarryBoardPart(anchor)) {
     appendTaggedSyntheticPart(anchor, {
       text: reminder,
       metadataKey: state.metadataKey,
     });
+    // Recording the placement under the tail's anchor id lets the NEXT request
+    // (once the tail advances) replay this exact board on this exact message,
+    // so the bytes the provider just cached for this message never change.
     rememberTailBoard(state, sessionID, {
       anchorId: recordId,
       anchorRole: 'user',
@@ -461,11 +516,15 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
         metadataKey: state.metadataKey,
       },
     );
-    rememberTailBoard(state, sessionID, {
-      anchorId: recordId,
-      anchorRole: 'assistant',
-      text: reminder,
-    });
+    // A5: this placement is deliberately NOT retained for replay. Reproducing
+    // it once the tail advances would require splicing a message back into the
+    // middle of the array, which is exactly what orphaned an assistant
+    // tool_call from its tool_result and made the whole request invalid. A
+    // cache bust (the board's bytes move to the new tail) is strictly
+    // preferable to a hard `AI_InvalidPromptError`, so the board is simply
+    // re-rendered on the new tail instead. Any stale entry for this anchor is
+    // dropped so the retained map cannot grow or retry the unsafe placement.
+    forgetTailBoard(state, sessionID, recordId);
   }
 }
 
@@ -556,10 +615,35 @@ function rememberTailBoard(
 }
 
 /**
+ * Stop tracking a retained board for an anchor (A5). Used when the placement
+ * cannot be safely reproduced, so the map neither grows without bound nor
+ * retries an unsafe replay on every later request.
+ */
+function forgetTailBoard(
+  state: InjectionState,
+  sessionID: string,
+  anchorId: string,
+): void {
+  const perSession = state.retainedTailBoards.get(sessionID);
+  if (!perSession) return;
+  perSession.delete(anchorId);
+  if (perSession.size === 0) state.retainedTailBoards.delete(sessionID);
+}
+
+/**
  * Re-append every FROZEN retained board onto its original anchor message,
  * exactly as first sent, so a board that was sent on a message which is no
  * longer the tail never disappears (its bytes are already in the provider's
  * cached prefix).
+ *
+ * Replay is strictly append-a-PART-to-an-existing-message. It never inserts a
+ * message (A1) and therefore can never come between a tool_call and its
+ * tool_result (A2), and it only ever targets a `user` message (A3).
+ *
+ * A retained board whose anchor cannot satisfy those invariants is DROPPED
+ * (A5) rather than reproduced: losing a stale board costs one cache bust,
+ * whereas an invalid message array raises `AI_InvalidPromptError` during
+ * request validation and fails the turn outright.
  *
  * The current tail anchor (`currentAnchorId`) is skipped: its board is volatile
  * and is (re)placed fresh by the caller. Anchors no longer present in history
@@ -601,28 +685,27 @@ function replayRetainedTailBoards(
       continue;
     }
     if (hasTaggedPart(anchor, state.metadataKey)) continue;
-    if (board.anchorRole === 'user') {
-      appendTaggedSyntheticPart(anchor, {
-        text: board.text,
-        metadataKey: state.metadataKey,
-      });
-    } else {
-      // Assistant anchor: the board was a separate synthetic message that
-      // immediately followed the anchor. Reinsert it right after the anchor so
-      // its position (and therefore the cached byte offset) is reproduced.
-      const index = messages.indexOf(anchor);
-      const boardMessage: MessageWithParts = {
-        info: { ...anchor.info, id: `${anchorId}-background-job-board` },
-        parts: [
-          createTaggedSyntheticPart({
-            text: board.text,
-            metadataKey: state.metadataKey,
-          }),
-        ],
-      };
-      messages.splice(index + 1, 0, boardMessage);
+
+    // A5: only the trailing-PART-on-a-user-anchor placement is replayable. A
+    // board recorded against an assistant anchor (legacy state from an earlier
+    // build) was reproduced by splicing a synthetic message after the anchor —
+    // which lands between an assistant `task` tool_call and its tool_result and
+    // invalidates the whole request. A board whose anchor is no longer a user
+    // message cannot take the part path either. Both are dropped: one lost
+    // board (a bounded cache bust on that message) is preferable to a hard
+    // AI_InvalidPromptError on every request.
+    if (board.anchorRole !== 'user' || !canCarryBoardPart(anchor)) {
+      perSession.delete(anchorId);
+      continue;
     }
+
+    appendTaggedSyntheticPart(anchor, {
+      text: board.text,
+      metadataKey: state.metadataKey,
+    });
   }
+
+  if (perSession.size === 0) state.retainedTailBoards.delete(sessionID);
 }
 
 /**
