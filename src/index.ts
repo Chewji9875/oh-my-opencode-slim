@@ -115,12 +115,26 @@ const BASELINE_TOOL_NAMES = new Set([
   'ast_grep_replace',
 ]);
 
-/** @internal Exposed for deterministic health-threshold tests. */
+/**
+ * Compute the minimum tool count the health check should expect, accounting
+ * for baseline tools the user has intentionally disabled.
+ *
+ * @internal Exposed for deterministic health-threshold tests.
+ * @param disabledTools - Tool names disabled via config; non-array/malformed
+ *   values (which should never occur post-validation, but are not trusted at
+ *   runtime) are treated as "nothing disabled".
+ * @returns The adjusted minimum expected tool count
+ */
 export function minimumExpectedToolCount(
   disabledTools: readonly string[] = [],
 ): number {
+  // Config values come from user-edited JSON/JSONC (and can be re-derived
+  // via runtime preset switches); never trust the declared type at
+  // runtime. Fall back to "no disabled tools" instead of crashing plugin
+  // init if this isn't actually an array.
+  const safeDisabledTools = Array.isArray(disabledTools) ? disabledTools : [];
   const disabledBaselineTools = new Set(
-    disabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
+    safeDisabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
   );
   return HEALTH_CHECK.minTools - disabledBaselineTools.size;
 }
@@ -459,7 +473,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ast_grep_search,
       ast_grep_replace,
     };
-    if (config.disabled_tools && config.disabled_tools.length > 0) {
+    if (
+      Array.isArray(config.disabled_tools) &&
+      config.disabled_tools.length > 0
+    ) {
       const disabledTools = new Set(config.disabled_tools);
       tools = Object.fromEntries(
         Object.entries(tools).filter(([name]) => !disabledTools.has(name)),
@@ -484,7 +501,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const mcpCount = Object.keys(mcps).length;
   // Skip MCP threshold when user explicitly disabled all built-in MCPs
   const mcpThreshold =
-    config.disabled_mcps && config.disabled_mcps.length > 0
+    Array.isArray(config.disabled_mcps) && config.disabled_mcps.length > 0
       ? 0
       : HEALTH_CHECK.minMcps;
   const toolThreshold = minimumExpectedToolCount(config.disabled_tools);

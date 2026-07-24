@@ -10,6 +10,14 @@ describe('plugin health thresholds', () => {
     );
     expect(minimumExpectedToolCount(['unknown_tool'])).toBe(5);
   });
+
+  test('never throws when disabledTools is not an array', () => {
+    // Regression test: a malformed/non-array config.disabled_tools value
+    // must degrade to "nothing disabled" instead of crashing plugin init.
+    expect(minimumExpectedToolCount('' as any)).toBe(5);
+    expect(minimumExpectedToolCount(null as any)).toBe(5);
+    expect(minimumExpectedToolCount({} as any)).toBe(5);
+  });
 });
 
 describe('plugin env disable', () => {

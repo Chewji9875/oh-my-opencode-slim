@@ -538,6 +538,93 @@ describe('onWarning callback', () => {
     const config = loadPluginConfig(projectDir);
     expect(config.agents?.oracle?.model).toBe('model');
   });
+
+  test('rejects config with non-array disabled_tools (schema validation)', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_tools: 'not-an-array',
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    // Schema validation rejects the entire file, so config is empty
+    expect(config).toEqual({});
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.message).toBe('Config does not match schema');
+  });
+
+  test('rejects config with non-array disabled_agents (schema validation)', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_agents: { invalid: 'object' },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config).toEqual({});
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('invalid-schema');
+  });
+
+  test('rejects config with non-array disabled_mcps (schema validation)', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_mcps: 123,
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config).toEqual({});
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('invalid-schema');
+  });
+
+  test('rejects config with non-array disabled_skills (schema validation)', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_skills: true,
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config).toEqual({});
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('invalid-schema');
+  });
 });
 
 describe('deepMerge behavior', () => {

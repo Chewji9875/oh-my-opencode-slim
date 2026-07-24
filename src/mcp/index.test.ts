@@ -80,4 +80,15 @@ describe('createBuiltinMcps', () => {
     expect(gh_grep).toBeDefined();
     expect('url' in gh_grep).toBe(true);
   });
+
+  test('never throws when disabledMcps is not an array', () => {
+    // Regression test: a malformed/non-array config.disabled_mcps value
+    // must degrade to "nothing disabled" instead of crashing plugin init.
+    const mcps = createBuiltinMcps('' as any);
+    const names = Object.keys(mcps);
+
+    expect(names.length).toBe(2);
+    expect(names).toContain('context7');
+    expect(names).toContain('gh_grep');
+  });
 });

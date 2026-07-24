@@ -37,7 +37,9 @@ export function getSkillPermissionsForAgent(
   skillList?: string[],
   disabledSkillNames?: string[],
 ): Record<string, 'allow' | 'ask' | 'deny'> {
-  const disabledSkills = new Set(disabledSkillNames ?? []);
+  const disabledSkills = new Set(
+    Array.isArray(disabledSkillNames) ? disabledSkillNames : [],
+  );
 
   // Orchestrator gets all skills by default, others are restricted
   const permissions: Record<string, 'allow' | 'ask' | 'deny'> = {

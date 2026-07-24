@@ -200,6 +200,17 @@ function findConfigPathInDirs(
   return null;
 }
 
+/**
+ * Validate that `image_routing: "auto"` has a live observer agent to route
+ * images to. Emits a warning (via `onWarning`/`console.warn`) and returns
+ * `false` if "auto" routing is configured but the observer agent is
+ * disabled, since images would then have nowhere to go.
+ *
+ * @param config - Plugin configuration to validate
+ * @param configPath - Path of the config file, used in the warning payload
+ * @param options - Optional load options including the onWarning callback
+ * @returns `true` if the routing configuration is valid, `false` otherwise
+ */
 function validateFinalImageRouting(
   config: PluginConfig,
   configPath: string,
@@ -207,7 +218,9 @@ function validateFinalImageRouting(
 ): boolean {
   if (config.image_routing !== 'auto') return true;
 
-  const disabledAgents = config.disabled_agents ?? DEFAULT_DISABLED_AGENTS;
+  const disabledAgents = Array.isArray(config.disabled_agents)
+    ? config.disabled_agents
+    : DEFAULT_DISABLED_AGENTS;
   if (!disabledAgents.includes('observer')) return true;
 
   const message =
@@ -401,6 +414,39 @@ export function loadPluginConfig(
     projectConfigPath ?? userConfigPath ?? '',
     options,
   );
+
+  // Normalize disabled_* config keys to ensure they are arrays or undefined.
+  // This loop is currently unreachable via the normal file-loading path:
+  // PluginConfigSchema.safeParse() rejects the WHOLE config object if any
+  // disabled_* field is non-array (no .catch() on these fields), so
+  // loadConfigFromPath returns null and the file falls back to {} BEFORE this
+  // loop ever runs. Retained only as defense-in-depth against a future schema
+  // relaxation (e.g. adding .catch() to these fields) or a construction path
+  // that bypasses safeParse entirely — not as a proven/tested fix for the
+  // originally reported crash (root cause not reproduced).
+  const ARRAY_CONFIG_KEYS = [
+    'disabled_agents',
+    'disabled_tools',
+    'disabled_mcps',
+    'disabled_skills',
+  ] as const;
+
+  const configPathForWarning = projectConfigPath ?? userConfigPath ?? '';
+  for (const key of ARRAY_CONFIG_KEYS) {
+    const value = config[key as keyof PluginConfig];
+    if (value !== undefined && !Array.isArray(value)) {
+      const message = `Config key "${key}" must be an array; ignoring invalid value.`;
+      options?.onWarning?.({
+        path: configPathForWarning,
+        kind: 'invalid-schema',
+        message,
+      });
+      if (!options?.silent) {
+        console.warn(`[oh-my-opencode-slim] ${message}`);
+      }
+      delete config[key as keyof PluginConfig];
+    }
+  }
 
   return config;
 }
