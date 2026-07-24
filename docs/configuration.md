@@ -359,14 +359,21 @@ the agent override inside each preset block, not in root `agents`.
 }
 ```
 
-#### Root `agents` wins the merge
+#### Root `agents` wins the merge (config-file presets)
 
-Do not also define the same agent in root `agents`. Presets merge into
-`config.agents` via `deepMerge(preset, config.agents)` at
-`src/config/loader.ts:365`, and root overrides win that merge. A root entry
-for an agent makes the preset value for that agent ignored, so the agent
-becomes global instead of per-preset. Root `agents` is the escape hatch for
-values that should never vary by preset.
+At startup, config-file presets merge into `config.agents` via
+`deepMerge(preset, config.agents)` at `src/config/loader.ts:365`. The
+second argument wins for conflicting scalars, so root `agents` overrides
+the preset. A root entry for an agent makes the config-file preset value
+for that agent ignored — the agent becomes global instead of per-preset.
+Root `agents` is the escape hatch for values that should never vary by
+preset.
+
+**Runtime presets reverse this.** When a preset is activated at runtime
+via the `/preset` command, the merge at `src/index.ts:227` is
+`deepMerge(config.agents, presetAgents)` — the runtime preset is the
+override and wins. Root `agents` only guarantees precedence for
+config-file presets resolved at startup.
 
 #### Sharing a prompt across presets (custom agents)
 
@@ -408,12 +415,14 @@ prompts. User-level paths (3 and 4) can collide with a plugin install
 symlink if `~/.config/opencode/oh-my-opencode-slim/` is symlinked to the
 plugin source.
 
-> **⚠️ Known limitation (#899):** If you set an inline `prompt` in a preset
-> and a prompt file exists for that agent, the inline prompt is silently
-> dropped in favor of the file. Until #899 is fixed, the file-based shared
-> prompt pattern above is the safe path: keep the prompt in the file, and
-> put only `model`/`variant` in the preset blocks. Do not mix an inline
-> `prompt` with a prompt file for the same agent.
+> **⚠️ Known limitation (#899):** Prompt files take precedence over inline
+> prompts everywhere — not just in presets, but also in root `agents`.
+> If you set an inline `prompt` in a preset or in root `agents` and a
+> prompt file exists for that agent, the inline prompt is silently dropped
+> in favor of the file. Until #899 is fixed, the file-based shared prompt
+> pattern above is the safe path: keep the prompt in the file, and put
+> only `model`/`variant` in the config. Do not mix an inline `prompt`
+> with a prompt file for the same agent.
 
 ### Custom Agents
 
