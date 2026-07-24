@@ -63,8 +63,13 @@ export function createCouncilAgent(
   customAppendPrompt?: string,
 ): AgentDefinition {
   const prompt =
-    resolvePrompt(COUNCIL_AGENT_PROMPT, customPrompt, customAppendPrompt) +
-    COUNCIL_SYNTHESIS_REINFORCEMENT;
+    resolvePrompt(
+      'council',
+      undefined,
+      customPrompt,
+      COUNCIL_AGENT_PROMPT,
+      customAppendPrompt,
+    ) + COUNCIL_SYNTHESIS_REINFORCEMENT;
 
   return {
     name: 'council',

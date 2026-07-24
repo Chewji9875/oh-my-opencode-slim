@@ -11,16 +11,26 @@ export interface AgentDefinition {
 }
 
 /**
- * Resolve agent prompt from base/custom/append inputs.
- * If customPrompt is provided, it replaces the base entirely.
- * If customAppendPrompt is provided, it appends after whichever base won.
+ * Resolve agent prompt from inline/file/append inputs.
+ *
+ * Precedence: inline prompt > file prompt > fallback. An explicit inline
+ * `override.prompt` wins over a `prompts/<agent>.md` file; the file is the
+ * shared default. `customAppendPrompt` always appends after whichever base
+ * won. Deterministic per session (construction-time only) — cache-safe.
  */
 export function resolvePrompt(
-  base: string,
-  customPrompt?: string,
+  agentName: string,
+  inlinePrompt: string | undefined,
+  filePrompt: string | undefined,
+  fallback: string,
   customAppendPrompt?: string,
 ): string {
-  const effectiveBase = customPrompt !== undefined ? customPrompt : base;
+  if (inlinePrompt !== undefined && filePrompt !== undefined) {
+    console.warn(
+      `[oh-my-opencode] Agent '${agentName}': inline prompt overrides prompt file (prompts/${agentName}.md). Remove the inline prompt to use the file.`,
+    );
+  }
+  const effectiveBase = inlinePrompt ?? filePrompt ?? fallback;
   return customAppendPrompt !== undefined
     ? `${effectiveBase}\n\n${customAppendPrompt}`
     : effectiveBase;
@@ -298,7 +308,13 @@ export function createOrchestratorAgent(
     excludeDescriptions,
     waitForUserEnabled,
   );
-  const prompt = resolvePrompt(basePrompt, customPrompt, customAppendPrompt);
+  const prompt = resolvePrompt(
+    'orchestrator',
+    undefined,
+    customPrompt,
+    basePrompt,
+    customAppendPrompt,
+  );
 
   const definition: AgentDefinition = {
     name: 'orchestrator',
