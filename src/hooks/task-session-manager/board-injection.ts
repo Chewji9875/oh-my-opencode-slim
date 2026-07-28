@@ -386,7 +386,10 @@ export async function injectBackgroundJobBoard(
     );
     if (!textPart || isInternalInitiatorPart(textPart)) return;
 
-    rememberInjectedTerminalJobs(state, message.info.sessionID);
+    const parentID = message.info.sessionID;
+    if (!state.terminalJobsInjectedByParent.has(parentID)) {
+      rememberInjectedTerminalJobs(state, parentID);
+    }
     // Append the board as its own trailing message rather than mutating
     // an existing user message. In long tool loops the latest user
     // message becomes deep history; rewriting it on board state changes
@@ -458,7 +461,9 @@ function injectCheckpointBoard(
         text: reminder,
       });
     }
-    rememberInjectedTerminalJobs(state, sessionID);
+    if (!state.terminalJobsInjectedByParent.has(sessionID)) {
+      rememberInjectedTerminalJobs(state, sessionID);
+    }
   }
 
   replayCheckpointBoard(

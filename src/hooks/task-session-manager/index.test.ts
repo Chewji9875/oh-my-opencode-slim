@@ -1409,7 +1409,9 @@ describe('task-session-manager hook', () => {
     });
     expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
 
-    // only first gets injected completion (via transform, no board inject)
+    // Full production sequence: transformMessages performs the message
+    // transform and injectBackgroundJobBoard. Only child-1 has a synthetic
+    // terminal result; child-2 is terminal through updateStatus only.
     const messages = {
       messages: [
         {
@@ -1430,8 +1432,15 @@ describe('task-session-manager hook', () => {
         },
       ],
     };
-    await hook['experimental.chat.messages.transform']({}, messages as never);
+    await transformMessages(hook, messages);
 
+    expect(boardText(messages)).toContain('child-2');
+    expect(boardText(messages)).toContain('completed, unreconciled');
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    // duplicate full production injection stays idempotent (narrow + gated broad)
+    await transformMessages(hook, messages);
     expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
     expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
 
@@ -1447,7 +1456,7 @@ describe('task-session-manager hook', () => {
       state: 'reconciled',
       terminalUnreconciled: false,
     });
-    // sibling not remembered via narrow path, stays unreconciled
+    // sibling not remembered via narrow; broad must not widen to it
     expect(board.get('child-2')).toMatchObject({
       state: 'completed',
       terminalUnreconciled: true,
