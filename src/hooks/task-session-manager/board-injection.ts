@@ -213,6 +213,13 @@ export function updateFromInjectedCompletion(
       result: status.result,
     });
     rememberProcessedInjectedCompletion(state, occurrenceId);
+    if (existing?.terminalUnreconciled && existing?.parentSessionID) {
+      rememberInjectedTerminalJob(
+        state,
+        existing.parentSessionID,
+        existing.taskID,
+      );
+    }
     return existing;
   }
 
@@ -227,6 +234,10 @@ export function updateFromInjectedCompletion(
     state.taskContextTracker,
   );
   if (!updated) return undefined;
+
+  if (updated.terminalUnreconciled && updated.parentSessionID) {
+    rememberInjectedTerminalJob(state, updated.parentSessionID, updated.taskID);
+  }
 
   log('[task-session-manager] processed injected background completion', {
     taskID: updated.taskID,
@@ -264,6 +275,27 @@ export function isMissingRememberedSessionError(output: string): boolean {
     firstLine.includes('session') &&
     (firstLine.includes('not found') || firstLine.includes('no session'))
   );
+}
+
+function rememberInjectedTerminalJob(
+  state: InjectionState,
+  parentSessionID: string,
+  taskID: string,
+): void {
+  if (!parentSessionID || !taskID) return;
+
+  const existing =
+    state.terminalJobsInjectedByParent.get(parentSessionID) ??
+    new Set<string>();
+  if (existing.has(taskID)) return;
+
+  existing.add(taskID);
+  state.terminalJobsInjectedByParent.set(parentSessionID, existing);
+
+  log('[task-session-manager] terminal job injected for reconciliation', {
+    parentSessionID,
+    taskID,
+  });
 }
 
 export function rememberInjectedTerminalJobs(

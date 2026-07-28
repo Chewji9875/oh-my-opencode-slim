@@ -1302,6 +1302,158 @@ describe('task-session-manager hook', () => {
     );
   });
 
+  test('injected completion through message transform (without injectBackgroundJobBoard) remains terminal-unreconciled before parent idle, then reconciles after', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          description: 'map hooks',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        output: ['task_id: child-1', 'state: running'].join('\n'),
+      },
+    );
+
+    const messages = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: map hooks</summary>',
+                '<task_result>',
+                'found hook flow',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    // through transform only, without injectBackgroundJobBoard (avoids broad remember)
+    await hook['experimental.chat.messages.transform']({}, messages as never);
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'found hook flow',
+    });
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    // duplicate occurrence is idempotent (no reprocess, no double remember)
+    await hook['experimental.chat.messages.transform']({}, messages as never);
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('another terminal-unreconciled sibling remains unreconciled when only first child completion was injected', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // setup child-1
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: { subagent_type: 'explorer', description: 'first' },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    // setup sibling child-2 (will be terminal via updateStatus, no injected completion)
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      {
+        args: { subagent_type: 'oracle', description: 'second' },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: child-2', 'state: running'].join('\n') },
+    );
+
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'sibling done',
+    });
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    // only first gets injected completion (via transform, no board inject)
+    const messages = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: first</summary>',
+                '<task_result>done1</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, messages as never);
+
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    // sibling not remembered via narrow path, stays unreconciled
+    expect(board.get('child-2')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+  });
+
   test('ignores non-synthetic user text that resembles task status', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
