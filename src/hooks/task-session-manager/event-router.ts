@@ -8,7 +8,10 @@
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import { log } from '../../utils/logger';
 import { isFailoverError } from '../foreground-fallback/index';
-import type { RetainedBoardSnapshotState } from './board-injection';
+import type {
+  InjectedTerminalJobs,
+  RetainedBoardSnapshotState,
+} from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 
 export async function handleEvent(
@@ -74,7 +77,7 @@ export async function handleEvent(
       clearSession(sessionID: string): void;
       prune(board: { taskIDs(): Set<string> }): void;
     };
-    terminalJobsInjectedByParent: Map<string, Set<string>>;
+    terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
   },
 ): Promise<void> {
@@ -171,7 +174,7 @@ export async function handleEvent(
         ? deps.options.shouldManageSession(sessionId)
         : false,
       terminalJobsPending: sessionId
-        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.size ?? 0)
+        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.taskIDs.size ?? 0)
         : 0,
       runningJobForSession: job?.state === 'running' || false,
     });

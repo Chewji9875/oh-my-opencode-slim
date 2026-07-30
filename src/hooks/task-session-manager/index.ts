@@ -9,6 +9,7 @@ import type { SessionLifecycle } from '../session-lifecycle';
 import { isUserMessageWithParts } from '../types';
 import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
+  type InjectedTerminalJobs,
   type InjectionState,
   injectBackgroundJobBoard,
   MAX_PROCESSED_INJECTED_COMPLETIONS,
@@ -83,7 +84,7 @@ export function createTaskSessionManagerHook(
 
   const processedInjectedCompletions = new Set<string>();
   const processedInjectedCompletionOrder: string[] = [];
-  const terminalJobsInjectedByParent = new Map<string, Set<string>>();
+  const terminalJobsInjectedByParent = new Map<string, InjectedTerminalJobs>();
 
   // Forward refs for circular deps — set after corresponding managers exist.
   // These are captured by closure in createIdleReconciler and only called
