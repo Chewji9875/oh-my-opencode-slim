@@ -767,12 +767,6 @@ describe('task-session-manager hook', () => {
 
   test('starts a new checkpoint cache epoch at the snapshot limit', async () => {
     const board = new BackgroundJobBoard();
-    board.registerLaunch({
-      taskID: 'child-1',
-      parentSessionID: 'parent-1',
-      agent: 'explorer',
-      description: 'map hooks',
-    });
     const { hook } = createHook({
       backgroundJobBoard: board,
       strategy: 'checkpoint-compatible',
@@ -780,9 +774,18 @@ describe('task-session-manager hook', () => {
 
     const history: string[] = ['root'];
     for (let turn = 0; turn < 20; turn += 1) {
+      // Register a distinct job for each turn
+      const taskID = `child-${turn}`;
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: `map hooks turn ${turn}`,
+      });
+      // Complete the job immediately
       board.updateStatus({
-        taskID: 'child-1',
-        state: turn % 2 === 0 ? 'completed' : 'error',
+        taskID,
+        state: 'completed',
         resultSummary: `result-${turn}`,
       });
       history.push(`turn-${turn}`);
@@ -797,8 +800,15 @@ describe('task-session-manager hook', () => {
     }
 
     history.push('epoch-2-turn-1');
+    // Register and complete first job in epoch 2
+    board.registerLaunch({
+      taskID: 'child-20',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks epoch 2 turn 1',
+    });
     board.updateStatus({
-      taskID: 'child-1',
+      taskID: 'child-20',
       state: 'completed',
       resultSummary: 'epoch-2-result-1',
     });
@@ -808,9 +818,16 @@ describe('task-session-manager hook', () => {
     expect(boardSnapshotIDs(epochStart)[0]).toEndWith(':20');
 
     history.push('epoch-2-turn-2');
+    // Register and complete second job in epoch 2
+    board.registerLaunch({
+      taskID: 'child-21',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks epoch 2 turn 2',
+    });
     board.updateStatus({
-      taskID: 'child-1',
-      state: 'error',
+      taskID: 'child-21',
+      state: 'completed',
       resultSummary: 'epoch-2-result-2',
     });
     const secondEpochRequest = createAnchoredMessages('parent-1', history);
