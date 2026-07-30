@@ -18,6 +18,7 @@ import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
+  DEFAULT_MAX_SESSION_DIRECTORIES,
   DEFAULT_MAX_SESSIONS_PER_AGENT,
   DEFAULT_READ_CONTEXT_MAX_FILES,
   DEFAULT_READ_CONTEXT_MIN_LINES,
@@ -972,6 +973,20 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionId = event.properties?.info?.id;
         const createdSessionDir = event.properties?.info?.directory;
         if (createdSessionId && createdSessionDir) {
+          // Guard against unbounded growth when session.deleted events
+          // are missed: evict the oldest entry when the threshold is
+          // reached, keeping both maps aligned.
+          if (sessionDirectories.size >= DEFAULT_MAX_SESSION_DIRECTORIES) {
+            const oldestId = sessionDirectories.keys().next().value;
+            if (oldestId !== undefined) {
+              sessionDirectories.delete(oldestId);
+              sessionAgentMap.delete(oldestId);
+              log('[session] evicted oldest session-directory mapping', {
+                threshold: DEFAULT_MAX_SESSION_DIRECTORIES,
+                droppedSessionId: oldestId,
+              });
+            }
+          }
           sessionDirectories.set(createdSessionId, createdSessionDir);
         }
       }
