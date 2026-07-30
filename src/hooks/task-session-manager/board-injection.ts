@@ -326,7 +326,7 @@ export function reconcileInjectedTerminalJobs(
   state.terminalJobsInjectedByParent.delete(parentSessionID);
 }
 
-export function reconcileConsumedTerminalJobs(
+function reconcileConsumedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
   promptShapeKey: string,
@@ -356,8 +356,6 @@ export async function injectBackgroundJobBoard(
     return;
   }
 
-  const shapeKey = promptShapeKey(realMessages(messages, state.metadataKey));
-
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (
@@ -381,6 +379,7 @@ export async function injectBackgroundJobBoard(
     );
     if (!textPart || isInternalInitiatorPart(textPart)) return;
 
+    const shapeKey = promptShapeKey(realMessages(messages, state.metadataKey));
     reconcileConsumedTerminalJobs(state, message.info.sessionID, shapeKey);
 
     const reminder = state.backgroundJobBoard.formatForPrompt(

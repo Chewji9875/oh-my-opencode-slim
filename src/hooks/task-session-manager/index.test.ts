@@ -2141,7 +2141,11 @@ describe('task-session-manager hook', () => {
       messages: [
         ...request1.messages,
         {
-          info: { role: 'assistant', agent: 'orchestrator', sessionID: 'parent-1' },
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
           parts: [
             { type: 'text', text: 'calling wait_for_user' },
             {
@@ -2186,17 +2190,11 @@ describe('task-session-manager hook', () => {
 
     const messages = createMessages('parent-1', 'continue');
 
-    // Transform the same message array twice (simulating a provider retry)
+    // Transform the same message array twice (simulating a provider
+    // retry). The second transform strips the previously-injected trailing
+    // board message automatically, then computes the same shape key.
     await transformMessages(hook, messages);
     const firstBoardText = boardText(messages);
-
-    // Clear the injected board to simulate a fresh transform
-    messages.messages = messages.messages.filter(
-      (msg) =>
-        !msg.parts?.some(
-          (part) => part.metadata?.['oh-my-opencode-slim.backgroundJobBoard'],
-        ),
-    );
 
     await transformMessages(hook, messages);
     const secondBoardText = boardText(messages);
@@ -2208,6 +2206,96 @@ describe('task-session-manager hook', () => {
       state: 'completed',
       terminalUnreconciled: true,
     });
+  });
+
+  test('reconciles when compaction preserves message and part counts', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    const surfacedRequest = {
+      messages: [
+        {
+          info: {
+            id: 'user-1',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'original user turn' }],
+        },
+        {
+          info: {
+            id: 'assistant-1',
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'older assistant content' }],
+        },
+      ],
+    };
+    const surfacedMessageCount = surfacedRequest.messages.length;
+    const surfacedPartCount = surfacedRequest.messages.flatMap(
+      (message) => message.parts,
+    ).length;
+
+    await transformMessages(hook, surfacedRequest);
+    expect(boardText(surfacedRequest)).toContain('completed, unreconciled');
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+
+    const compactedWithNewTurn = {
+      messages: [
+        {
+          info: {
+            id: 'user-1',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'original user turn' }],
+        },
+        {
+          info: {
+            id: 'assistant-2',
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            { type: 'text', text: 'new assistant turn after compaction' },
+          ],
+        },
+      ],
+    };
+
+    expect(compactedWithNewTurn.messages).toHaveLength(surfacedMessageCount);
+    expect(
+      compactedWithNewTurn.messages.flatMap((message) => message.parts),
+    ).toHaveLength(surfacedPartCount);
+
+    await transformMessages(hook, compactedWithNewTurn);
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(boardText(compactedWithNewTurn)).toContain('completed, reconciled');
+    expect(boardText(compactedWithNewTurn)).not.toContain('Result: approved');
   });
 
   test('stops re-announcing a completion across a run of requests', async () => {
@@ -2226,28 +2314,44 @@ describe('task-session-manager hook', () => {
       resultSummary: 'approved',
     });
 
-    // Drive 5 sequential transform calls, each appending one new assistant part
-    const messages = createMessages('parent-1', 'turn 1');
-    const resultLines: (boolean | undefined)[] = [];
-
-    for (let i = 1; i <= 5; i++) {
-      await transformMessages(hook, messages);
-      const board_text = boardText(messages);
-      const hasResult = board_text?.includes('Result: approved');
-      resultLines.push(hasResult);
-
-      // Append a new assistant message with one part for the next iteration
-      messages.messages.push({
-        info: { role: 'assistant', agent: 'orchestrator', sessionID: 'parent-1' },
-        parts: [{ type: 'text', text: `response ${i}` }],
-      });
+    // Build 5 explicit requests: the first carries only the user message,
+    // each subsequent one adds exactly one more assistant part. This makes
+    // it obvious which request is the "model has now reacted" boundary.
+    const userMessage = {
+      info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+      parts: [{ type: 'text', text: 'turn 1' }],
+    };
+    function buildRequest(assistantMessageCount: number) {
+      return {
+        messages: [
+          userMessage,
+          ...Array.from({ length: assistantMessageCount }, (_, i) => ({
+            info: {
+              role: 'assistant',
+              agent: 'orchestrator',
+              sessionID: 'parent-1',
+            },
+            parts: [{ type: 'text', text: `response ${i + 1}` }],
+          })),
+        ],
+      };
     }
 
-    // The Result line should appear in exactly one of the 5 boards (the first one)
+    const resultLines: boolean[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const request = buildRequest(i);
+      await transformMessages(hook, request);
+      const board_text = boardText(request);
+      resultLines.push(board_text?.includes('Result: approved') ?? false);
+    }
+
+    // The Result line should appear in exactly one board — the first one,
+    // where the shape key was first stored. Every later request carries a
+    // strictly larger shape, so the completion is reconciled.
     const resultCount = resultLines.filter((x) => x).length;
     expect(resultCount).toBe(1);
-    expect(resultLines[0]).toBe(true); // First one has the result
-    expect(resultLines[1]).toBe(false); // Subsequent ones don't
+    expect(resultLines[0]).toBe(true);
+    expect(resultLines[1]).toBe(false);
     expect(resultLines[2]).toBe(false);
     expect(resultLines[3]).toBe(false);
     expect(resultLines[4]).toBe(false);
@@ -2284,7 +2388,11 @@ describe('task-session-manager hook', () => {
       messages: [
         ...request1.messages,
         {
-          info: { role: 'assistant', agent: 'orchestrator', sessionID: 'parent-1' },
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
           parts: [{ type: 'text', text: 'response 1' }],
         },
       ],
@@ -2300,6 +2408,133 @@ describe('task-session-manager hook', () => {
     const snapshots2 = boardSnapshotIDs(request2);
     expect(snapshots2.length).toBeGreaterThan(snapshots1.length);
     expect(boardText(request2)).toContain('completed, reconciled');
+  });
+
+  test('reconciles all terminal jobs surfaced on the same prompt shape', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Two completions that arrive in the same request window
+    board.registerLaunch({
+      taskID: 'child-A',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan A',
+    });
+    board.registerLaunch({
+      taskID: 'child-B',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan B',
+    });
+    board.updateStatus({
+      taskID: 'child-A',
+      state: 'completed',
+      resultSummary: 'approved A',
+    });
+    board.updateStatus({
+      taskID: 'child-B',
+      state: 'completed',
+      resultSummary: 'approved B',
+    });
+
+    // Request 1: both jobs are surfaced and stored under the same prompt
+    // shape key. The union branch of rememberInjectedTerminalJobs keeps
+    // them together even if a second completion lands mid-request.
+    const request1 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request1);
+    expect(boardText(request1)).toContain('Result: approved A');
+    expect(boardText(request1)).toContain('Result: approved B');
+
+    // Request 2: same shape (no new part) — both jobs stay unreconciled
+    const request2 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request2);
+    expect(boardText(request2)).toContain('completed, unreconciled');
+    expect(board.get('child-A')).toMatchObject({ terminalUnreconciled: true });
+    expect(board.get('child-B')).toMatchObject({ terminalUnreconciled: true });
+
+    // Request 3: model added an assistant part — both jobs reconcile
+    // together because they share a stored prompt shape key.
+    const request3 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'acknowledged' }],
+        },
+      ],
+    };
+    await transformMessages(hook, request3);
+
+    expect(board.get('child-A')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-B')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('idle backstop is a no-op after shape-reconciliation already fired', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    // Request 1: surface the completion
+    const request1 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request1);
+    expect(board.get('child-1')).toMatchObject({ terminalUnreconciled: true });
+
+    // Request 2: model added a part, shape-reconciliation fires
+    const request2 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'thanks' }],
+        },
+      ],
+    };
+    await transformMessages(hook, request2);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+
+    // Session goes idle — the backstop fires but must not disturb the
+    // already-reconciled job (and must not error on a missing entry).
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
   });
 
   test('preserves injected terminal jobs for recoverable HTTP 400 errors', async () => {
