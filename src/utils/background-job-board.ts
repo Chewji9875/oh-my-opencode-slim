@@ -5,6 +5,7 @@ import {
   formatSystemReminder,
 } from '../config/constants';
 import type { BackgroundJobStore } from './background-job-store';
+import { log } from './logger';
 import { parseTaskStatusOutput, type TaskOutputState } from './task';
 
 export interface ContextFile {
@@ -121,7 +122,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   private notifyTerminalStateListeners(taskID: string): void {
     for (const listener of this.terminalStateListeners) {
-      listener(taskID);
+      try {
+        listener(taskID);
+      } catch (error) {
+        log('Board terminal state listener threw', {
+          taskID,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 

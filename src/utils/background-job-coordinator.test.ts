@@ -90,6 +90,32 @@ describe('BackgroundJobCoordinator', () => {
     expect(listener).not.toHaveBeenCalled();
   });
 
+  test('throws in one coordinator listener does not prevent subsequent listeners from receiving notification', () => {
+    const board = createMockBoard(true);
+    const coordinator = new BackgroundJobCoordinator(board);
+    const order: string[] = [];
+
+    coordinator.addTerminalStateListener(() => {
+      throw new Error('first listener failed');
+    });
+    coordinator.addTerminalStateListener(() => {
+      order.push('second');
+    });
+
+    // Defer the session
+    coordinator.deferIfRunning('ses_123');
+
+    // Simulate terminal state notification from board
+    board.getState.mockReturnValue('completed');
+    board.isRunning.mockReturnValue(false);
+
+    // Trigger handleTerminalState via board's listener callback
+    const boardListener = board.addTerminalStateListener.mock.calls[0]?.[0];
+    boardListener?.('ses_123');
+
+    expect(order).toEqual(['second']);
+  });
+
   test('full chain: board terminal → coordinator → listener for deferred job', () => {
     const board = new BackgroundJobBoard();
     const coordinator = new BackgroundJobCoordinator(board);
