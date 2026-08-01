@@ -120,10 +120,13 @@ export function minimumExpectedToolCount(
   disabledTools: readonly string[] = [],
   webfetchEnabled = true,
 ): number {
+  // Coerce explicitly: the plugin transpiler may skip default params when
+  // an argument is passed as undefined (arguments.length semantics).
+  const tools = Array.isArray(disabledTools) ? disabledTools : [];
   let count = HEALTH_CHECK.minTools;
   if (!webfetchEnabled) count -= 1;
   const disabledBaselineTools = new Set(
-    disabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
+    tools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
   );
   return count - disabledBaselineTools.size;
 }
@@ -291,9 +294,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const entries = Array.isArray(webfetchModel)
         ? webfetchModel
         : [webfetchModel];
-      type ModelRefInput =
-        | string
-        | { id: string; variant?: string };
+      type ModelRefInput = string | { id: string; variant?: string };
       const models: Array<{ id: string; variant?: string }> = [];
       for (const entry of entries as ModelRefInput[]) {
         const id = typeof entry === 'string' ? entry : entry.id;
@@ -520,7 +521,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     config.disabled_tools,
     config.webfetch?.enabled !== false,
   );
-
   if (
     agentCount < HEALTH_CHECK.minAgents ||
     toolCount < toolThreshold ||
