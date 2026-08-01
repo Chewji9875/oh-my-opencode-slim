@@ -8,17 +8,10 @@ Built-in Model Context Protocol (MCP) servers ship with oh-my-opencode-slim and 
 
 The plugin no longer ships a websearch MCP. OpenCode has a built-in `websearch` tool that replaces it, so you do not need an API key or an extra MCP server.
 
-Enable the built-in tool with these flags in your shell profile (fish example):
+Enable the built-in tool by setting these environment variables in your shell profile or launch command:
 
-```fish
-set -gx OPENCODE_ENABLE_EXA true
-set -gx OPENCODE_ENABLE_PARALLEL true
-```
-
-Or as a one-liner for a single run:
-
-```
-OPENCODE_ENABLE_EXA=true OPENCODE_ENABLE_PARALLEL=true opencode
+```sh
+env OPENCODE_ENABLE_EXA=true OPENCODE_ENABLE_PARALLEL=true opencode
 ```
 
 The built-in tool is Exa-backed (optionally Parallel), needs no API key, and is only available when using the `opencode` provider OR when those flags are set. Control access per agent with `permission: { "websearch": "allow" }` (all tools are allowed by default).
