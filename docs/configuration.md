@@ -469,7 +469,7 @@ The field accepts either:
       "model": "openai/gpt-5.5",
       "variant": "high",
       "skills": [],
-      "mcps": ["context7", "websearch"],
+      "mcps": ["context7", "gh_grep"],
       "permission": {
         "edit": "deny",
         "bash": {
@@ -479,7 +479,7 @@ The field accepts either:
           "grep *": "allow"
         },
         "webfetch": "allow",
-        "websearch": "allow",
+        "websearch": "allow", // opencode's built-in websearch tool, not a plugin MCP
         "task": "deny"
       },
       "prompt": "You are Planner. Create implementation plans only. Do not implement code."

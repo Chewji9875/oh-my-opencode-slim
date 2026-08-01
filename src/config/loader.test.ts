@@ -607,7 +607,7 @@ describe('deepMerge behavior', () => {
     fs.writeFileSync(
       path.join(userOpencodeDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
-        disabled_mcps: ['websearch'],
+        disabled_mcps: ['gh_grep'],
       }),
     );
 

@@ -78,7 +78,7 @@ setting the top-level `preset` field:
       "librarian": {
         "model": "opencode-go/deepseek-v4-flash",
         "variant": "high",
-        "mcps": ["websearch", "context7", "gh_grep"]
+        "mcps": ["context7", "gh_grep"]
       },
       "explorer": {
         "model": "opencode-go/deepseek-v4-flash",
@@ -101,7 +101,7 @@ setting the top-level `preset` field:
 
 ## Skill Reference
 
-This preset defines per-agent `skills` and `mcps` via `generateLiteConfig`. The generated config includes `skills: ["*"]` for Orchestrator and agent-specific MCP lists (e.g., Librarian gets `websearch`, `context7`, `gh_grep`).
+This preset defines per-agent `skills` and `mcps` via `generateLiteConfig`. The generated config includes `skills: ["*"]` for Orchestrator and agent-specific MCP lists (e.g., Librarian gets `context7`, `gh_grep`).
 
 | Skill | Description | Source |
 | --- | --- | --- |

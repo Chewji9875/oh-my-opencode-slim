@@ -80,7 +80,7 @@ describe('providers', () => {
     expect(agents.council).toBeUndefined();
     expect(agents.librarian.model).toBe('opencode-go/deepseek-v4-flash');
     expect(agents.librarian.variant).toBe('high');
-    expect(agents.librarian.mcps).toEqual(['websearch', 'context7', 'gh_grep']);
+    expect(agents.librarian.mcps).toEqual(['context7', 'gh_grep']);
     expect(agents.explorer.model).toBe('opencode-go/deepseek-v4-flash');
     expect(agents.explorer.variant).toBe('high');
     expect(agents.designer.model).toBe('opencode-go/kimi-k2.7-code');
@@ -205,7 +205,6 @@ describe('providers', () => {
 
     const agents = (config.presets as any).openai;
     expect(agents.orchestrator.mcps).toEqual(['*', '!context7']);
-    expect(agents.librarian.mcps).toContain('websearch');
     expect(agents.librarian.mcps).toContain('context7');
     expect(agents.librarian.mcps).toContain('gh_grep');
     expect(agents.designer.mcps).toEqual([]);

@@ -973,19 +973,6 @@
         }
       }
     },
-    "websearch": {
-      "type": "object",
-      "properties": {
-        "provider": {
-          "default": "exa",
-          "type": "string",
-          "enum": [
-            "exa",
-            "tavily"
-          ]
-        }
-      }
-    },
     "interview": {
       "type": "object",
       "properties": {

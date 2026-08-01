@@ -172,14 +172,8 @@ export const PresetSchema = z.record(z.string(), AgentOverrideConfigSchema);
 
 export type Preset = z.infer<typeof PresetSchema>;
 
-// Websearch provider configuration
-export const WebsearchConfigSchema = z.object({
-  provider: z.enum(['exa', 'tavily']).default('exa'),
-});
-export type WebsearchConfig = z.infer<typeof WebsearchConfigSchema>;
-
 // MCP names
-export const McpNameSchema = z.enum(['websearch', 'context7', 'gh_grep']);
+export const McpNameSchema = z.enum(['context7', 'gh_grep']);
 export type McpName = z.infer<typeof McpNameSchema>;
 
 export const InterviewConfigSchema = z.object({
@@ -416,7 +410,6 @@ export const PluginConfigSchema = z
       ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),
-    websearch: WebsearchConfigSchema.optional(),
     interview: InterviewConfigSchema.optional(),
     backgroundJobs: BackgroundJobsConfigSchema.optional(),
     fallback: FailoverConfigSchema.optional(),

@@ -48,7 +48,7 @@ oh-my-opencode-slim은 OpenCode용 에이전트 오케스트레이션 플러그�
 - **[프리셋 전환](docs/preset-switching.md)** - `/preset`으로 실행 중에 팀 전체의
   모델을 교체합니다.
 - **[코드 인텔리전스 도구](docs/tools.md)** - 25개 언어를 지원하는 LSP 도구와
-  AST 인식 검색, 웹 검색·문서·GitHub 코드 검색용 내장 MCP를 제공합니다.
+  AST 인식 검색, 문서·GitHub 코드 검색용 내장 MCP를 제공합니다.
 - **[완전한 사용자 지정](docs/configuration.md)** - 커스텀 에이전트, 프롬프트
   오버라이드, 에이전트별 스킬/MCP 권한 및
   [프로젝트 로컬 사용자 지정](docs/project-local-customization.md)을 지원합니다.
@@ -166,7 +166,7 @@ bun run build
     "openai": {
       "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
       "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["websearch", "context7", "gh_grep"] },
+      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
       "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
@@ -646,7 +646,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Background Orchestration](docs/background-orchestration.md)** | 네이티브 백그라운드 서브에이전트를 기반으로 한 스케줄러 우선 Orchestrator 모델 |
 | **[Maintainer Guide](docs/maintainers.md)** | 이슈 트리아지 규칙, 라벨 의미, 지원 라우팅, 저장소 유지보수 워크플로우 |
 | **[Skills](docs/skills.md)** | `simplify`, `codemap`, `clonedeps`, `deepwork`, `verification-planning`, `reflect`, `worktrees`, `oh-my-opencode-slim` 등 번들된 스킬 |
-| **[MCPs](docs/mcps.md)** | `websearch`, `context7`, `gh_grep` 및 에이전트별 MCP 권한 동작 방식 |
+| **[MCPs](docs/mcps.md)** | `context7`, `gh_grep` 및 에이전트별 MCP 권한 동작 방식 |
 | **[Tools](docs/tools.md)** | `webfetch`, LSP 도구, 코드 검색, 포매터 등 내장 도구 기능 |
 
 ### 💡 프리셋
