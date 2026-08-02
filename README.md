@@ -47,7 +47,7 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 - **[Preset switching](docs/preset-switching.md)** - swap the whole team's
   models at runtime with `/preset`.
 - **[Code intelligence tools](docs/tools.md)** - LSP tools, AST-aware search
-  across 25 languages, and built-in MCPs for web search, docs, and GitHub code
+  across 25 languages, and built-in MCPs for docs and GitHub code
   search.
 - **[Fully customizable](docs/configuration.md)** - custom agents, prompt
   overrides, per-agent skill/MCP permissions, and
@@ -174,7 +174,7 @@ The default generated configuration includes both `openai` and `opencode-go` pre
     "openai": {
       "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
       "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["websearch", "context7", "gh_grep"] },
+      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
       "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
@@ -666,7 +666,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Background Orchestration](docs/background-orchestration.md)** | Scheduler-first orchestrator model built around native background subagents |
 | **[Maintainer Guide](docs/maintainers.md)** | Issue triage rules, label meanings, support routing, and repo maintenance workflow |
 | **[Skills](docs/skills.md)** | Bundled skills such as `simplify`, `codemap`, `clonedeps`, `deepwork`, `verification-planning`, `reflect`, `worktrees`, and `oh-my-opencode-slim` |
-| **[MCPs](docs/mcps.md)** | `websearch`, `context7`, `gh_grep`, and how MCP permissions work per agent |
+| **[MCPs](docs/mcps.md)** | `context7`, `gh_grep`, and how MCP permissions work per agent |
 | **[Tools](docs/tools.md)** | Built-in tool capabilities like `webfetch`, LSP tools, code search, and formatters |
 
 ---

@@ -37,7 +37,7 @@ oh-my-opencode-slim は OpenCode 向けのエージェントオーケストレ�
 - **[Companion](docs/companion.md)** - 並列のバックグラウンド専門家を含む、稼働中のエージェントを表示する任意のフローティングデスクトップウィンドウです。
 - **[マルチプレクサー統合](docs/multiplexer-integration.md)** - Tmux、Zellij、Herdr、cmux、kitty のペインでエージェントの作業をライブ表示します。
 - **[プリセット切り替え](docs/preset-switching.md)** - `/preset` でチーム全体のモデルを実行時に切り替えます。
-- **[コードインテリジェンスツール](docs/tools.md)** - 25 言語対応の LSP、AST 対応検索、Web 検索・ドキュメント・GitHub コード検索用の組み込み MCP を提供します。
+- **[コードインテリジェンスツール](docs/tools.md)** - 25 言語対応の LSP、AST 対応検索、ドキュメント・GitHub コード検索用の組み込み MCP を提供します。
 - **[完全にカスタマイズ可能](docs/configuration.md)** - カスタムエージェント、プロンプト上書き、エージェントごとのスキル/MCP 権限、[プロジェクトローカルのカスタマイズ](docs/project-local-customization.md)に対応します。
 
 ### OpenAI GPT-5.6
@@ -155,7 +155,7 @@ bun run build
     "openai": {
       "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
       "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["websearch", "context7", "gh_grep"] },
+      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
       "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
@@ -625,7 +625,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Background Orchestration](docs/background-orchestration.md)** | ネイティブのバックグラウンドサブエージェントを中心にした、スケジューラー優先の Orchestrator モデル |
 | **[Maintainer Guide](docs/maintainers.md)** | Issue のトリアージルール、ラベルの意味、サポートの振り分け、リポジトリ運用ワークフロー |
 | **[Skills](docs/skills.md)** | `simplify`、`codemap`、`clonedeps`、`deepwork`、`verification-planning`、`reflect`、`worktrees`、`oh-my-opencode-slim` などの同梱スキル |
-| **[MCPs](docs/mcps.md)** | `websearch`、`context7`、`gh_grep`、およびエージェントごとの MCP 権限の仕組み |
+| **[MCPs](docs/mcps.md)** | `context7`、`gh_grep`、およびエージェントごとの MCP 権限の仕組み |
 | **[Tools](docs/tools.md)** | `webfetch`、LSP ツール、コード検索、フォーマッターなどの組み込みツール機能 |
 
 ### 💡 プリセット
