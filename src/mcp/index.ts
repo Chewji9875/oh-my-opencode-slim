@@ -16,9 +16,12 @@ const allBuiltinMcps: Record<McpName, McpConfig> = {
 export function createBuiltinMcps(
   disabledMcps: readonly string[] = [],
 ): Record<string, McpConfig> {
+  // Never trust the declared type of user-config-derived values at
+  // runtime; fall back to "nothing disabled" instead of throwing.
+  const safeDisabledMcps = Array.isArray(disabledMcps) ? disabledMcps : [];
   return Object.fromEntries(
     Object.entries(allBuiltinMcps).filter(
-      ([name]) => !disabledMcps.includes(name),
+      ([name]) => !safeDisabledMcps.includes(name),
     ),
   );
 }

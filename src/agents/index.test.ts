@@ -1166,3 +1166,64 @@ describe('AgentOverrideConfigSchema permission validation', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('getDisabledAgents with malformed config', () => {
+  test('falls back to DEFAULT_DISABLED_AGENTS when disabled_agents is not an array', () => {
+    const config: PluginConfig = {
+      disabled_agents: 'not-an-array' as any,
+    };
+    const disabled = getDisabledAgents(config);
+    const expected = getDisabledAgents(undefined);
+    expect(disabled).toEqual(expected);
+  });
+
+  test('falls back to DEFAULT_DISABLED_AGENTS when disabled_agents is an object', () => {
+    const config: PluginConfig = {
+      disabled_agents: { invalid: 'object' } as any,
+    };
+    const disabled = getDisabledAgents(config);
+    const expected = getDisabledAgents(undefined);
+    expect(disabled).toEqual(expected);
+  });
+
+  test('handles valid array normally', () => {
+    const config: PluginConfig = {
+      disabled_agents: ['explorer'],
+    };
+    const disabled = getDisabledAgents(config);
+    expect(disabled.has('explorer')).toBe(true);
+  });
+});
+
+describe('createAgents with malformed disabled_tools', () => {
+  test('does not throw when disabled_tools is not an array', () => {
+    const config: PluginConfig = {
+      disabled_tools: 'not-an-array' as any,
+    };
+    expect(() => createAgents(config)).not.toThrow();
+  });
+
+  test('does not throw when disabled_tools is an object', () => {
+    const config: PluginConfig = {
+      disabled_tools: {} as any,
+    };
+    expect(() => createAgents(config)).not.toThrow();
+  });
+
+  test('orchestrator is created with wait_for_user enabled when disabled_tools is malformed', () => {
+    const config: PluginConfig = {
+      disabled_tools: 'not-an-array' as any,
+    };
+    const agents = createAgents(config);
+    const orchestrator = agents.find((a) => a.name === 'orchestrator');
+    expect(orchestrator).toBeDefined();
+    // When disabled_tools is malformed (treated as empty array), wait_for_user
+    // should be enabled, which is reflected in the prompt text
+    expect(orchestrator?.config.prompt).toContain(
+      'call `wait_for_user` as your final tool action',
+    );
+    expect(orchestrator?.config.prompt).not.toContain(
+      '`wait_for_user` is disabled',
+    );
+  });
+});

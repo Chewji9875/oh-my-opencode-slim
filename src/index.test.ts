@@ -1,16 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import plugin, { minimumExpectedToolCount } from './index';
-
-describe('plugin health thresholds', () => {
-  test('accounts only for intentionally disabled baseline tools', () => {
-    expect(minimumExpectedToolCount()).toBe(5);
-    expect(minimumExpectedToolCount(['wait_for_user'])).toBe(4);
-    expect(minimumExpectedToolCount(['wait_for_user', 'wait_for_user'])).toBe(
-      4,
-    );
-    expect(minimumExpectedToolCount(['unknown_tool'])).toBe(5);
-  });
-});
+import plugin from './index';
 
 describe('plugin env disable', () => {
   let originalEnv: typeof process.env;

@@ -51,3 +51,39 @@ describe('skills permissions', () => {
     expect(wildcardPerms['*']).toBe('allow');
   });
 });
+
+describe('getSkillPermissionsForAgent with malformed disabledSkillNames', () => {
+  it('does not throw when disabledSkillNames is not an array', () => {
+    expect(() =>
+      getSkillPermissionsForAgent(
+        'orchestrator',
+        undefined,
+        'not-an-array' as any,
+      ),
+    ).not.toThrow();
+  });
+
+  it('treats non-array disabledSkillNames as empty array', () => {
+    const permsWithDisabled = getSkillPermissionsForAgent(
+      'orchestrator',
+      undefined,
+      ['simplify'],
+    );
+    const permsWithMalformed = getSkillPermissionsForAgent(
+      'orchestrator',
+      undefined,
+      'not-an-array' as any,
+    );
+    // When simplify is disabled, it should be explicitly denied
+    expect(permsWithDisabled.simplify).toBe('deny');
+    // When disabledSkillNames is malformed (treated as empty), simplify should be allowed
+    expect(permsWithMalformed['*']).toBe('allow');
+  });
+
+  it('handles object as disabledSkillNames gracefully', () => {
+    const perms = getSkillPermissionsForAgent('orchestrator', undefined, {
+      invalid: 'object',
+    } as any);
+    expect(perms['*']).toBe('allow');
+  });
+});

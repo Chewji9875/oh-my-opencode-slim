@@ -541,7 +541,10 @@ export function createAgents(
     undefined,
     disabled,
     councillorAgents.length > 0 ? ['council'] : undefined,
-    !config?.disabled_tools?.includes('wait_for_user'),
+    !(
+      Array.isArray(config?.disabled_tools) &&
+      config.disabled_tools.includes('wait_for_user')
+    ),
   );
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
@@ -756,8 +759,9 @@ export function getAgentConfigs(
  */
 export function getDisabledAgents(config?: PluginConfig): Set<string> {
   const userDisabled = config?.disabled_agents;
-  const disabledSource =
-    userDisabled !== undefined ? userDisabled : DEFAULT_DISABLED_AGENTS;
+  const disabledSource = Array.isArray(userDisabled)
+    ? userDisabled
+    : DEFAULT_DISABLED_AGENTS;
   const disabled = new Set<string>();
   for (const name of disabledSource) {
     if (!PROTECTED_AGENTS.has(name)) {
