@@ -16,10 +16,21 @@ export interface ContextFile {
   lastReadAt: number;
 }
 
+export interface BackgroundJobExecution {
+  taskID: string;
+  generation: number;
+}
+
+export interface BackgroundJobPromptMetadata {
+  text: string | undefined;
+  terminalUnreconciledTaskIDs: BackgroundJobExecution[];
+}
+
 export type BackgroundJobState = TaskOutputState | 'reconciled';
 
 export interface BackgroundJobRecord {
   taskID: string;
+  generation: number;
   parentSessionID: string;
   agent: string;
   description: string;
@@ -144,6 +155,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (existing) {
       const updated = {
         ...existing,
+        generation: existing.generation + 1,
         agent: input.agent || existing.agent,
         description: input.description || existing.description,
         objective: input.objective ?? existing.objective,
@@ -170,6 +182,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
+      generation: 1,
       parentSessionID: input.parentSessionID,
       agent: input.agent,
       description: input.description || `background ${input.agent} task`,
@@ -498,9 +511,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   formatForPromptWithMetadata(
     parentSessionID: string,
     _now?: number,
-  ):
-    | { text: string | undefined; terminalUnreconciledTaskIDs: string[] }
-    | undefined {
+  ): BackgroundJobPromptMetadata | undefined {
     const jobs = this.list(parentSessionID);
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
@@ -529,7 +540,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const terminalUnreconciledTaskIDs = active
       .filter((job) => job.terminalUnreconciled)
-      .map((job) => job.taskID);
+      .map(({ taskID, generation }) => ({ taskID, generation }));
 
     return { text, terminalUnreconciledTaskIDs };
   }

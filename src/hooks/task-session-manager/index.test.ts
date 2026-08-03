@@ -1477,6 +1477,74 @@ describe('task-session-manager hook', () => {
     });
   });
 
+  test('a later synthetic completion does not replace an older delivered terminal batch', async () => {
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 3 });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+    });
+
+    for (const taskID of ['child-1', 'child-2']) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: taskID,
+      });
+      board.updateStatus({ taskID, state: 'completed' });
+    }
+
+    // The first board payload records both executions as delivered.
+    await transformMessages(hook, createMessages('parent-1', 'first turn'));
+
+    board.registerLaunch({
+      taskID: 'child-3',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'child-3',
+    });
+    const laterCompletion = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'child-3-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-3" state="completed">',
+                '<summary>Background task completed: child-3</summary>',
+                '<task_result>done3</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    // Process the later synthetic completion without rendering a new board.
+    await hook['experimental.chat.messages.transform'](
+      {},
+      laterCompletion as never,
+    );
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    for (const taskID of ['child-1', 'child-2', 'child-3']) {
+      expect(board.get(taskID)).toMatchObject({
+        state: 'reconciled',
+        terminalUnreconciled: false,
+      });
+    }
+  });
+
   test('no-starvation latest pipeline: child-1 synthetic remembered; child-2 becomes terminal before idle; next full transform emits child-2 in board; idle reconciles both', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -1570,7 +1638,7 @@ describe('task-session-manager hook', () => {
       return {
         text: shapedText,
         terminalUnreconciledTaskIDs: m.terminalUnreconciledTaskIDs.filter(
-          (id: string) => id === 'child-1',
+          (execution) => execution.taskID === 'child-1',
         ),
       };
     };
@@ -1702,6 +1770,86 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-2')).toMatchObject({
       state: 'reconciled',
       terminalUnreconciled: false,
+    });
+  });
+
+  test('checkpoint replay does not reconcile a relaunch with the same task ID', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'first execution',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'completed' });
+
+    const firstRequest = createAnchoredMessages('parent-1', ['turn 1']);
+    await transformMessages(hook, firstRequest);
+    expect(boardSnapshotIDs(firstRequest)).toHaveLength(1);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 1,
+      terminalUnreconciled: true,
+    });
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+    expect(board.get('child-1')).toMatchObject({
+      generation: 1,
+      state: 'reconciled',
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'second execution',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'second result',
+    });
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      terminalUnreconciled: true,
+    });
+
+    // Hide the current board payload so only the stale generation-1 snapshot
+    // is delivered on this request.
+    board.formatForPromptWithMetadata = () => undefined;
+    const replayedRequest = createAnchoredMessages('parent-1', [
+      'turn 1',
+      'turn 2',
+    ]);
+    await transformMessages(hook, replayedRequest);
+    expect(boardSnapshotIDs(replayedRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'second result',
     });
   });
 

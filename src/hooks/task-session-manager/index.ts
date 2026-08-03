@@ -1,6 +1,7 @@
 import type { PluginInput } from '@opencode-ai/plugin';
 import {
   BackgroundJobBoard,
+  type BackgroundJobExecution,
   type BackgroundJobStore,
   isInternalInitiatorPart,
 } from '../../utils';
@@ -85,6 +86,10 @@ export function createTaskSessionManagerHook(
   const processedInjectedCompletions = new Set<string>();
   const processedInjectedCompletionOrder: string[] = [];
   const terminalJobsInjectedByParent = new Map<string, InjectedTerminalJobs>();
+  const pendingInjectedTerminalJobsByParent = new Map<
+    string,
+    Map<string, BackgroundJobExecution>
+  >();
 
   // Forward refs for circular deps — set after corresponding managers exist.
   // These are captured by closure in createIdleReconciler and only called
@@ -172,6 +177,7 @@ export function createTaskSessionManagerHook(
         backgroundJobBoard.clearParent(sessionId);
       }
       terminalJobsInjectedByParent.delete(sessionId);
+      pendingInjectedTerminalJobsByParent.delete(sessionId);
       injectionState.retainedBoardSnapshots.delete(sessionId);
       taskContextTracker.clearSession(sessionId);
       taskContextTracker.prune(backgroundJobBoard);
@@ -186,6 +192,7 @@ export function createTaskSessionManagerHook(
     processedInjectedCompletions,
     processedInjectedCompletionOrder,
     terminalJobsInjectedByParent,
+    pendingInjectedTerminalJobsByParent,
     maxProcessedInjectedCompletions: MAX_PROCESSED_INJECTED_COMPLETIONS,
     metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
     shouldManageSession: options.shouldManageSession,
@@ -335,6 +342,7 @@ export function createTaskSessionManagerHook(
         pendingCallTracker,
         taskContextTracker,
         terminalJobsInjectedByParent,
+        pendingInjectedTerminalJobsByParent,
         retainedBoardSnapshots: injectionState.retainedBoardSnapshots,
       }),
   };

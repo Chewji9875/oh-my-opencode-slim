@@ -9,6 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import type {
+  BackgroundJobExecution,
   BackgroundJobRecord,
   BackgroundJobStore,
   ContextFile,
@@ -49,7 +50,7 @@ type RetainedBoardSnapshot = {
   anchorKey: string;
   id: string;
   text: string;
-  terminalUnreconciledTaskIDs: string[];
+  terminalUnreconciledTaskIDs: BackgroundJobExecution[];
 };
 
 export type RetainedBoardSnapshotState = {
@@ -62,11 +63,8 @@ export type RetainedBoardSnapshotState = {
 // ── State shape ────────────────────────────────────────────────────────
 
 export type InjectedTerminalJobs = {
-  taskIDs: Set<string>;
-  /**
-   * Prompt shape when these task IDs were last surfaced to the model.
-   * Empty when a synthetic completion was processed before board injection.
-   */
+  executions: Map<string, BackgroundJobExecution>;
+  /** Prompt shape when these executions were last surfaced to the model. */
   promptShapeKey: string;
 };
 
@@ -77,6 +75,10 @@ export interface InjectionState {
   processedInjectedCompletions: Set<string>;
   processedInjectedCompletionOrder: string[];
   terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
+  pendingInjectedTerminalJobsByParent: Map<
+    string,
+    Map<string, BackgroundJobExecution>
+  >;
   maxProcessedInjectedCompletions: number;
   metadataKey: string;
   shouldManageSession: (sessionID: string) => boolean;
@@ -229,9 +231,10 @@ export function updateFromInjectedCompletion(
     });
     rememberProcessedInjectedCompletion(state, occurrenceId);
     if (existing?.terminalUnreconciled && existing?.parentSessionID) {
-      rememberInjectedTerminalJobs(state, existing.parentSessionID, [
-        existing.taskID,
-      ]);
+      rememberPendingInjectedTerminalJob(state, existing.parentSessionID, {
+        taskID: existing.taskID,
+        generation: existing.generation,
+      });
     }
     return existing;
   }
@@ -249,9 +252,10 @@ export function updateFromInjectedCompletion(
   if (!updated) return undefined;
 
   if (updated.terminalUnreconciled && updated.parentSessionID) {
-    rememberInjectedTerminalJobs(state, updated.parentSessionID, [
-      updated.taskID,
-    ]);
+    rememberPendingInjectedTerminalJob(state, updated.parentSessionID, {
+      taskID: updated.taskID,
+      generation: updated.generation,
+    });
   }
 
   log('[task-session-manager] processed injected background completion', {
@@ -292,36 +296,68 @@ export function isMissingRememberedSessionError(output: string): boolean {
   );
 }
 
+function executionKey(execution: BackgroundJobExecution): string {
+  return `${execution.taskID}\u001f${execution.generation}`;
+}
+
+function rememberPendingInjectedTerminalJob(
+  state: InjectionState,
+  parentSessionID: string,
+  execution: BackgroundJobExecution,
+): void {
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID) ??
+    new Map<string, BackgroundJobExecution>();
+  pending.set(executionKey(execution), { ...execution });
+  state.pendingInjectedTerminalJobsByParent.set(parentSessionID, pending);
+}
+
 export function rememberInjectedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
-  taskIDs: readonly string[],
-  promptShapeKey = '',
+  executions: readonly BackgroundJobExecution[],
+  promptShapeKey: string,
 ): void {
-  if (!parentSessionID || !taskIDs || taskIDs.length === 0) return;
+  if (!parentSessionID || executions.length === 0) return;
 
-  const uniqueTaskIDs = [...new Set(taskIDs)].filter(Boolean);
-  if (uniqueTaskIDs.length === 0) return;
+  const uniqueExecutions = new Map(
+    executions.map((execution) => [executionKey(execution), execution]),
+  );
+  if (uniqueExecutions.size === 0) return;
 
   const existing = state.terminalJobsInjectedByParent.get(parentSessionID);
   if (existing && existing.promptShapeKey === promptShapeKey) {
-    // Same prompt shape: union the IDs delivered by each payload.
-    for (const taskID of uniqueTaskIDs) {
-      existing.taskIDs.add(taskID);
+    // Same prompt shape: union the executions delivered by each payload.
+    for (const [key, execution] of uniqueExecutions) {
+      existing.executions.set(key, { ...execution });
     }
   } else {
     // A different shape is normally reconciled before this point. Replace
-    // the entry defensively so IDs from an older payload cannot leak into the
-    // new delivered batch.
+    // the entry defensively so executions from an older payload cannot leak
+    // into the new delivered batch.
     state.terminalJobsInjectedByParent.set(parentSessionID, {
-      taskIDs: new Set(uniqueTaskIDs),
+      executions: new Map(
+        [...uniqueExecutions].map(([key, execution]) => [
+          key,
+          { ...execution },
+        ]),
+      ),
       promptShapeKey,
     });
   }
 
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID);
+  if (pending) {
+    for (const key of uniqueExecutions.keys()) pending.delete(key);
+    if (pending.size === 0) {
+      state.pendingInjectedTerminalJobsByParent.delete(parentSessionID);
+    }
+  }
+
   log('[task-session-manager] terminal jobs injected for reconciliation', {
     parentSessionID,
-    taskIDs: uniqueTaskIDs,
+    executions: [...uniqueExecutions.values()],
     promptShapeKey,
   });
 }
@@ -331,17 +367,37 @@ export function reconcileInjectedTerminalJobs(
   parentSessionID: string,
 ): void {
   const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
-  if (!entry) return;
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID);
+  if (!entry && !pending) return;
+
+  const executions = new Map<string, BackgroundJobExecution>();
+  for (const [key, execution] of entry?.executions ?? []) {
+    executions.set(key, execution);
+  }
+  for (const [key, execution] of pending ?? []) {
+    executions.set(key, execution);
+  }
 
   log('[task-session-manager] reconciling injected terminal jobs', {
     parentSessionID,
-    taskIDs: [...entry.taskIDs],
+    executions: [...executions.values()],
   });
 
-  for (const taskID of entry.taskIDs) {
-    state.backgroundJobBoard.markReconciled(taskID);
+  for (const execution of executions.values()) {
+    const current = state.backgroundJobBoard.get(execution.taskID);
+    if (!current || current.generation !== execution.generation) {
+      log('[task-session-manager] skipped stale terminal execution', {
+        parentSessionID,
+        execution,
+        currentGeneration: current?.generation,
+      });
+      continue;
+    }
+    state.backgroundJobBoard.markReconciled(execution.taskID);
   }
   state.terminalJobsInjectedByParent.delete(parentSessionID);
+  state.pendingInjectedTerminalJobsByParent.delete(parentSessionID);
 }
 
 function reconcileConsumedTerminalJobs(
@@ -350,13 +406,7 @@ function reconcileConsumedTerminalJobs(
   promptShapeKey: string,
 ): void {
   const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
-  if (
-    !entry ||
-    entry.promptShapeKey === '' ||
-    entry.promptShapeKey === promptShapeKey
-  ) {
-    return;
-  }
+  if (!entry || entry.promptShapeKey === promptShapeKey) return;
   // The model produced at least one new part after the request that carried
   // these completions, so it has consumed them. Stop re-announcing.
   reconcileInjectedTerminalJobs(state, parentSessionID);
@@ -676,7 +726,7 @@ function replayBoardSnapshots(
   sessionID: string,
   snapshotState: RetainedBoardSnapshotState,
   metadataKey: string,
-): string[] {
+): BackgroundJobExecution[] {
   const realMessageList = realMessages(messages, metadataKey);
   const currentAnchorKeys = messageAnchorKeys(realMessageList);
   const snapshotsByAnchor = new Map<string, RetainedBoardSnapshot[]>();
@@ -693,7 +743,7 @@ function replayBoardSnapshots(
   );
 
   const rebuiltMessages: unknown[] = [];
-  const replayedIDs: string[] = [];
+  const replayedIDs: BackgroundJobExecution[] = [];
   let realMessageIndex = 0;
   for (const message of messages) {
     rebuiltMessages.push(message);
@@ -731,7 +781,7 @@ function replayCheckpointBoard(
   sessionID: string,
   snapshotState: RetainedBoardSnapshotState,
   metadataKey: string,
-): string[] {
+): BackgroundJobExecution[] {
   stripTaggedContent(messages, metadataKey);
   const ids = replayBoardSnapshots(
     messages,

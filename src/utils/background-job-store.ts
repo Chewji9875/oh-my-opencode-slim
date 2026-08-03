@@ -1,5 +1,6 @@
 import type {
   BackgroundJobLaunchInput,
+  BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
@@ -70,9 +71,7 @@ export interface BackgroundJobStore {
   formatForPromptWithMetadata(
     parentSessionID: string,
     now?: number,
-  ):
-    | { text: string | undefined; terminalUnreconciledTaskIDs: string[] }
-    | undefined;
+  ): BackgroundJobPromptMetadata | undefined;
 
   // ── Lifecycle policy ─────────────────────────────────────────────
   /** Evaluate close policy. Returns true if session should close now.

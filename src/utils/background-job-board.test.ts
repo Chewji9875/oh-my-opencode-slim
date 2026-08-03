@@ -166,8 +166,15 @@ describe('BackgroundJobBoard', () => {
     const metadata = board.formatForPromptWithMetadata('parent-1');
 
     expect(metadata?.text).toBe(board.formatForPrompt('parent-1'));
-    expect(metadata?.terminalUnreconciledTaskIDs).toEqual(['ses_1', 'ses_2']);
-    expect(metadata?.terminalUnreconciledTaskIDs).not.toContain('ses_other');
+    expect(metadata?.terminalUnreconciledTaskIDs).toEqual([
+      { taskID: 'ses_1', generation: 1 },
+      { taskID: 'ses_2', generation: 1 },
+    ]);
+    expect(
+      metadata?.terminalUnreconciledTaskIDs.some(
+        (execution) => execution.taskID === 'ses_other',
+      ),
+    ).toBe(false);
   });
 
   test('escapes dynamic job content inside system reminders', () => {
