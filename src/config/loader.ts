@@ -3,7 +3,11 @@ import * as path from 'node:path';
 import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
-import { type PluginConfig, PluginConfigSchema } from './schema';
+import {
+  type PluginConfig,
+  PluginConfigSchema,
+  WebfetchConfigSchema,
+} from './schema';
 
 /**
  * Warning kinds produced during config loading.
@@ -139,6 +143,26 @@ function loadConfigFromPath(
         console.warn(result.error.format());
       }
       return null;
+    }
+
+    // Zod applies webfetch.enabled's default while parsing each layer. Keep
+    // that default from masquerading as an explicitly configured override;
+    // the merged webfetch config is normalized after all layers are merged.
+    if (
+      result.data.webfetch &&
+      typeof rawConfig === 'object' &&
+      rawConfig !== null &&
+      'webfetch' in rawConfig &&
+      typeof rawConfig.webfetch === 'object' &&
+      rawConfig.webfetch !== null &&
+      !Array.isArray(rawConfig.webfetch) &&
+      !Object.hasOwn(rawConfig.webfetch, 'enabled')
+    ) {
+      const { enabled: _enabled, ...webfetch } = result.data.webfetch;
+      return {
+        ...result.data,
+        webfetch: webfetch as PluginConfig['webfetch'],
+      };
     }
 
     return result.data;
@@ -283,6 +307,10 @@ export function mergePluginConfigs(
     backgroundJobs: deepMerge(base.backgroundJobs, override.backgroundJobs),
     fallback: deepMerge(base.fallback, override.fallback),
     council: deepMerge(base.council, override.council),
+    webfetch: deepMerge(
+      base.webfetch as Record<string, unknown> | undefined,
+      override.webfetch as Record<string, unknown> | undefined,
+    ) as PluginConfig['webfetch'],
     acpAgents: deepMerge(base.acpAgents, override.acpAgents),
     companion: deepMerge(
       base.companion as Record<string, unknown> | undefined,
@@ -362,6 +390,10 @@ export function loadPluginConfig(
     : null;
   if (projectConfig) {
     config = mergePluginConfigs(config, projectConfig);
+  }
+
+  if (config.webfetch) {
+    config.webfetch = WebfetchConfigSchema.parse(config.webfetch);
   }
 
   // Override preset from environment variable if set

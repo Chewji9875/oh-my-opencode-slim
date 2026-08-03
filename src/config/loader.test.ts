@@ -66,6 +66,60 @@ describe('loadPluginConfig', () => {
     expect(config.autoUpdate).toBe(false);
   });
 
+  test('deep-merges webfetch settings across user and project configs', () => {
+    const userConfigPath = path.join(userConfigDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        webfetch: { model: 'user/provider-model' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        webfetch: { enabled: true },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir, { silent: true });
+
+    expect(config.webfetch).toEqual({
+      enabled: true,
+      model: 'user/provider-model',
+    });
+  });
+
+  test('does not let a defaulted project webfetch enabled override user false', () => {
+    const userConfigPath = path.join(userConfigDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        webfetch: { enabled: false },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        webfetch: { model: 'project/provider-model' },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir, { silent: true });
+
+    expect(config.webfetch).toEqual({
+      enabled: false,
+      model: 'project/provider-model',
+    });
+  });
+
   test('validates auto image routing after project enables Observer', () => {
     const userConfigPath = path.join(userConfigDir, 'opencode');
     const projectDir = path.join(tempDir, 'project');
