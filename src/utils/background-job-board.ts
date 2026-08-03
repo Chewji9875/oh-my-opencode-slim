@@ -495,7 +495,12 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return errors >= threshold || timeouts >= threshold;
   }
 
-  formatForPrompt(parentSessionID: string, _now?: number): string | undefined {
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    _now?: number,
+  ):
+    | { text: string | undefined; terminalUnreconciledTaskIDs: string[] }
+    | undefined {
     const jobs = this.list(parentSessionID);
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
@@ -504,7 +509,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     if (active.length === 0 && reusable.length === 0) return undefined;
 
-    return formatSystemReminder(
+    const text = formatSystemReminder(
       [
         '### Background Job Board',
         'SENTINEL: background-job-board-v2',
@@ -521,6 +526,16 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : ['- none']),
       ].join('\n'),
     );
+
+    const terminalUnreconciledTaskIDs = active
+      .filter((job) => job.terminalUnreconciled)
+      .map((job) => job.taskID);
+
+    return { text, terminalUnreconciledTaskIDs };
+  }
+
+  formatForPrompt(parentSessionID: string, now?: number): string | undefined {
+    return this.formatForPromptWithMetadata(parentSessionID, now)?.text;
   }
 
   clearParent(parentSessionID: string): void {

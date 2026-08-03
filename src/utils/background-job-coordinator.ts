@@ -236,6 +236,15 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     return this.board.formatForPrompt(parentSessionID, now);
   }
 
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now = Date.now(),
+  ):
+    | { text: string | undefined; terminalUnreconciledTaskIDs: string[] }
+    | undefined {
+    return this.board.formatForPromptWithMetadata(parentSessionID, now);
+  }
+
   clearParent(parentSessionID: string): void {
     this.board.clearParent(parentSessionID);
   }

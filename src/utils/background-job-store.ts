@@ -67,6 +67,12 @@ export interface BackgroundJobStore {
   hasTerminalUnreconciled(parentSessionID: string): boolean;
   hasConvergenceSignals(taskID: string, threshold?: number): boolean;
   formatForPrompt(parentSessionID: string, now?: number): string | undefined;
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now?: number,
+  ):
+    | { text: string | undefined; terminalUnreconciledTaskIDs: string[] }
+    | undefined;
 
   // ── Lifecycle policy ─────────────────────────────────────────────
   /** Evaluate close policy. Returns true if session should close now.
