@@ -90,6 +90,55 @@ function createContinuationHook(options?: HookOptions) {
   });
 }
 
+function createContinuationSessionClient(
+  promptAsync: unknown,
+  overrides?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    todo: mock(async () => ({ data: [{ status: 'in_progress' }] })),
+    children: mock(async () => ({ data: [] })),
+    status: mock(async () => ({ data: {} })),
+    promptAsync,
+    ...overrides,
+  };
+}
+
+function createRuntimeUserTurn(options: {
+  sessionID?: string;
+  messageID: string;
+  providerID: string;
+  modelID: string;
+  variant?: string;
+}) {
+  const sessionID = options.sessionID ?? 'parent-1';
+  const model = {
+    providerID: options.providerID,
+    modelID: options.modelID,
+  };
+  const parts = [{ type: 'text', text: 'continue with this model' }];
+  return {
+    input: {
+      sessionID,
+      messageID: options.messageID,
+      model,
+      ...(options.variant ? { variant: options.variant } : {}),
+      parts,
+    },
+    output: {
+      message: {
+        id: options.messageID,
+        sessionID,
+        role: 'user' as const,
+        model: {
+          ...model,
+          ...(options.variant ? { variant: options.variant } : {}),
+        },
+      },
+      parts,
+    },
+  };
+}
+
 function createMessages(sessionID: string, text = 'user message') {
   return {
     messages: [
@@ -4741,6 +4790,236 @@ describe('task-session-manager hook', () => {
         }),
       }),
     );
+  });
+
+  test('preserves the current session model and variant on continuation nudges', async () => {
+    const promptAsync = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: {
+        model: {
+          providerID: 'runtime-provider',
+          id: 'selected-model',
+          variant: 'selected-variant',
+        },
+      },
+    }));
+    const { hook } = createContinuationHook({
+      idleReconcileDelayMs: 0,
+      sessionClient: createContinuationSessionClient(promptAsync, {
+        get,
+      }),
+    });
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+
+    expect(get).toHaveBeenCalledWith({
+      path: { id: 'parent-1' },
+      throwOnError: true,
+    });
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
+      }),
+    );
+  });
+
+  test('falls back to the latest external user model when session lookup fails', async () => {
+    const promptAsync = mock(async () => ({}));
+    const userTurn = createRuntimeUserTurn({
+      messageID: 'user-1',
+      providerID: 'runtime-provider',
+      modelID: 'selected-model',
+      variant: 'selected-variant',
+    });
+    const { hook } = createContinuationHook({
+      idleReconcileDelayMs: 0,
+      sessionClient: createContinuationSessionClient(promptAsync, {
+        get: mock(async () => {
+          throw new Error('session lookup unavailable');
+        }),
+      }),
+    });
+
+    hook.observeChatMessage(
+      {
+        sessionID: userTurn.input.sessionID,
+        messageID: userTurn.input.messageID,
+        parts: userTurn.input.parts,
+      },
+      userTurn.output,
+    );
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
+      }),
+    );
+  });
+
+  test('treats a current session model without variant as authoritative', async () => {
+    const promptAsync = mock(async (_input: unknown) => ({}));
+    const { hook } = createContinuationHook({
+      idleReconcileDelayMs: 0,
+      sessionClient: createContinuationSessionClient(promptAsync, {
+        get: mock(async () => ({
+          data: {
+            model: {
+              providerID: 'current-provider',
+              id: 'current-model',
+            },
+          },
+        })),
+      }),
+    });
+    const previousTurn = createRuntimeUserTurn({
+      messageID: 'user-1',
+      providerID: 'previous-provider',
+      modelID: 'previous-model',
+      variant: 'previous-variant',
+    });
+    hook.observeChatMessage(previousTurn.input, previousTurn.output);
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+
+    const request = promptAsync.mock.calls[0]?.[0] as {
+      body: Record<string, unknown>;
+    };
+    expect(request.body.model).toEqual({
+      providerID: 'current-provider',
+      modelID: 'current-model',
+    });
+    expect(request.body).not.toHaveProperty('variant');
+  });
+
+  test('only external messages replace the model fallback and clear its variant', async () => {
+    const promptAsync = mock(async (_input: unknown) => ({}));
+    const { hook } = createContinuationHook({
+      idleReconcileDelayMs: 0,
+      sessionClient: createContinuationSessionClient(promptAsync),
+    });
+    const selectedTurn = createRuntimeUserTurn({
+      messageID: 'user-1',
+      providerID: 'selected-provider',
+      modelID: 'selected-model',
+      variant: 'selected-variant',
+    });
+    hook.observeChatMessage(selectedTurn.input, selectedTurn.output);
+    const newTurn = createRuntimeUserTurn({
+      messageID: 'user-2',
+      providerID: 'new-provider',
+      modelID: 'new-model',
+    });
+    hook.observeChatMessage(newTurn.input, newTurn.output);
+    hook.observeChatMessage(
+      {
+        sessionID: 'parent-1',
+        messageID: 'synthetic-1',
+        model: { providerID: 'static-provider', modelID: 'static-model' },
+        variant: 'static-variant',
+      },
+      {
+        message: {
+          id: 'synthetic-1',
+          sessionID: 'parent-1',
+          role: 'user',
+        },
+        parts: [
+          {
+            type: 'text',
+            text: 'synthetic continuation',
+            synthetic: true,
+          },
+        ],
+      },
+    );
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+
+    const request = promptAsync.mock.calls[0]?.[0] as {
+      body: Record<string, unknown>;
+    };
+    expect(request.body.model).toEqual({
+      providerID: 'new-provider',
+      modelID: 'new-model',
+    });
+    expect(request.body).not.toHaveProperty('variant');
+  });
+
+  test('a user message invalidates continuation while current model lookup is pending', async () => {
+    let resolveGet!: (value: {
+      data: {
+        model: { providerID: string; id: string; variant: string };
+      };
+    }) => void;
+    const get = mock(
+      () =>
+        new Promise<{
+          data: {
+            model: { providerID: string; id: string; variant: string };
+          };
+        }>((resolve) => {
+          resolveGet = resolve;
+        }),
+    );
+    const promptAsync = mock(async () => ({}));
+    const { hook } = createContinuationHook({
+      idleReconcileDelayMs: 0,
+      sessionClient: createContinuationSessionClient(promptAsync, {
+        get,
+      }),
+    });
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+    expect(get).toHaveBeenCalledTimes(1);
+
+    const newTurn = createRuntimeUserTurn({
+      messageID: 'user-2',
+      providerID: 'new-provider',
+      modelID: 'new-model',
+    });
+    hook.observeChatMessage(newTurn.input, newTurn.output);
+    resolveGet({
+      data: {
+        model: {
+          providerID: 'stale-provider',
+          id: 'stale-model',
+          variant: 'stale-variant',
+        },
+      },
+    });
+    await flushContinuation();
+
+    expect(promptAsync).not.toHaveBeenCalled();
   });
 
   test('paired idle events submit at most one continuation', async () => {

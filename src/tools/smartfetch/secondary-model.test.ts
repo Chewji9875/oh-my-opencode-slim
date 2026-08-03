@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { _testConfig, runSecondaryModelWithFallback } from './secondary-model';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  _testConfig,
+  readSecondaryModelFromConfig,
+  runSecondaryModelWithFallback,
+} from './secondary-model';
 import type { SecondaryModel } from './types';
 
 type PromptStep = {
@@ -54,6 +61,51 @@ describe('smartfetch/secondary-model', () => {
 
   afterEach(() => {
     mock.restore();
+  });
+
+  test('gives dedicated webfetch models precedence over fallback sources', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smartfetch-test-'));
+    const projectConfigDir = path.join(tempDir, '.opencode');
+    const userConfigDir = path.join(tempDir, 'user-config');
+    const originalEnv = { ...process.env };
+
+    try {
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.mkdirSync(path.join(userConfigDir, 'opencode'), { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'opencode.json'),
+        JSON.stringify({ small_model: 'small/provider-model' }),
+      );
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          agents: {
+            explorer: { model: 'explorer/provider-model' },
+            librarian: { model: 'librarian/provider-model' },
+          },
+        }),
+      );
+      delete process.env.OPENCODE_CONFIG_DIR;
+      process.env.XDG_CONFIG_HOME = userConfigDir;
+
+      await expect(
+        readSecondaryModelFromConfig(tempDir, [
+          { id: 'dedicated/provider-model', variant: 'fast' },
+        ]),
+      ).resolves.toEqual([
+        {
+          providerID: 'dedicated',
+          modelID: 'provider-model',
+          variant: 'fast',
+        },
+        { providerID: 'small', modelID: 'provider-model' },
+        { providerID: 'explorer', modelID: 'provider-model' },
+        { providerID: 'librarian', modelID: 'provider-model' },
+      ]);
+    } finally {
+      process.env = originalEnv;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   test('falls back when the first model returns empty text', async () => {

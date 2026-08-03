@@ -11,6 +11,7 @@ The directory follows a **Facade + Strategy** pattern where `index.ts` acts as t
 - **index.ts**: Main facade that wires hooks into OpenCode's lifecycle and coordinates between the job board, pending calls, task context tracking, and explicit user waits. Implements the plugin hook interface (`tool.execute.before`, `tool.execute.after`, `experimental.chat.messages.transform`, `event`) and exposes `beginUserWait()` to the `wait_for_user` tool.
 - **input-wait-tracker.ts**: Provides the single `hasInputWait()` seam used by idle reconciliation and continuation evaluation. It combines local question/permission waits with the process-global explicit user-wait latch.
 - **continuation-attempt-gate.ts**: Owns process-global continuation epochs, reservations, and explicit user waits across hook recreation. The wait is encoded as an `attempts` sentinel so pre-upgrade #856 hooks sharing the store also fail closed. Distinct external user-message identity rearms both states.
+- **continuation-model-selection.ts**: Normalizes current-session and chat-hook model shapes before forwarding runtime model and variant choices to idle continuation prompts.
 - **pending-call-tracker.ts**: Tracks in-flight task calls using a capped ordered map (`MAX_PENDING_TASK_CALLS`) to correlate launch output safely. Provides call ID generation, storage, retrieval, and cleanup for pending task invocations.
 - **task-context-tracker.ts**: Manages read context from child sessions with line-count and file caps. Stores context per task ID and provides pruning to prevent unbounded growth.
 
