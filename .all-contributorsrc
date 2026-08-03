@@ -812,6 +812,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "Max-Null",
+      "name": "Max-Null",
+      "avatar_url": "https://avatars.githubusercontent.com/u/24647158?v=4",
+      "profile": "https://github.com/Max-Null",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
