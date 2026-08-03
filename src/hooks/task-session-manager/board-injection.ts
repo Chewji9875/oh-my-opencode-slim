@@ -7,6 +7,7 @@
  * All injection logic must go through the cache-safe helpers in
  * ../cache-safe-injection.ts to ensure prompt cache safety.
  */
+import { createHash } from 'node:crypto';
 import type {
   BackgroundJobRecord,
   BackgroundJobStore,
@@ -59,13 +60,19 @@ export type RetainedBoardSnapshotState = {
 
 // ── State shape ────────────────────────────────────────────────────────
 
+export type InjectedTerminalJobs = {
+  taskIDs: Set<string>;
+  /** Prompt shape when these task IDs were last surfaced to the model. */
+  promptShapeKey: string;
+};
+
 export interface InjectionState {
   backgroundJobBoard: BackgroundJobStore;
   maxRetainedSnapshots: number;
   strategy: 'latest' | 'checkpoint-compatible';
   processedInjectedCompletions: Set<string>;
   processedInjectedCompletionOrder: string[];
-  terminalJobsInjectedByParent: Map<string, Set<string>>;
+  terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
   maxProcessedInjectedCompletions: number;
   metadataKey: string;
   shouldManageSession: (sessionID: string) => boolean;
@@ -85,6 +92,10 @@ function djb2Hash(str: string): string {
     hash = (hash << 5) + hash + str.charCodeAt(i);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function sha256Hash(str: string): string {
+  return createHash('sha256').update(str).digest('hex');
 }
 
 function createOccurrenceId(
@@ -269,6 +280,7 @@ export function isMissingRememberedSessionError(output: string): boolean {
 export function rememberInjectedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
+  promptShapeKey: string,
 ): void {
   const taskIDs = state.backgroundJobBoard
     .list(parentSessionID)
@@ -281,31 +293,49 @@ export function rememberInjectedTerminalJobs(
     taskIDs,
   });
 
-  const existing =
-    state.terminalJobsInjectedByParent.get(parentSessionID) ??
-    new Set<string>();
-  for (const taskID of taskIDs) {
-    existing.add(taskID);
+  const existing = state.terminalJobsInjectedByParent.get(parentSessionID);
+  if (existing && existing.promptShapeKey === promptShapeKey) {
+    // Same prompt shape: union the task IDs into the existing set
+    for (const taskID of taskIDs) {
+      existing.taskIDs.add(taskID);
+    }
+  } else {
+    // Different prompt shape or new entry: overwrite
+    state.terminalJobsInjectedByParent.set(parentSessionID, {
+      taskIDs: new Set(taskIDs),
+      promptShapeKey,
+    });
   }
-  state.terminalJobsInjectedByParent.set(parentSessionID, existing);
 }
 
 export function reconcileInjectedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
 ): void {
-  const taskIDs = state.terminalJobsInjectedByParent.get(parentSessionID);
-  if (!taskIDs) return;
+  const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
+  if (!entry) return;
 
   log('[task-session-manager] reconciling injected terminal jobs', {
     parentSessionID,
-    taskIDs: [...taskIDs],
+    taskIDs: [...entry.taskIDs],
   });
 
-  for (const taskID of taskIDs) {
+  for (const taskID of entry.taskIDs) {
     state.backgroundJobBoard.markReconciled(taskID);
   }
   state.terminalJobsInjectedByParent.delete(parentSessionID);
+}
+
+function reconcileConsumedTerminalJobs(
+  state: InjectionState,
+  parentSessionID: string,
+  promptShapeKey: string,
+): void {
+  const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
+  if (!entry || entry.promptShapeKey === promptShapeKey) return;
+  // The model produced at least one new part after the request that carried
+  // these completions, so it has consumed them. Stop re-announcing.
+  reconcileInjectedTerminalJobs(state, parentSessionID);
 }
 
 export async function injectBackgroundJobBoard(
@@ -344,17 +374,20 @@ export async function injectBackgroundJobBoard(
       return;
     }
 
-    const reminder = state.backgroundJobBoard.formatForPrompt(
-      message.info.sessionID,
-    );
-    if (!reminder) return;
-
     const textPart = message.parts.find(
       (part) => part.type === 'text' && typeof part.text === 'string',
     );
     if (!textPart || isInternalInitiatorPart(textPart)) return;
 
-    rememberInjectedTerminalJobs(state, message.info.sessionID);
+    const shapeKey = promptShapeKey(realMessages(messages, state.metadataKey));
+    reconcileConsumedTerminalJobs(state, message.info.sessionID, shapeKey);
+
+    const reminder = state.backgroundJobBoard.formatForPrompt(
+      message.info.sessionID,
+    );
+    if (!reminder) return;
+
+    rememberInjectedTerminalJobs(state, message.info.sessionID, shapeKey);
     // Append the board as its own trailing message rather than mutating
     // an existing user message. In long tool loops the latest user
     // message becomes deep history; rewriting it on board state changes
@@ -381,6 +414,7 @@ function injectCheckpointBoard(
   messages: unknown[],
 ): void {
   const currentMessages = realMessages(messages, state.metadataKey);
+  const shapeKey = promptShapeKey(currentMessages);
   const tailMessage = currentMessages.at(-1);
   const sessionID = tailMessage?.info.sessionID;
   if (!tailMessage || !sessionID || !state.shouldManageSession(sessionID)) {
@@ -391,17 +425,20 @@ function injectCheckpointBoard(
     (message) =>
       isUserMessageWithParts(message) && message.info.sessionID === sessionID,
   );
-  const reminder = state.backgroundJobBoard.formatForPrompt(sessionID);
   const textPart = triggeringMessage?.parts.find(
     (part) => part.type === 'text' && typeof part.text === 'string',
   );
-  const canCreateSnapshot =
+  const canSurface =
     triggeringMessage !== undefined &&
     (!triggeringMessage.info.agent ||
       triggeringMessage.info.agent === 'orchestrator') &&
     textPart !== undefined &&
-    !isInternalInitiatorPart(textPart) &&
-    reminder !== undefined;
+    !isInternalInitiatorPart(textPart);
+
+  if (canSurface) reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
+
+  const reminder = state.backgroundJobBoard.formatForPrompt(sessionID);
+  const canCreateSnapshot = canSurface && reminder !== undefined;
 
   const replayBaseMessage = triggeringMessage ?? tailMessage;
   const snapshotState = updateBoardHistoryState(
@@ -426,7 +463,7 @@ function injectCheckpointBoard(
         text: reminder,
       });
     }
-    rememberInjectedTerminalJobs(state, sessionID);
+    rememberInjectedTerminalJobs(state, sessionID, shapeKey);
   }
 
   replayCheckpointBoard(
@@ -480,6 +517,55 @@ function realMessages(
     );
     return parts.length > 0 ? [{ ...message, parts }] : [];
   });
+}
+
+/**
+ * Identity of the real prompt content/structure for one request. Stable across
+ * repeated transforms of the same request; changes as soon as relevant message
+ * or non-synthetic part content changes. Counts alone are insufficient because
+ * supported compaction can remove old content while a model turn appends new
+ * content, preserving message/part counts.
+ */
+function promptShapeKey(realMessageList: MessageWithParts[]): string {
+  const tokens: string[] = [];
+  tokens.push(`messages:${realMessageList.length}`);
+  for (const message of realMessageList) {
+    tokens.push('message');
+    tokens.push(`role:${message.info.role ?? ''}`);
+    tokens.push(`agent:${message.info.agent ?? ''}`);
+    tokens.push(`session:${message.info.sessionID ?? ''}`);
+    const realParts = message.parts.filter((part) => part.synthetic !== true);
+    tokens.push(`parts:${realParts.length}`);
+    for (const part of realParts) {
+      tokens.push('part');
+      tokens.push(stablePromptPartSignature(part));
+    }
+  }
+  return sha256Hash(tokens.join('\u001f'));
+}
+
+function stablePromptPartSignature(part: MessagePart): string {
+  return stableSerializePromptValue(part);
+}
+
+function stableSerializePromptValue(value: unknown): string {
+  if (value === null) return 'null';
+  const valueType = typeof value;
+  if (valueType === 'string') return JSON.stringify(value);
+  if (valueType === 'number' || valueType === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerializePromptValue(item)).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableSerializePromptValue(value[key])}`,
+      )
+      .join(',')}}`;
+  }
+  return valueType;
 }
 
 function hasCompacted(

@@ -48,15 +48,16 @@ All modules depend on `BackgroundJobBoard` from `src/utils/background-job-board.
    - Prunes stale context during lifecycle events and status transitions
 
 4. **Message Injection (`experimental.chat.messages.transform`)**
-   - Injects a `<system-reminder>` part containing the `### Background Job Board` section into user messages for managed sessions
-   - Lists active, unreconciled, and reusable sessions
-   - Remembers injected terminal jobs to reconcile them on parent idle events
+    - Injects a `<system-reminder>` part containing the `### Background Job Board` section into user messages for managed sessions
+    - Lists active, unreconciled, and reusable sessions
+    - Remembers injected terminal jobs to reconcile them on the next request after the completion was surfaced to the model (via `reconcileConsumedTerminalJobs`)
+    - The idle timer remains as a backstop for when the model ends its turn without further requests
 
 5. **Lifecycle Events (`event`)**
-   - `session.created`: Adds new task IDs to pending managed set
-   - `session.idle` / `session.status` (idle): Reconciles injected terminal jobs for the parent session
-   - `session.status` (busy): Marks sessions as running from live session state
-   - `session.deleted`: Clears job state, child jobs, and pending call records for the session
+    - `session.created`: Adds new task IDs to pending managed set
+    - `session.idle` / `session.status` (idle): Reconciles injected terminal jobs for the parent session (backstop path)
+    - `session.status` (busy): Marks sessions as running from live session state
+    - `session.deleted`: Clears job state, child jobs, and pending call records for the session
 
 6. **Human-in-the-loop Waits**
    - `wait_for_user` calls the facade's `beginUserWait()` only after tool validation

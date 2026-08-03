@@ -767,12 +767,6 @@ describe('task-session-manager hook', () => {
 
   test('starts a new checkpoint cache epoch at the snapshot limit', async () => {
     const board = new BackgroundJobBoard();
-    board.registerLaunch({
-      taskID: 'child-1',
-      parentSessionID: 'parent-1',
-      agent: 'explorer',
-      description: 'map hooks',
-    });
     const { hook } = createHook({
       backgroundJobBoard: board,
       strategy: 'checkpoint-compatible',
@@ -780,9 +774,18 @@ describe('task-session-manager hook', () => {
 
     const history: string[] = ['root'];
     for (let turn = 0; turn < 20; turn += 1) {
+      // Register a distinct job for each turn
+      const taskID = `child-${turn}`;
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: `map hooks turn ${turn}`,
+      });
+      // Complete the job immediately
       board.updateStatus({
-        taskID: 'child-1',
-        state: turn % 2 === 0 ? 'completed' : 'error',
+        taskID,
+        state: 'completed',
         resultSummary: `result-${turn}`,
       });
       history.push(`turn-${turn}`);
@@ -797,8 +800,15 @@ describe('task-session-manager hook', () => {
     }
 
     history.push('epoch-2-turn-1');
+    // Register and complete first job in epoch 2
+    board.registerLaunch({
+      taskID: 'child-20',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks epoch 2 turn 1',
+    });
     board.updateStatus({
-      taskID: 'child-1',
+      taskID: 'child-20',
       state: 'completed',
       resultSummary: 'epoch-2-result-1',
     });
@@ -808,9 +818,16 @@ describe('task-session-manager hook', () => {
     expect(boardSnapshotIDs(epochStart)[0]).toEndWith(':20');
 
     history.push('epoch-2-turn-2');
+    // Register and complete second job in epoch 2
+    board.registerLaunch({
+      taskID: 'child-21',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks epoch 2 turn 2',
+    });
     board.updateStatus({
-      taskID: 'child-1',
-      state: 'error',
+      taskID: 'child-21',
+      state: 'completed',
       resultSummary: 'epoch-2-result-2',
     });
     const secondEpochRequest = createAnchoredMessages('parent-1', history);
@@ -2088,6 +2105,435 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-1')).toMatchObject({
       state: 'completed',
       terminalUnreconciled: true,
+    });
+  });
+
+  test('reconciles a surfaced terminal job on the next request while wait_for_user is latched', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    // Request 1: inject the board with the completed job
+    const request1 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request1);
+    expect(boardText(request1)).toContain(
+      'ora-1 / child-1 / oracle / completed, unreconciled',
+    );
+    expect(boardText(request1)).toContain('Result: approved');
+
+    // Latch wait_for_user (simulating the tool call)
+    hook.beginUserWait('parent-1');
+
+    // Request 2: same history + one assistant message with a tool part
+    // (simulating the wait_for_user tool call turn)
+    const request2 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            { type: 'text', text: 'calling wait_for_user' },
+            {
+              type: 'tool',
+              tool: 'wait_for_user',
+              id: 'wait-call-1',
+              args: { prompt: 'waiting' },
+            },
+          ],
+        },
+      ],
+    };
+    await transformMessages(hook, request2);
+
+    // The job should now be reconciled (not unreconciled)
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    // The board should no longer show the Result line
+    expect(boardText(request2)).toContain(
+      'ora-1 / child-1 / oracle / completed, reconciled',
+    );
+    expect(boardText(request2)).not.toContain('Result: approved');
+  });
+
+  test('does not reconcile when the same request is transformed twice', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    const messages = createMessages('parent-1', 'continue');
+
+    // Transform the same message array twice (simulating a provider
+    // retry). The second transform strips the previously-injected trailing
+    // board message automatically, then computes the same shape key.
+    await transformMessages(hook, messages);
+    const firstBoardText = boardText(messages);
+
+    await transformMessages(hook, messages);
+    const secondBoardText = boardText(messages);
+
+    // Both should show unreconciled (same prompt shape = no reconciliation)
+    expect(firstBoardText).toContain('completed, unreconciled');
+    expect(secondBoardText).toContain('completed, unreconciled');
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+  });
+
+  test('reconciles when compaction preserves message and part counts', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    const surfacedRequest = {
+      messages: [
+        {
+          info: {
+            id: 'user-1',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'original user turn' }],
+        },
+        {
+          info: {
+            id: 'assistant-1',
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'older assistant content' }],
+        },
+      ],
+    };
+    const surfacedMessageCount = surfacedRequest.messages.length;
+    const surfacedPartCount = surfacedRequest.messages.flatMap(
+      (message) => message.parts,
+    ).length;
+
+    await transformMessages(hook, surfacedRequest);
+    expect(boardText(surfacedRequest)).toContain('completed, unreconciled');
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+
+    const compactedWithNewTurn = {
+      messages: [
+        {
+          info: {
+            id: 'user-1',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'original user turn' }],
+        },
+        {
+          info: {
+            id: 'assistant-2',
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            { type: 'text', text: 'new assistant turn after compaction' },
+          ],
+        },
+      ],
+    };
+
+    expect(compactedWithNewTurn.messages).toHaveLength(surfacedMessageCount);
+    expect(
+      compactedWithNewTurn.messages.flatMap((message) => message.parts),
+    ).toHaveLength(surfacedPartCount);
+
+    await transformMessages(hook, compactedWithNewTurn);
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(boardText(compactedWithNewTurn)).toContain('completed, reconciled');
+    expect(boardText(compactedWithNewTurn)).not.toContain('Result: approved');
+  });
+
+  test('stops re-announcing a completion across a run of requests', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    // Build 5 explicit requests: the first carries only the user message,
+    // each subsequent one adds exactly one more assistant part. This makes
+    // it obvious which request is the "model has now reacted" boundary.
+    const userMessage = {
+      info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+      parts: [{ type: 'text', text: 'turn 1' }],
+    };
+    function buildRequest(assistantMessageCount: number) {
+      return {
+        messages: [
+          userMessage,
+          ...Array.from({ length: assistantMessageCount }, (_, i) => ({
+            info: {
+              role: 'assistant',
+              agent: 'orchestrator',
+              sessionID: 'parent-1',
+            },
+            parts: [{ type: 'text', text: `response ${i + 1}` }],
+          })),
+        ],
+      };
+    }
+
+    const resultLines: boolean[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const request = buildRequest(i);
+      await transformMessages(hook, request);
+      const board_text = boardText(request);
+      resultLines.push(board_text?.includes('Result: approved') ?? false);
+    }
+
+    // The Result line should appear in exactly one board — the first one,
+    // where the shape key was first stored. Every later request carries a
+    // strictly larger shape, so the completion is reconciled.
+    const resultCount = resultLines.filter((x) => x).length;
+    expect(resultCount).toBe(1);
+    expect(resultLines[0]).toBe(true);
+    expect(resultLines[1]).toBe(false);
+    expect(resultLines[2]).toBe(false);
+    expect(resultLines[3]).toBe(false);
+    expect(resultLines[4]).toBe(false);
+  });
+
+  test('reconciles a surfaced terminal job on the next request in checkpoint-compatible mode', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    // Request 1: inject the board with the completed job
+    const request1 = createAnchoredMessages('parent-1', ['turn 1']);
+    await transformMessages(hook, request1);
+    const snapshots1 = boardSnapshotIDs(request1);
+    expect(snapshots1.length).toBeGreaterThan(0);
+    expect(boardText(request1)).toContain('completed, unreconciled');
+
+    // Request 2: same history + one assistant message
+    const request2 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'response 1' }],
+        },
+      ],
+    };
+    await transformMessages(hook, request2);
+
+    // The job should now be reconciled
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    // A new snapshot should be created reflecting the reconciled state
+    const snapshots2 = boardSnapshotIDs(request2);
+    expect(snapshots2.length).toBeGreaterThan(snapshots1.length);
+    expect(boardText(request2)).toContain('completed, reconciled');
+  });
+
+  test('reconciles all terminal jobs surfaced on the same prompt shape', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Two completions that arrive in the same request window
+    board.registerLaunch({
+      taskID: 'child-A',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan A',
+    });
+    board.registerLaunch({
+      taskID: 'child-B',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan B',
+    });
+    board.updateStatus({
+      taskID: 'child-A',
+      state: 'completed',
+      resultSummary: 'approved A',
+    });
+    board.updateStatus({
+      taskID: 'child-B',
+      state: 'completed',
+      resultSummary: 'approved B',
+    });
+
+    // Request 1: both jobs are surfaced and stored under the same prompt
+    // shape key. The union branch of rememberInjectedTerminalJobs keeps
+    // them together even if a second completion lands mid-request.
+    const request1 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request1);
+    expect(boardText(request1)).toContain('Result: approved A');
+    expect(boardText(request1)).toContain('Result: approved B');
+
+    // Request 2: same shape (no new part) — both jobs stay unreconciled
+    const request2 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request2);
+    expect(boardText(request2)).toContain('completed, unreconciled');
+    expect(board.get('child-A')).toMatchObject({ terminalUnreconciled: true });
+    expect(board.get('child-B')).toMatchObject({ terminalUnreconciled: true });
+
+    // Request 3: model added an assistant part — both jobs reconcile
+    // together because they share a stored prompt shape key.
+    const request3 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'acknowledged' }],
+        },
+      ],
+    };
+    await transformMessages(hook, request3);
+
+    expect(board.get('child-A')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-B')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('idle backstop is a no-op after shape-reconciliation already fired', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'approved',
+    });
+
+    // Request 1: surface the completion
+    const request1 = createMessages('parent-1', 'continue');
+    await transformMessages(hook, request1);
+    expect(board.get('child-1')).toMatchObject({ terminalUnreconciled: true });
+
+    // Request 2: model added a part, shape-reconciliation fires
+    const request2 = {
+      messages: [
+        ...request1.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'thanks' }],
+        },
+      ],
+    };
+    await transformMessages(hook, request2);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+
+    // Session goes idle — the backstop fires but must not disturb the
+    // already-reconciled job (and must not error on a missing entry).
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
     });
   });
 
