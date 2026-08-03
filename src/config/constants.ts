@@ -98,7 +98,7 @@ export const DEFAULT_MAX_RETAINED_SNAPSHOTS = 20;
  * Prevents unbounded growth when session.deleted events are missed.
  * Oldest entries are evicted first when this threshold is reached.
  */
-export const DEFAULT_MAX_SESSION_DIRECTORIES = 1000;
+export const DEFAULT_MAX_SESSION_METADATA_ENTRIES = 1000;
 
 export type ImageRouting = 'auto' | 'direct';
 

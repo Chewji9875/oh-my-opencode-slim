@@ -4,9 +4,9 @@ export class SessionMetadataStore {
   readonly #agents = new Map<string, string>();
   readonly #directories = new Map<string, string>();
   readonly #insertionOrder = new Map<string, undefined>();
+  readonly #activeOrchestratorSessionIDs = new Set<string>();
   readonly #maxEntries: number;
   readonly #onEvict?: SessionMetadataEviction;
-  #activeOrchestratorSessionID: string | undefined;
 
   constructor(options: {
     maxEntries: number;
@@ -28,9 +28,9 @@ export class SessionMetadataStore {
     this.#agents.set(sessionID, agent);
 
     if (agent === 'orchestrator') {
-      this.#activeOrchestratorSessionID = sessionID;
-    } else if (this.#activeOrchestratorSessionID === sessionID) {
-      this.#activeOrchestratorSessionID = undefined;
+      this.#activeOrchestratorSessionIDs.add(sessionID);
+    } else {
+      this.#activeOrchestratorSessionIDs.delete(sessionID);
     }
 
     this.#track(sessionID);
@@ -41,19 +41,21 @@ export class SessionMetadataStore {
     this.#track(sessionID);
   }
 
-  markOrchestratorBusy(sessionID: string): void {
+  markOrchestratorActive(sessionID: string): void {
     if (this.#agents.get(sessionID) === 'orchestrator') {
-      this.#activeOrchestratorSessionID = sessionID;
+      this.#activeOrchestratorSessionIDs.add(sessionID);
     }
+  }
+
+  markOrchestratorIdle(sessionID: string): void {
+    this.#activeOrchestratorSessionIDs.delete(sessionID);
   }
 
   delete(sessionID: string): void {
     this.#agents.delete(sessionID);
     this.#directories.delete(sessionID);
     this.#insertionOrder.delete(sessionID);
-    if (this.#activeOrchestratorSessionID === sessionID) {
-      this.#activeOrchestratorSessionID = undefined;
-    }
+    this.#activeOrchestratorSessionIDs.delete(sessionID);
   }
 
   get size(): number {
@@ -75,7 +77,7 @@ export class SessionMetadataStore {
 
     while (this.#insertionOrder.size > this.#maxEntries) {
       const evictableSessionID = [...this.#insertionOrder.keys()].find(
-        (candidate) => candidate !== this.#activeOrchestratorSessionID,
+        (candidate) => !this.#activeOrchestratorSessionIDs.has(candidate),
       );
       if (evictableSessionID === undefined) return;
 

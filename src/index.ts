@@ -18,7 +18,7 @@ import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
-  DEFAULT_MAX_SESSION_DIRECTORIES,
+  DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   DEFAULT_MAX_SESSIONS_PER_AGENT,
   DEFAULT_READ_CONTEXT_MAX_FILES,
   DEFAULT_READ_CONTEXT_MIN_LINES,
@@ -175,10 +175,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let multiplexerSessionManager: MultiplexerSessionManager;
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
   const sessionMetadata = new SessionMetadataStore({
-    maxEntries: DEFAULT_MAX_SESSION_DIRECTORIES,
+    maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
       log('[session] evicted oldest session metadata', {
-        threshold: DEFAULT_MAX_SESSION_DIRECTORIES,
+        threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
         droppedSessionId: sessionID,
       });
     },
@@ -942,6 +942,24 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
       };
 
+      const eventSessionID =
+        event.properties?.info?.id ?? event.properties?.sessionID;
+      const statusType = event.properties?.status?.type;
+      if (eventSessionID) {
+        if (
+          event.type === 'session.status' &&
+          (statusType === 'busy' || statusType === 'retry')
+        ) {
+          sessionMetadata.markOrchestratorActive(eventSessionID);
+        } else if (
+          event.type === 'session.idle' ||
+          (event.type === 'session.status' && statusType === 'idle') ||
+          event.type === 'session.deleted'
+        ) {
+          sessionMetadata.markOrchestratorIdle(eventSessionID);
+        }
+      }
+
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         const providerID =
@@ -1036,9 +1054,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
           | { sessionID?: string; status?: { type?: string } }
           | undefined;
         const sessionID = props?.sessionID;
-        if (sessionID && props?.status?.type === 'busy') {
-          sessionMetadata.markOrchestratorBusy(sessionID);
-        }
         companionManager.onSessionStatus({
           sessionId: sessionID,
           agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,

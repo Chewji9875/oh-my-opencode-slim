@@ -2,64 +2,62 @@ import { describe, expect, test } from 'bun:test';
 import { SessionMetadataStore } from './session-metadata';
 
 describe('SessionMetadataStore', () => {
-  test('bounds the union of directory and agent metadata', () => {
+  test('keeps two active orchestrators through metadata overflow', () => {
+    const store = new SessionMetadataStore({ maxEntries: 3 });
+
+    store.setAgent('orchestrator-a', 'orchestrator');
+    store.setAgent('orchestrator-b', 'orchestrator');
+    store.setAgent('old-specialist', 'explore');
+    store.setDirectory('new-session', '/tmp/project');
+
+    expect(store.size).toBe(3);
+    expect(store.getAgent('orchestrator-a')).toBe('orchestrator');
+    expect(store.getAgent('orchestrator-b')).toBe('orchestrator');
+    expect(store.hasAgent('old-specialist')).toBe(false);
+  });
+
+  test('makes an idle orchestrator evictable without dropping another active one', () => {
+    const store = new SessionMetadataStore({ maxEntries: 3 });
+
+    store.setAgent('orchestrator-a', 'orchestrator');
+    store.setAgent('orchestrator-b', 'orchestrator');
+    store.setAgent('old-specialist', 'explore');
+    store.markOrchestratorIdle('orchestrator-a');
+    store.setDirectory('new-session', '/tmp/project');
+
+    expect(store.size).toBe(3);
+    expect(store.hasAgent('orchestrator-a')).toBe(false);
+    expect(store.getAgent('orchestrator-b')).toBe('orchestrator');
+    expect(store.hasAgent('old-specialist')).toBe(true);
+  });
+
+  test('bounds agent-only metadata', () => {
+    const store = new SessionMetadataStore({ maxEntries: 2 });
+
+    store.setAgent('agent-a', 'explore');
+    store.setAgent('agent-b', 'oracle');
+    store.setAgent('agent-c', 'fixer');
+
+    expect(store.size).toBe(2);
+    expect(store.hasAgent('agent-a')).toBe(false);
+    expect(store.hasAgent('agent-b')).toBe(true);
+    expect(store.hasAgent('agent-c')).toBe(true);
+  });
+
+  test('eviction removes directory and agent metadata for one session', () => {
     const evicted: string[] = [];
     const store = new SessionMetadataStore({
-      maxEntries: 2,
+      maxEntries: 1,
       onEvict: (sessionID) => evicted.push(sessionID),
     });
 
-    store.setDirectory('directory-only', '/tmp/project');
-    store.setAgent('agent-only', 'explore');
-    store.setDirectory('newest', '/tmp/other-project');
-
-    expect(store.size).toBe(2);
-    expect(store.hasDirectory('directory-only')).toBe(false);
-    expect(store.hasAgent('directory-only')).toBe(false);
-    expect(store.hasAgent('agent-only')).toBe(true);
-    expect(store.hasDirectory('newest')).toBe(true);
-    expect(evicted).toEqual(['directory-only']);
-  });
-
-  test('retains the active orchestrator while evicting older metadata', () => {
-    const store = new SessionMetadataStore({ maxEntries: 2 });
-
-    store.setAgent('orchestrator-session', 'orchestrator');
-    store.setDirectory('orchestrator-session', '/tmp/project');
-    store.setAgent('older-specialist', 'explore');
-    store.setDirectory('newer-specialist', '/tmp/project');
-
-    expect(store.size).toBe(2);
-    expect(store.getAgent('orchestrator-session')).toBe('orchestrator');
-    expect(store.getDirectory('orchestrator-session')).toBe('/tmp/project');
-    expect(store.hasAgent('older-specialist')).toBe(false);
-    expect(store.hasDirectory('older-specialist')).toBe(false);
-  });
-
-  test('allows a deleted orchestrator to be evicted after cleanup', () => {
-    const store = new SessionMetadataStore({ maxEntries: 2 });
-
-    store.setAgent('orchestrator-session', 'orchestrator');
-    store.setAgent('specialist-session', 'explore');
-    store.delete('orchestrator-session');
+    store.setDirectory('old-session', '/tmp/project');
+    store.setAgent('old-session', 'explore');
     store.setDirectory('new-session', '/tmp/project');
 
-    expect(store.size).toBe(2);
-    expect(store.hasAgent('orchestrator-session')).toBe(false);
-    expect(store.hasAgent('specialist-session')).toBe(true);
-    expect(store.hasDirectory('new-session')).toBe(true);
-  });
-
-  test('protects the orchestrator reported busy by the session event', () => {
-    const store = new SessionMetadataStore({ maxEntries: 2 });
-
-    store.setAgent('first-orchestrator', 'orchestrator');
-    store.setAgent('second-orchestrator', 'orchestrator');
-    store.markOrchestratorBusy('first-orchestrator');
-    store.setDirectory('new-session', '/tmp/project');
-
-    expect(store.getAgent('first-orchestrator')).toBe('orchestrator');
-    expect(store.hasAgent('second-orchestrator')).toBe(false);
-    expect(store.hasDirectory('new-session')).toBe(true);
+    expect(store.size).toBe(1);
+    expect(store.hasDirectory('old-session')).toBe(false);
+    expect(store.hasAgent('old-session')).toBe(false);
+    expect(evicted).toEqual(['old-session']);
   });
 });
