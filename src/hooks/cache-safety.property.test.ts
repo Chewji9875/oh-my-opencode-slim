@@ -22,7 +22,7 @@ import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { BackgroundJobsConfigSchema } from '../config';
-import { isVolatileTaggedMessage } from './cache-safe-injection';
+import { isTaggedPart, isVolatileTaggedMessage } from './cache-safe-injection';
 import {
   assistantTurn,
   type BoardStrategy,
@@ -87,63 +87,62 @@ describe('cache-safety: board strategy coverage drift guard', () => {
   });
 });
 
-describe.each(BOARD_STRATEGIES)(
-  'cache-safety: turn-over-turn prefix stability (%s)',
-  (strategy) => {
-    test('re-rendering a growing conversation reproduces byte-identical history', async () => {
-      const pipeline = createPipeline({ strategy });
-      const history = buildHistory();
-      const turns = turnEndIndices(history);
-      const fingerprintsFor = STRATEGY_STABLE_FINGERPRINTS[strategy];
+describe.each(
+  BOARD_STRATEGIES,
+)('cache-safety: turn-over-turn prefix stability (%s)', (strategy) => {
+  test('re-rendering a growing conversation reproduces byte-identical history', async () => {
+    const pipeline = createPipeline({ strategy });
+    const history = buildHistory();
+    const turns = turnEndIndices(history);
+    const fingerprintsFor = STRATEGY_STABLE_FINGERPRINTS[strategy];
 
-      let previous: string[] | undefined;
-      for (const [turnNumber, endIndex] of turns.entries()) {
-        // Exercise cross-turn hook state: a file-tool nudge fires and a
-        // background job launches before the second turn (a real user turn,
-        // so checkpoint mode creates a snapshot), the job is dropped before
-        // the internal-initiator turn renders with an empty board, and a
-        // second job launches before the fourth turn. Snapshot creation,
-        // replay across internal-initiator and empty-board turns, and
-        // unchanged-board dedupe all must leave stable bytes untouched —
-        // the v2.2.5 checkpoint regression rewrote them on exactly these
-        // transitions.
-        if (turnNumber === 1) {
-          pipeline.markFileToolPending();
-          pipeline.board.registerLaunch({
-            taskID: 'task-alpha',
-            parentSessionID: SESSION_ID,
-            agent: 'explorer',
-            description: 'churn fixture',
-            now: FIXTURE_NOW,
-          });
-        }
-        if (turnNumber === 2) pipeline.board.drop('task-alpha');
-        if (turnNumber === 3) {
-          pipeline.board.registerLaunch({
-            taskID: 'task-beta',
-            parentSessionID: SESSION_ID,
-            agent: 'fixer',
-            description: 'second churn fixture',
-            now: FIXTURE_NOW,
-          });
-        }
-
-        const output = await renderTurn(pipeline, history, endIndex);
-        const fingerprints = fingerprintsFor(output.messages);
-
-        if (previous) {
-          if (fingerprints.length < previous.length) {
-            throw new Error(
-              'A transform removed stable messages between turns — this rewrites the cached prefix. Route the content through src/hooks/cache-safe-injection.ts instead.',
-            );
-          }
-          expect(fingerprints.slice(0, previous.length)).toEqual(previous);
-        }
-        previous = fingerprints;
+    let previous: string[] | undefined;
+    for (const [turnNumber, endIndex] of turns.entries()) {
+      // Exercise cross-turn hook state: a file-tool nudge fires and a
+      // background job launches before the second turn (a real user turn,
+      // so checkpoint mode creates a snapshot), the job is dropped before
+      // the internal-initiator turn renders with an empty board, and a
+      // second job launches before the fourth turn. Snapshot creation,
+      // replay across internal-initiator and empty-board turns, and
+      // unchanged-board dedupe all must leave stable bytes untouched —
+      // the v2.2.5 checkpoint regression rewrote them on exactly these
+      // transitions.
+      if (turnNumber === 1) {
+        pipeline.markFileToolPending();
+        pipeline.board.registerLaunch({
+          taskID: 'task-alpha',
+          parentSessionID: SESSION_ID,
+          agent: 'explorer',
+          description: 'churn fixture',
+          now: FIXTURE_NOW,
+        });
       }
-    });
-  },
-);
+      if (turnNumber === 2) pipeline.board.drop('task-alpha');
+      if (turnNumber === 3) {
+        pipeline.board.registerLaunch({
+          taskID: 'task-beta',
+          parentSessionID: SESSION_ID,
+          agent: 'fixer',
+          description: 'second churn fixture',
+          now: FIXTURE_NOW,
+        });
+      }
+
+      const output = await renderTurn(pipeline, history, endIndex);
+      const fingerprints = fingerprintsFor(output.messages);
+
+      if (previous) {
+        if (fingerprints.length < previous.length) {
+          throw new Error(
+            'A transform removed stable messages between turns — this rewrites the cached prefix. Route the content through src/hooks/cache-safe-injection.ts instead.',
+          );
+        }
+        expect(fingerprints.slice(0, previous.length)).toEqual(previous);
+      }
+      previous = fingerprints;
+    }
+  });
+});
 
 describe('cache-safety: turn-over-turn prefix stability', () => {
   test('a consumed file-tool nudge is reproduced by the phase reminder on the next turn', async () => {
@@ -166,44 +165,43 @@ describe('cache-safety: turn-over-turn prefix stability', () => {
   });
 });
 
-describe.each(BOARD_STRATEGIES)(
-  'cache-safety: specialist sessions (%s)',
-  (strategy) => {
-    test('non-orchestrator payloads pass through byte-identical', async () => {
-      const pipeline = createPipeline({ strategy });
-      const specialistSession = 'ses_specialist_fixture';
-      const history = [
-        {
-          info: {
-            role: 'user',
-            agent: 'explorer',
-            sessionID: specialistSession,
-            id: 's01',
-          },
-          parts: [{ type: 'text', text: 'find the config loader' }],
+describe.each(
+  BOARD_STRATEGIES,
+)('cache-safety: specialist sessions (%s)', (strategy) => {
+  test('non-orchestrator payloads pass through byte-identical', async () => {
+    const pipeline = createPipeline({ strategy });
+    const specialistSession = 'ses_specialist_fixture';
+    const history = [
+      {
+        info: {
+          role: 'user',
+          agent: 'explorer',
+          sessionID: specialistSession,
+          id: 's01',
         },
-        assistantTurn('s02', 'Searching now.'),
-        {
-          info: {
-            role: 'user',
-            agent: 'explorer',
-            sessionID: specialistSession,
-            id: 's03',
-          },
-          parts: [{ type: 'text', text: 'summarize what you found' }],
+        parts: [{ type: 'text', text: 'find the config loader' }],
+      },
+      assistantTurn('s02', 'Searching now.'),
+      {
+        info: {
+          role: 'user',
+          agent: 'explorer',
+          sessionID: specialistSession,
+          id: 's03',
         },
-      ];
-      const before = history.map((message) => JSON.stringify(message));
+        parts: [{ type: 'text', text: 'summarize what you found' }],
+      },
+    ];
+    const before = history.map((message) => JSON.stringify(message));
 
-      const output: TransformOutput = { messages: structuredClone(history) };
-      await pipeline.run(output);
+    const output: TransformOutput = { messages: structuredClone(history) };
+    await pipeline.run(output);
 
-      expect(output.messages.map((message) => JSON.stringify(message))).toEqual(
-        before,
-      );
-    });
-  },
-);
+    expect(output.messages.map((message) => JSON.stringify(message))).toEqual(
+      before,
+    );
+  });
+});
 
 describe('cache-safety: volatile content isolation', () => {
   test('background-job state only ever changes the tagged trailing message', async () => {
@@ -227,15 +225,34 @@ describe('cache-safety: volatile content isolation', () => {
       stableFingerprints(withoutJobs.messages),
     );
 
-    // The volatile zone is exactly one tagged message, strictly trailing.
-    const volatile = withJobs.messages.filter((message) =>
-      isVolatileTaggedMessage(message, BACKGROUND_JOB_BOARD_METADATA_KEY),
+    // The board is a single tagged part appended to the very end of the last
+    // message (never a separate trailing message that the provider SDK would
+    // coalesce into the last real message and rob of its cache breakpoint).
+    // Keeping the message COUNT identical to the no-board render lets the
+    // provider's last-two-messages breakpoint land on stable real content.
+    expect(withJobs.messages).toHaveLength(withoutJobs.messages.length);
+
+    const allTaggedParts = withJobs.messages.flatMap((message, index) =>
+      (message as MessageWithParts).parts
+        .map((part, partIndex) => ({ index, partIndex, part }))
+        .filter(({ part }) =>
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+        ),
     );
-    expect(volatile).toHaveLength(1);
-    expect(withJobs.messages.at(-1)).toBe(volatile[0]);
+    expect(allTaggedParts).toHaveLength(1);
+
+    const lastMessage = withJobs.messages.at(-1) as MessageWithParts;
+    const boardHit = allTaggedParts[0];
+    // The one board part lives on the last message and is its last part.
+    expect(boardHit.index).toBe(withJobs.messages.length - 1);
+    expect(boardHit.partIndex).toBe(lastMessage.parts.length - 1);
+
+    // The no-board render carries no board part anywhere.
     expect(
       withoutJobs.messages.some((message) =>
-        isVolatileTaggedMessage(message, BACKGROUND_JOB_BOARD_METADATA_KEY),
+        (message as MessageWithParts).parts.some((part) =>
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+        ),
       ),
     ).toBe(false);
   });
@@ -275,44 +292,40 @@ describe('cache-safety: volatile content isolation', () => {
   });
 });
 
-describe.each(BOARD_STRATEGIES)(
-  'cache-safety: determinism under ambient inputs (%s)',
-  (strategy) => {
-    test('wall clock and randomness never leak into the payload', async () => {
-      const history = buildHistory();
-      const lastTurn = history.length - 1;
-      const originalRandom = Math.random;
+describe.each(
+  BOARD_STRATEGIES,
+)('cache-safety: determinism under ambient inputs (%s)', (strategy) => {
+  test('wall clock and randomness never leak into the payload', async () => {
+    const history = buildHistory();
+    const lastTurn = history.length - 1;
+    const originalRandom = Math.random;
 
-      const render = async (
-        time: number,
-        random: number,
-      ): Promise<string[]> => {
-        setSystemTime(new Date(time));
-        Math.random = () => random;
-        try {
-          const pipeline = createPipeline({ strategy });
-          pipeline.board.registerLaunch({
-            taskID: 'task-gamma',
-            parentSessionID: SESSION_ID,
-            agent: 'oracle',
-            description: 'determinism fixture',
-            now: FIXTURE_NOW,
-          });
-          const output = await renderTurn(pipeline, history, lastTurn);
-          return output.messages.map((message) => JSON.stringify(message));
-        } finally {
-          Math.random = originalRandom;
-          setSystemTime();
-        }
-      };
+    const render = async (time: number, random: number): Promise<string[]> => {
+      setSystemTime(new Date(time));
+      Math.random = () => random;
+      try {
+        const pipeline = createPipeline({ strategy });
+        pipeline.board.registerLaunch({
+          taskID: 'task-gamma',
+          parentSessionID: SESSION_ID,
+          agent: 'oracle',
+          description: 'determinism fixture',
+          now: FIXTURE_NOW,
+        });
+        const output = await renderTurn(pipeline, history, lastTurn);
+        return output.messages.map((message) => JSON.stringify(message));
+      } finally {
+        Math.random = originalRandom;
+        setSystemTime();
+      }
+    };
 
-      const first = await render(FIXTURE_NOW, 0.1234);
-      const second = await render(FIXTURE_NOW + 987_654_321, 0.9876);
+    const first = await render(FIXTURE_NOW, 0.1234);
+    const second = await render(FIXTURE_NOW + 987_654_321, 0.9876);
 
-      expect(second).toEqual(first);
-    });
-  },
-);
+    expect(second).toEqual(first);
+  });
+});
 
 describe('cache-safety: pipeline drift guard', () => {
   const srcRoot = path.resolve(import.meta.dir, '..');

@@ -1,6 +1,7 @@
 import type {
   BackgroundJobBoard,
   BackgroundJobLaunchInput,
+  BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
@@ -8,6 +9,7 @@ import type {
   WallClockTimeoutFinalizeInput,
 } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
+import { log } from './logger';
 import type { TaskOutputState } from './task';
 
 type TerminalStateListener = (taskID: string) => void;
@@ -62,7 +64,14 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     if (this.retryDeferredClose(taskID)) {
       // Notify listeners that session should close
       for (const listener of this.terminalStateListeners) {
-        listener(taskID);
+        try {
+          listener(taskID);
+        } catch (error) {
+          log('Coordinator terminal state listener threw', {
+            taskID,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     }
 
@@ -260,6 +269,13 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     now = Date.now(),
   ): string | undefined {
     return this.board.formatForPrompt(parentSessionID, now);
+  }
+
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now = Date.now(),
+  ): BackgroundJobPromptMetadata | undefined {
+    return this.board.formatForPromptWithMetadata(parentSessionID, now);
   }
 
   clearParent(parentSessionID: string): void {

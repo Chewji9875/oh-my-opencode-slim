@@ -5,11 +5,15 @@
  * session.idle, session.error, session.status, session.deleted) to
  * the appropriate subsystems.
  */
+import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
 import { log } from '../../utils/logger';
 import { isFailoverError } from '../foreground-fallback/index';
-import type { RetainedBoardSnapshotState } from './board-injection';
+import type {
+  InjectedTerminalJobs,
+  RetainedBoardSnapshotState,
+} from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 
 export async function handleEvent(
@@ -75,7 +79,11 @@ export async function handleEvent(
       clearSession(sessionID: string): void;
       prune(board: { taskIDs(): Set<string> }): void;
     };
-    terminalJobsInjectedByParent: Map<string, Set<string>>;
+    terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
+    pendingInjectedTerminalJobsByParent: Map<
+      string,
+      Map<string, BackgroundJobExecution>
+    >;
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
   },
@@ -178,7 +186,9 @@ export async function handleEvent(
         ? deps.options.shouldManageSession(sessionId)
         : false,
       terminalJobsPending: sessionId
-        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.size ?? 0)
+        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.executions.size ??
+            0) +
+          (deps.pendingInjectedTerminalJobsByParent.get(sessionId)?.size ?? 0)
         : 0,
       runningJobForSession: job?.state === 'running' || false,
     });
@@ -214,6 +224,7 @@ export async function handleEvent(
       const props = input.event.properties as { error?: unknown } | undefined;
       if (!props?.error || !isFailoverError(props.error)) {
         deps.terminalJobsInjectedByParent.delete(sessionId);
+        deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
         // orchestrator sees the failure instead of a false completion.
         const job = deps.backgroundJobBoard.get(sessionId);

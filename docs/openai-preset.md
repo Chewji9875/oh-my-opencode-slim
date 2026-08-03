@@ -66,7 +66,7 @@ setting the top-level `preset` field:
         "model": "openai/gpt-5.6-luna",
         "variant": "low",
         "skills": [],
-        "mcps": ["websearch", "context7", "gh_grep"]
+        "mcps": ["context7", "gh_grep"]
       },
       "explorer": {
         "model": "openai/gpt-5.6-luna",

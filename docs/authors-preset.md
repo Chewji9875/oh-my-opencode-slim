@@ -27,8 +27,7 @@ This is the exact configuration the author runs day-to-day.
         "mcps": [
           "*",
           "!context7",
-          "!gh_app",
-          "!websearch"
+          "!gh_app"
         ]
       },
       "oracle": {
@@ -52,7 +51,6 @@ This is the exact configuration the author runs day-to-day.
           "customer-research"
         ],
         "mcps": [
-          "websearch",
           "context7",
           "gh_app",
           "searxng",
@@ -146,7 +144,6 @@ Each skill is listed with a short description and its source. The config block a
 | `vite` | Vite build tool | `public` |
 | `vue` | Vue framework | `public` |
 | `web-perf` | Web performance optimization | `author` |
-| `websearch` | (MCP) web search | `public` |
 | `workers-best-practices` | Worker best practices | `author` |
 
 For the complete configuration reference, see [Configuration](configuration.md).

@@ -122,6 +122,7 @@ export const AgentOverrideConfigSchema = z
     orchestratorPrompt: z.string().min(1).optional(),
     options: z.record(z.string(), z.unknown()).optional(), // provider-specific model options (e.g., textVerbosity, thinking budget)
     displayName: z.string().min(1).optional(),
+    description: z.string().min(1).optional(),
     permission: PermissionConfigSchema.optional(), // tool-level permission rules enforced by the SDK
   })
   .strict();
@@ -172,14 +173,8 @@ export const PresetSchema = z.record(z.string(), AgentOverrideConfigSchema);
 
 export type Preset = z.infer<typeof PresetSchema>;
 
-// Websearch provider configuration
-export const WebsearchConfigSchema = z.object({
-  provider: z.enum(['exa', 'tavily']).default('exa'),
-});
-export type WebsearchConfig = z.infer<typeof WebsearchConfigSchema>;
-
 // MCP names
-export const McpNameSchema = z.enum(['websearch', 'context7', 'gh_grep']);
+export const McpNameSchema = z.enum(['context7', 'gh_grep']);
 export type McpName = z.infer<typeof McpNameSchema>;
 
 export const InterviewConfigSchema = z.object({
@@ -205,6 +200,7 @@ export const BackgroundJobsConfigSchema = z.object({
       'Board injection strategy. "latest" replaces prior board messages; "checkpoint-compatible" preserves them and appends only changed board snapshots.',
     ),
   maxSessionsPerAgent: z.number().int().min(1).max(10).default(2),
+  maxContextLines: z.number().int().min(0).max(500_000).default(50_000),
   readContextMinLines: z.number().int().min(0).max(1000).default(10),
   readContextMaxFiles: z.number().int().min(0).max(50).default(8),
   maxRetainedSnapshots: z
@@ -313,6 +309,24 @@ export const CompanionConfigSchema = z.object({
 });
 
 export type CompanionConfig = z.infer<typeof CompanionConfigSchema>;
+
+export const WebfetchConfigSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        'When false, skip registering this enhanced webfetch so OpenCode uses its built-in version.',
+      ),
+    model: AgentOverrideConfigSchema.shape.model.describe(
+      'Dedicated model(s) for smartfetch secondary-model summarization. ' +
+        'Same shape as agent model config (string, array of strings/objects with id+variant). ' +
+        'Takes priority over small_model, agents.explorer.model, and agents.librarian.model.',
+    ),
+  })
+  .strict();
+
+export type WebfetchConfig = z.infer<typeof WebfetchConfigSchema>;
 
 export const AcpAgentPermissionModeSchema = z.enum(['ask', 'allow', 'reject']);
 
@@ -431,12 +445,12 @@ export const PluginConfigSchema = z
       ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),
-    websearch: WebsearchConfigSchema.optional(),
     interview: InterviewConfigSchema.optional(),
     backgroundJobs: BackgroundJobsConfigSchema.optional(),
     fallback: FailoverConfigSchema.optional(),
     council: CouncilConfigSchema.optional(),
     companion: CompanionConfigSchema.optional(),
+    webfetch: WebfetchConfigSchema.optional(),
     acpAgents: AcpAgentsConfigSchema.optional(),
   })
   .superRefine((value, ctx) => {

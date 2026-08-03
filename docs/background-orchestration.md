@@ -164,7 +164,9 @@ changes before launching a replacement lane.
 Terminal jobs are reconciled automatically after their result is injected into
 the orchestrator session. That lifecycle state is not proof the output was used;
 the orchestrator must still verify it consumed the relevant result before
-finalizing.
+finalizing. When idle reconciliation performs that reconciliation, the opt-in
+continuation evaluator can run in the same idle cycle, subject to its existing
+guards.
 
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
@@ -349,6 +351,10 @@ response, after the orchestrator calls `wait_for_user`, or whenever SDK data is
 unavailable or malformed. A matching reply, or a rejected question, clears its
 tool-backed wait but does not itself inject a nudge; the normal session lifecycle
 decides whether a later nudge is needed.
+
+When idle reconciliation first reconciles an injected terminal result, the
+opt-in evaluator may run in that same idle cycle; the existing liveness,
+wait, fallback, and one-attempt guards still apply.
 
 For external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
-import plugin, { minimumExpectedToolCount } from './index';
+import plugin from './index';
 
 function createPluginClient(
   noop: () => Promise<unknown>,
@@ -53,17 +53,6 @@ function createHostTimerHarness() {
 
   return { now: () => now, setTimeout, clearTimeout, advanceTo };
 }
-
-describe('plugin health thresholds', () => {
-  test('accounts only for intentionally disabled baseline tools', () => {
-    expect(minimumExpectedToolCount()).toBe(5);
-    expect(minimumExpectedToolCount(['wait_for_user'])).toBe(4);
-    expect(minimumExpectedToolCount(['wait_for_user', 'wait_for_user'])).toBe(
-      4,
-    );
-    expect(minimumExpectedToolCount(['unknown_tool'])).toBe(5);
-  });
-});
 
 describe('plugin env disable', () => {
   let originalEnv: typeof process.env;

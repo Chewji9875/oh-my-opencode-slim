@@ -124,6 +124,7 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `agents.<customAgent>.orchestratorPrompt` | string | - | Exact `@agent` block injected into the orchestrator prompt; must start with `@<agent-name>` |
 | `agents.<agent>.permission` | object \| string | - | Tool-level permission rules enforced by the SDK. See [Agent Permissions](#agent-permissions) |
 | `agents.<agent>.displayName` | string | - | Custom user-facing alias for the agent in the active config |
+| `agents.<agent>.description` | string | generated | Description shown to OpenCode and the orchestrator; defaults to `Custom subagent '<name>'` for custom agents |
 | `acpAgents.<name>.command` | string | - | Command for an external ACP-compatible agent; creates a wrapper subagent named `<name>` See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.args` | string[] | `[]` | Arguments for the ACP agent command See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.env` | object | `{}` | Extra environment variables for the ACP subprocess See [ACP-connected agents](#acp-connected-agents). |
@@ -145,6 +146,7 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `tmux.layout` | string | `"main-vertical"` | Legacy alias for `multiplexer.layout` See [Multiplexer Integration](multiplexer-integration.md). |
 | `tmux.main_pane_size` | number | `60` | Legacy alias for `multiplexer.main_pane_size` See [Multiplexer Integration](multiplexer-integration.md). |
 | `backgroundJobs.maxSessionsPerAgent` | integer | `2` | Maximum completed/reconciled reusable child sessions per specialist type in the current orchestrator session (1–10) See [Background Job Management](#background-job-management). |
+| `backgroundJobs.maxContextLines` | integer | `50000` | Maximum total context lines (sum of all tracked file line counts) for a session to remain reusable. Sessions exceeding this threshold are evicted from the reusable pool on completion See [Background Job Management](#background-job-management). |
 | `backgroundJobs.readContextMinLines` | integer | `10` | Minimum number of lines read from a file before it appears in reusable background-job context (0–1000) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.readContextMaxFiles` | integer | `8` | Maximum number of recent read-context files shown per reusable child session (0–50) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.maxRetainedSnapshots` | integer | `20` | Maximum board snapshots retained per checkpoint cache epoch (1–100). Adding a snapshot beyond the limit starts a new epoch with only the current snapshot, intentionally creating one cache miss See [Background Job Management](#background-job-management). |
@@ -347,6 +349,94 @@ Notes:
 - Display names must be unique
 - Display names cannot conflict with internal agent names like `oracle` or `explorer`
 
+### Per-preset agent configuration
+
+To get per-preset behavior for any agent, built-in (`council`, `oracle`,
+`explorer`, `librarian`, `fixer`, `designer`, `observer`) or custom, define
+the agent override inside each preset block, not in root `agents`.
+
+```jsonc
+{
+  "presets": {
+    "balanced": {
+      "council": { "model": ["opencode/mimo-v2.5-free", "opencode-go/minimax-m3", "opencode/minimax-m3"] },
+      "oracle": { "model": "opencode/big-pickle", "variant": "high" },
+      "skeptic": { "model": ["opencode/big-pickle", "opencode-go/qwen3.7-plus"], "variant": "max" }
+    },
+    "nvidia-free": {
+      "council": { "model": ["nvidia/z-ai/glm-5.2", "nvidia/moonshotai/kimi-k2.6"] },
+      "oracle": { "model": "nvidia/deepseek-ai/deepseek-v4-pro", "variant": "high" },
+      "skeptic": { "model": ["nvidia/deepseek-ai/deepseek-v4-pro", "nvidia/mistralai/mistral-large-3-675b-instruct-2512"], "variant": "max" }
+    }
+  }
+}
+```
+
+#### Root `agents` wins the merge (config-file presets)
+
+At startup, config-file presets merge into `config.agents` via
+`deepMerge(preset, config.agents)` at `src/config/loader.ts:365`. The
+second argument wins for conflicting scalars, so root `agents` overrides
+the preset. A root entry for an agent makes the config-file preset value
+for that agent ignored — the agent becomes global instead of per-preset.
+Root `agents` is the escape hatch for values that should never vary by
+preset.
+
+**Runtime presets reverse this.** When a preset is activated at runtime
+via the `/preset` command, the merge at `src/index.ts:227` is
+`deepMerge(config.agents, presetAgents)` — the runtime preset is the
+override and wins. Root `agents` only guarantees precedence for
+config-file presets resolved at startup.
+
+#### Sharing a prompt across presets (custom agents)
+
+A custom agent with a long prompt does not need the prompt duplicated into
+every preset block. Put the prompt in a file and define the agent in each
+preset with only `model` (and `variant` if needed):
+
+1. Create `<projectDir>/.opencode/oh-my-opencode-slim/<agentName>.md` with
+   the shared prompt.
+2. In each preset block, define the agent with only the model fields (no
+   `prompt`):
+
+```jsonc
+{
+  "presets": {
+    "balanced": {
+      "skeptic": { "model": ["opencode/big-pickle", "opencode-go/qwen3.7-plus"], "variant": "max" }
+    },
+    "nvidia-free": {
+      "skeptic": { "model": ["nvidia/deepseek-ai/deepseek-v4-pro", "nvidia/mistralai/mistral-large-3-675b-instruct-2512"], "variant": "max" }
+    }
+  }
+}
+```
+
+`loadAgentPrompt` (`src/config/loader.ts:418`) is preset-aware and reads
+`<agentName>.md` from the `oh-my-opencode-slim/` prompts directory. Lookup
+order:
+
+1. `<projectDir>/.opencode/oh-my-opencode-slim/<preset>/<agentName>.md` (project, preset-specific)
+2. `<projectDir>/.opencode/oh-my-opencode-slim/<agentName>.md` (project, preset-agnostic)
+3. `~/.config/opencode/oh-my-opencode-slim/<preset>/<agentName>.md` (user, preset-specific)
+4. `~/.config/opencode/oh-my-opencode-slim/<agentName>.md` (user, preset-agnostic)
+
+A preset block without `prompt` falls back to the file prompt (if one
+exists), not to a root `agents.<name>.prompt`. The project-level paths (1
+and 2) work universally and are the recommended location for shared
+prompts. User-level paths (3 and 4) can collide with a plugin install
+symlink if `~/.config/opencode/oh-my-opencode-slim/` is symlinked to the
+plugin source.
+
+> **⚠️ Known limitation (#899):** Prompt files take precedence over inline
+> prompts everywhere — not just in presets, but also in root `agents`.
+> If you set an inline `prompt` in a preset or in root `agents` and a
+> prompt file exists for that agent, the inline prompt is silently dropped
+> in favor of the file. Until #899 is fixed, the file-based shared prompt
+> pattern above is the safe path: keep the prompt in the file, and put
+> only `model`/`variant` in the config. Do not mix an inline `prompt`
+> with a prompt file for the same agent.
+
 ### Custom Agents
 
 Unknown keys under `agents` are treated as custom subagents. A custom agent needs
@@ -392,7 +482,7 @@ The field accepts either:
       "model": "openai/gpt-5.5",
       "variant": "high",
       "skills": [],
-      "mcps": ["context7", "websearch"],
+      "mcps": ["context7", "gh_grep"],
       "permission": {
         "edit": "deny",
         "bash": {
@@ -402,7 +492,7 @@ The field accepts either:
           "grep *": "allow"
         },
         "webfetch": "allow",
-        "websearch": "allow",
+        "websearch": "allow", // opencode's built-in websearch tool, not a plugin MCP
         "task": "deny"
       },
       "prompt": "You are Planner. Create implementation plans only. Do not implement code."

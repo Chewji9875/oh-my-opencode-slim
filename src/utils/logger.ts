@@ -7,7 +7,16 @@ const LOG_PREFIX = 'oh-my-opencode-slim.';
 const LOG_SUFFIX = '.log';
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-let logFile: string | null = null;
+type LogSink =
+  | { kind: 'uninitialized' }
+  | { kind: 'file'; filePath: string }
+  | { kind: 'stderr' };
+
+const FALLBACK_WARNING =
+  '[oh-my-opencode-slim] file logging unavailable, falling back to stderr';
+
+let loggerGeneration = 0;
+let currentSink: LogSink = { kind: 'uninitialized' };
 let writeChain: Promise<void> = Promise.resolve();
 
 function getLogDir(): string {
@@ -60,25 +69,56 @@ function cleanupOldLogs(logDir: string): void {
   }
 }
 
+function safeStderr(message: string): void {
+  try {
+    console.error(message);
+  } catch {
+    // Logging must remain best-effort.
+  }
+}
+
+function enterStderrFallback(expectedGeneration: number): void {
+  if (expectedGeneration !== loggerGeneration) return;
+  if (currentSink.kind === 'stderr') return;
+
+  currentSink = { kind: 'stderr' };
+  safeStderr(FALLBACK_WARNING);
+}
+
+function handleAppendFailure(failedGeneration: number, logEntry: string): void {
+  enterStderrFallback(failedGeneration);
+  safeStderr(logEntry.trimEnd());
+}
+
 export function initLogger(sessionId: string): void {
-  const dir = getLogDir();
+  const attemptGeneration = ++loggerGeneration;
+
   try {
+    const dir = getLogDir();
     fs.mkdirSync(dir, { recursive: true });
+
+    const nextLogFile = path.join(
+      dir,
+      `${LOG_PREFIX}${sessionId}${LOG_SUFFIX}`,
+    );
+    fs.closeSync(fs.openSync(nextLogFile, 'a'));
+
+    if (attemptGeneration !== loggerGeneration) return;
+
+    currentSink = {
+      kind: 'file',
+      filePath: nextLogFile,
+    };
+    cleanupOldLogs(dir);
   } catch {
-    // Directory creation failed - logging will silently fail
+    enterStderrFallback(attemptGeneration);
   }
-  logFile = path.join(dir, `${LOG_PREFIX}${sessionId}${LOG_SUFFIX}`);
-  try {
-    fs.closeSync(fs.openSync(logFile, 'a'));
-  } catch {
-    // File creation failed - later writes will silently fail
-  }
-  cleanupOldLogs(dir);
 }
 
 /** @internal Reset logger state for testing */
 export function resetLogger(): void {
-  logFile = null;
+  loggerGeneration += 1;
+  currentSink = { kind: 'uninitialized' };
   writeChain = Promise.resolve();
 }
 
@@ -86,10 +126,14 @@ export function resetLogger(): void {
 export async function flushLoggerForTesting(): Promise<void> {
   await writeChain;
 }
+
 export function log(message: string, data?: unknown): void {
-  const target = logFile;
-  if (!target) return; // Uninitialized - silently no-op
   try {
+    const sink = currentSink;
+    const entryGeneration = loggerGeneration;
+
+    if (sink.kind === 'uninitialized') return;
+
     const timestamp = new Date().toISOString();
     let dataStr = '';
     if (data !== undefined) {
@@ -99,13 +143,34 @@ export function log(message: string, data?: unknown): void {
         dataStr = '[unserializable]';
       }
     }
+
     const logEntry = `[${timestamp}] ${message} ${dataStr}\n`;
+
+    if (sink.kind === 'stderr') {
+      safeStderr(logEntry.trimEnd());
+      return;
+    }
+
+    const filePath = sink.filePath;
     writeChain = writeChain
-      .then(() => appendFile(target, logEntry))
-      .catch(() => {
-        // Silently ignore logging errors and keep future writes alive
-      });
+      .catch(() => undefined)
+      .then(async () => {
+        if (
+          entryGeneration === loggerGeneration &&
+          currentSink.kind === 'stderr'
+        ) {
+          safeStderr(logEntry.trimEnd());
+          return;
+        }
+
+        try {
+          await appendFile(filePath, logEntry);
+        } catch {
+          handleAppendFailure(entryGeneration, logEntry);
+        }
+      })
+      .catch(() => undefined);
   } catch {
-    // Silently ignore logging errors
+    // Logging must remain best-effort.
   }
 }

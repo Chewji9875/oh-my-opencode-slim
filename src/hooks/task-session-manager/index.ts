@@ -1,6 +1,7 @@
 import type { PluginInput } from '@opencode-ai/plugin';
 import {
   BackgroundJobBoard,
+  type BackgroundJobExecution,
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
   isInternalInitiatorPart,
@@ -10,6 +11,7 @@ import type { SessionLifecycle } from '../session-lifecycle';
 import { isUserMessageWithParts } from '../types';
 import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
+  type InjectedTerminalJobs,
   type InjectionState,
   injectBackgroundJobBoard,
   MAX_PROCESSED_INJECTED_COMPLETIONS,
@@ -18,6 +20,10 @@ import {
   updateFromInjectedCompletion,
 } from './board-injection';
 import { evaluateContinuation as evaluateContinuationFn } from './continuation-evaluator';
+import {
+  type ContinuationModelSelection,
+  parseContinuationModelSelection,
+} from './continuation-model-selection';
 import { createContinuationTokenManager } from './continuation-token-manager';
 import { handleEvent } from './event-router';
 import { createIdleReconciler } from './idle-reconciliation';
@@ -85,7 +91,15 @@ export function createTaskSessionManagerHook(
 
   const processedInjectedCompletions = new Set<string>();
   const processedInjectedCompletionOrder: string[] = [];
-  const terminalJobsInjectedByParent = new Map<string, Set<string>>();
+  const terminalJobsInjectedByParent = new Map<string, InjectedTerminalJobs>();
+  const pendingInjectedTerminalJobsByParent = new Map<
+    string,
+    Map<string, BackgroundJobExecution>
+  >();
+  const observedContinuationModels = new Map<
+    string,
+    ContinuationModelSelection
+  >();
 
   // Forward refs for circular deps — set after corresponding managers exist.
   // These are captured by closure in createIdleReconciler and only called
@@ -138,6 +152,7 @@ export function createTaskSessionManagerHook(
     todo?: (input: unknown) => Promise<SdkResponse>;
     children?: (input: unknown) => Promise<SdkResponse>;
     status?: (input: unknown) => Promise<SdkResponse>;
+    get?: (input: unknown) => Promise<SdkResponse>;
     promptAsync?: (input: unknown) => Promise<unknown>;
   };
   const sessionSdk = (_ctx.client as unknown as { session?: SessionSdk })
@@ -151,6 +166,8 @@ export function createTaskSessionManagerHook(
       inputWaits,
       options,
       sessionSdk,
+      getObservedModelSelection: (sessionID) =>
+        observedContinuationModels.get(sessionID),
     });
 
   if (options.coordinator) {
@@ -162,6 +179,7 @@ export function createTaskSessionManagerHook(
         continuationTokens.clearContinuation(sessionId);
       }
       inputWaits.clearInputWaits(sessionId);
+      observedContinuationModels.delete(sessionId);
       idleReconciler.clearIdleTimers(sessionId);
       // During a foreground fallback abort/re-prompt cycle, the session
       // is being torn down and immediately recreated with a fallback model.
@@ -179,7 +197,9 @@ export function createTaskSessionManagerHook(
         if (!hardTimedOut) options.backgroundJobSupervisor?.drop(sessionId);
       }
       terminalJobsInjectedByParent.delete(sessionId);
+      pendingInjectedTerminalJobsByParent.delete(sessionId);
       injectionState.retainedBoardSnapshots.delete(sessionId);
+      injectionState.retainedTailBoards.delete(sessionId);
       taskContextTracker.clearSession(sessionId);
       taskContextTracker.prune(backgroundJobBoard);
       pendingCallTracker.clearSession(sessionId);
@@ -193,11 +213,13 @@ export function createTaskSessionManagerHook(
     processedInjectedCompletions,
     processedInjectedCompletionOrder,
     terminalJobsInjectedByParent,
+    pendingInjectedTerminalJobsByParent,
     maxProcessedInjectedCompletions: MAX_PROCESSED_INJECTED_COMPLETIONS,
     metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
     shouldManageSession: options.shouldManageSession,
     taskContextTracker,
     retainedBoardSnapshots: new Map(),
+    retainedTailBoards: new Map(),
   };
 
   return {
@@ -248,6 +270,21 @@ export function createTaskSessionManagerHook(
         )
       ) {
         return;
+      }
+      const outputModel = isObjectRecord(outputMessage?.model)
+        ? outputMessage.model
+        : undefined;
+      const variant =
+        typeof inputMessage?.variant === 'string'
+          ? inputMessage.variant
+          : outputModel?.variant;
+      const modelSelection =
+        parseContinuationModelSelection(inputMessage?.model, variant) ??
+        parseContinuationModelSelection(outputModel, variant);
+      if (modelSelection) {
+        observedContinuationModels.set(sessionID, modelSelection);
+      } else {
+        observedContinuationModels.delete(sessionID);
       }
       continuationTokens.rearmForUserMessage(sessionID, messageIdentity);
     },
@@ -334,8 +371,16 @@ export function createTaskSessionManagerHook(
           error?: { name?: string };
         };
       };
-    }): Promise<void> =>
-      handleEvent(input, {
+    }): Promise<void> => {
+      if (input.event.type === 'server.instance.disposed') {
+        observedContinuationModels.clear();
+      } else if (input.event.type === 'session.deleted') {
+        const sessionID =
+          input.event.properties?.info?.id ?? input.event.properties?.sessionID;
+        if (sessionID) observedContinuationModels.delete(sessionID);
+      }
+
+      return handleEvent(input, {
         inputWaits,
         continuationTokens,
         options,
@@ -344,8 +389,10 @@ export function createTaskSessionManagerHook(
         pendingCallTracker,
         taskContextTracker,
         terminalJobsInjectedByParent,
+        pendingInjectedTerminalJobsByParent,
         retainedBoardSnapshots: injectionState.retainedBoardSnapshots,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
-      }),
+      });
+    },
   };
 }

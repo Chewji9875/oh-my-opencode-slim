@@ -40,6 +40,30 @@ describe('PluginConfigSchema image_routing', () => {
   });
 });
 
+describe('PluginConfigSchema webfetch', () => {
+  it('defaults the enhanced webfetch tool to enabled', () => {
+    const result = PluginConfigSchema.safeParse({ webfetch: {} });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.webfetch?.enabled).toBe(true);
+    }
+  });
+
+  it('accepts dedicated model fallback entries with variants', () => {
+    const result = PluginConfigSchema.safeParse({
+      webfetch: {
+        model: [
+          'openai/gpt-4o-mini',
+          { id: 'anthropic/claude-3-haiku', variant: 'low-latency' },
+        ],
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
 describe('PluginConfigSchema backgroundJobs', () => {
   it('defaults board injection to the legacy latest strategy', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
