@@ -1,6 +1,7 @@
 import type {
   BackgroundJobBoard,
   BackgroundJobLaunchInput,
+  BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
@@ -234,6 +235,13 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     now = Date.now(),
   ): string | undefined {
     return this.board.formatForPrompt(parentSessionID, now);
+  }
+
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now = Date.now(),
+  ): BackgroundJobPromptMetadata | undefined {
+    return this.board.formatForPromptWithMetadata(parentSessionID, now);
   }
 
   clearParent(parentSessionID: string): void {

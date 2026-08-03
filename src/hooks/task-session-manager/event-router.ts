@@ -5,6 +5,7 @@
  * session.idle, session.error, session.status, session.deleted) to
  * the appropriate subsystems.
  */
+import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import { log } from '../../utils/logger';
 import { isFailoverError } from '../foreground-fallback/index';
@@ -78,6 +79,10 @@ export async function handleEvent(
       prune(board: { taskIDs(): Set<string> }): void;
     };
     terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
+    pendingInjectedTerminalJobsByParent: Map<
+      string,
+      Map<string, BackgroundJobExecution>
+    >;
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
   },
 ): Promise<void> {
@@ -174,7 +179,9 @@ export async function handleEvent(
         ? deps.options.shouldManageSession(sessionId)
         : false,
       terminalJobsPending: sessionId
-        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.taskIDs.size ?? 0)
+        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.executions.size ??
+            0) +
+          (deps.pendingInjectedTerminalJobsByParent.get(sessionId)?.size ?? 0)
         : 0,
       runningJobForSession: job?.state === 'running' || false,
     });
@@ -210,6 +217,7 @@ export async function handleEvent(
       const props = input.event.properties as { error?: unknown } | undefined;
       if (!props?.error || !isFailoverError(props.error)) {
         deps.terminalJobsInjectedByParent.delete(sessionId);
+        deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
         // orchestrator sees the failure instead of a false completion.
         const job = deps.backgroundJobBoard.get(sessionId);

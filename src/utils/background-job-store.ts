@@ -1,5 +1,6 @@
 import type {
   BackgroundJobLaunchInput,
+  BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
@@ -67,6 +68,10 @@ export interface BackgroundJobStore {
   hasTerminalUnreconciled(parentSessionID: string): boolean;
   hasConvergenceSignals(taskID: string, threshold?: number): boolean;
   formatForPrompt(parentSessionID: string, now?: number): string | undefined;
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now?: number,
+  ): BackgroundJobPromptMetadata | undefined;
 
   // ── Lifecycle policy ─────────────────────────────────────────────
   /** Evaluate close policy. Returns true if session should close now.

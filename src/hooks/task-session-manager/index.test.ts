@@ -1368,6 +1368,714 @@ describe('task-session-manager hook', () => {
     );
   });
 
+  test('injected completion through message transform (without injectBackgroundJobBoard) remains terminal-unreconciled before parent idle, then reconciles after', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          description: 'map hooks',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        output: ['task_id: child-1', 'state: running'].join('\n'),
+      },
+    );
+
+    const messages = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: map hooks</summary>',
+                '<task_result>',
+                'found hook flow',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    // through transform only, without injectBackgroundJobBoard (avoids broad remember)
+    await hook['experimental.chat.messages.transform']({}, messages as never);
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'found hook flow',
+    });
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    // duplicate occurrence is idempotent (no reprocess, no double remember)
+    await hook['experimental.chat.messages.transform']({}, messages as never);
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('another terminal-unreconciled sibling remains unreconciled when only first child completion was injected', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // setup child-1
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: { subagent_type: 'explorer', description: 'first' },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    // setup sibling child-2 (terminal via updateStatus after board payload, no injected)
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      {
+        args: { subagent_type: 'oracle', description: 'second' },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: child-2', 'state: running'].join('\n') },
+    );
+
+    // Full production sequence: transformMessages ... Only child-1 synthetic.
+    // child-2 still running so not in terminalUnreconciled IDs of this payload.
+    const messages = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: first</summary>',
+                '<task_result>done1</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await transformMessages(hook, messages);
+
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(false);
+
+    // duplicate stays idempotent
+    await transformMessages(hook, messages);
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    // now make child-2 terminal (after the board payload was emitted)
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'sibling done',
+    });
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    // sibling terminal but never appeared in board payload nor had synthetic injected
+    expect(board.get('child-2')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+  });
+
+  test('a later synthetic completion does not replace an older delivered terminal batch', async () => {
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 3 });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+    });
+
+    for (const taskID of ['child-1', 'child-2']) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: taskID,
+      });
+      board.updateStatus({ taskID, state: 'completed' });
+    }
+
+    // The first board payload records both executions as delivered.
+    await transformMessages(hook, createMessages('parent-1', 'first turn'));
+
+    board.registerLaunch({
+      taskID: 'child-3',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'child-3',
+    });
+    const laterCompletion = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'child-3-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-3" state="completed">',
+                '<summary>Background task completed: child-3</summary>',
+                '<task_result>done3</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    // Process the later synthetic completion without rendering a new board.
+    await hook['experimental.chat.messages.transform'](
+      {},
+      laterCompletion as never,
+    );
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    for (const taskID of ['child-1', 'child-2', 'child-3']) {
+      expect(board.get(taskID)).toMatchObject({
+        state: 'reconciled',
+        terminalUnreconciled: false,
+      });
+    }
+  });
+
+  test('shape reconciliation leaves a pending synthetic completion unreconciled until its payload is delivered', async () => {
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 3 });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'first',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'completed' });
+    await transformMessages(hook, createMessages('parent-1', 'first turn'));
+
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'second',
+    });
+    const pendingCompletion = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'child-2-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-2" state="completed">',
+                '<summary>Background task completed: child-2</summary>',
+                '<task_result>done2</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform'](
+      {},
+      pendingCompletion as never,
+    );
+    expect(board.get('child-2')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+
+    // Shape reconciliation runs before this current payload is rendered.
+    await hook.injectBackgroundJobBoard({}, pendingCompletion as never);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-2')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+    expect(boardText(pendingCompletion)).toContain(
+      'child-2 / oracle / completed, unreconciled',
+    );
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+    expect(board.get('child-2')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('no-starvation latest pipeline: child-1 synthetic remembered; child-2 becomes terminal before idle; next full transform emits child-2 in board; idle reconciles both', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // child-1 via tool + synthetic injected (narrow + metadata will remember it)
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { args: { subagent_type: 'explorer', description: 'first' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    const msg1 = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: first</summary>',
+                '<task_result>done1</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await transformMessages(hook, msg1);
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    // before idle, child-2 becomes terminal (no synthetic for it)
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { args: { subagent_type: 'oracle', description: 'second' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: child-2', 'state: running'].join('\n') },
+    );
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done2',
+    });
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    // next full transform: emits board payload that now includes child-2 terminal
+    const msg2 = createMessages('parent-1', 'next turn');
+    await transformMessages(hook, msg2);
+    expect(boardText(msg2)).toContain('child-2');
+    expect(boardText(msg2)).toContain('completed, unreconciled');
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-2')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('metadata/renderer selection omits child-2 from both board text and IDs; child-2 absent from emitted text and remains unreconciled', async () => {
+    const board = new BackgroundJobBoard();
+    // renderer-selection stub/fake: omits child-2 row from BOTH text and IDs (test-only shaping)
+    const orig = board.formatForPromptWithMetadata.bind(board);
+    board.formatForPromptWithMetadata = (p: string) => {
+      const m = orig(p);
+      if (!m) return m;
+      const shapedText = m.text
+        ? m.text
+            .split('\n')
+            .filter((line: string) => !line.includes('child-2'))
+            .join('\n')
+        : m.text;
+      return {
+        text: shapedText,
+        terminalUnreconciledTaskIDs: m.terminalUnreconciledTaskIDs.filter(
+          (execution) => execution.taskID === 'child-1',
+        ),
+      };
+    };
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'c1',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'd1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'c2',
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'd2',
+    });
+
+    const messages = createMessages('parent-1');
+    await transformMessages(hook, messages);
+
+    const emitted = boardText(messages);
+    expect(emitted).not.toContain('child-2');
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushIdleReconcileDelay();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-2')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+  });
+
+  test('checkpoint-compatible no-starvation via snapshot replay: child-1 synthetic; child-2 terminal no synthetic; second transform replays snapshot with child-2; board text has it; idle reconciles both', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+      idleReconcileDelayMs: 0,
+    });
+
+    // first: synthetic child-1 only
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { args: { subagent_type: 'explorer', description: 'first' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    const msg1 = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 'parent-1' },
+          parts: [
+            {
+              type: 'text',
+              id: 'part-1',
+              synthetic: true,
+              text: [
+                '<task id="child-1" state="completed">',
+                '<summary>Background task completed: first</summary>',
+                '<task_result>done1</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await transformMessages(hook, msg1);
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    // child-2 becomes terminal without synthetic
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { args: { subagent_type: 'oracle', description: 'second' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: child-2', 'state: running'].join('\n') },
+    );
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done2',
+    });
+    expect(board.get('child-2')?.terminalUnreconciled).toBe(true);
+
+    // second full transform (checkpoint): emits/replays snapshot containing child-2 (no narrow for child-2)
+    const msg2 = createMessages('parent-1', 'next');
+    await transformMessages(hook, msg2);
+    const replayedText = boardText(msg2);
+    expect(replayedText).toContain('child-2');
+    expect(replayedText).toContain('completed, unreconciled');
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushContinuation();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-2')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('checkpoint replay does not reconcile a relaunch with the same task ID', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'first execution',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'completed' });
+
+    const firstRequest = createAnchoredMessages('parent-1', ['turn 1']);
+    await transformMessages(hook, firstRequest);
+    expect(boardSnapshotIDs(firstRequest)).toHaveLength(1);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 1,
+      terminalUnreconciled: true,
+    });
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+    expect(board.get('child-1')).toMatchObject({
+      generation: 1,
+      state: 'reconciled',
+    });
+
+    board.drop('child-1');
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'second execution',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'second result',
+    });
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      terminalUnreconciled: true,
+    });
+
+    // Hide the current board payload so only the stale generation-1 snapshot
+    // is delivered on this request.
+    board.formatForPromptWithMetadata = () => undefined;
+    const replayedRequest = createAnchoredMessages('parent-1', [
+      'turn 1',
+      'turn 2',
+    ]);
+    await transformMessages(hook, replayedRequest);
+    expect(boardSnapshotIDs(replayedRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'second result',
+    });
+  });
+
+  test('checkpoint creates a new execution-aware snapshot when visible board text is unchanged', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'same execution text',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'same result',
+    });
+
+    const firstRequest = createAnchoredMessages('parent-1', ['turn 1']);
+    await transformMessages(hook, firstRequest);
+    const firstBoardText = boardText(firstRequest);
+    expect(firstBoardText).toContain('Result: same result');
+    expect(boardSnapshotIDs(firstRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'same execution text',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'same result',
+    });
+    expect(board.formatForPrompt('parent-1')).toBe(firstBoardText);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      terminalUnreconciled: true,
+    });
+
+    let reconciliationCount = 0;
+    const markReconciled = board.markReconciled.bind(board);
+    board.markReconciled = (taskID, now) => {
+      reconciliationCount += 1;
+      return markReconciled(taskID, now);
+    };
+
+    const secondRequest = {
+      messages: [
+        ...firstRequest.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'response 1' }],
+        },
+      ],
+    };
+    await transformMessages(hook, secondRequest);
+    expect(boardSnapshotIDs(secondRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+      'oh-my-opencode-slim:background-job-board:parent-1:1',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(reconciliationCount).toBe(1);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
   test('ignores non-synthetic user text that resembles task status', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });

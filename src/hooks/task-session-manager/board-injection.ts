@@ -9,6 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import type {
+  BackgroundJobExecution,
   BackgroundJobRecord,
   BackgroundJobStore,
   ContextFile,
@@ -49,6 +50,7 @@ type RetainedBoardSnapshot = {
   anchorKey: string;
   id: string;
   text: string;
+  terminalUnreconciledTaskIDs: BackgroundJobExecution[];
 };
 
 export type RetainedBoardSnapshotState = {
@@ -61,8 +63,8 @@ export type RetainedBoardSnapshotState = {
 // ── State shape ────────────────────────────────────────────────────────
 
 export type InjectedTerminalJobs = {
-  taskIDs: Set<string>;
-  /** Prompt shape when these task IDs were last surfaced to the model. */
+  executions: Map<string, BackgroundJobExecution>;
+  /** Prompt shape when these executions were last surfaced to the model. */
   promptShapeKey: string;
 };
 
@@ -73,6 +75,10 @@ export interface InjectionState {
   processedInjectedCompletions: Set<string>;
   processedInjectedCompletionOrder: string[];
   terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
+  pendingInjectedTerminalJobsByParent: Map<
+    string,
+    Map<string, BackgroundJobExecution>
+  >;
   maxProcessedInjectedCompletions: number;
   metadataKey: string;
   shouldManageSession: (sessionID: string) => boolean;
@@ -224,6 +230,12 @@ export function updateFromInjectedCompletion(
       result: status.result,
     });
     rememberProcessedInjectedCompletion(state, occurrenceId);
+    if (existing?.terminalUnreconciled && existing?.parentSessionID) {
+      rememberPendingInjectedTerminalJob(state, existing.parentSessionID, {
+        taskID: existing.taskID,
+        generation: existing.generation,
+      });
+    }
     return existing;
   }
 
@@ -238,6 +250,13 @@ export function updateFromInjectedCompletion(
     state.taskContextTracker,
   );
   if (!updated) return undefined;
+
+  if (updated.terminalUnreconciled && updated.parentSessionID) {
+    rememberPendingInjectedTerminalJob(state, updated.parentSessionID, {
+      taskID: updated.taskID,
+      generation: updated.generation,
+    });
+  }
 
   log('[task-session-manager] processed injected background completion', {
     taskID: updated.taskID,
@@ -277,35 +296,98 @@ export function isMissingRememberedSessionError(output: string): boolean {
   );
 }
 
+function executionKey(execution: BackgroundJobExecution): string {
+  return `${execution.taskID}\u001f${execution.generation}`;
+}
+
+function sameExecutionIdentity(
+  left: readonly BackgroundJobExecution[],
+  right: readonly BackgroundJobExecution[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const leftKeys = new Set(left.map(executionKey));
+  return right.every((execution) => leftKeys.has(executionKey(execution)));
+}
+
+function rememberPendingInjectedTerminalJob(
+  state: InjectionState,
+  parentSessionID: string,
+  execution: BackgroundJobExecution,
+): void {
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID) ??
+    new Map<string, BackgroundJobExecution>();
+  pending.set(executionKey(execution), { ...execution });
+  state.pendingInjectedTerminalJobsByParent.set(parentSessionID, pending);
+}
+
+function reconcileExecutionBatch(
+  state: InjectionState,
+  parentSessionID: string,
+  executions: Iterable<BackgroundJobExecution>,
+): void {
+  for (const execution of executions) {
+    const current = state.backgroundJobBoard.get(execution.taskID);
+    if (!current || current.generation !== execution.generation) {
+      log('[task-session-manager] skipped stale terminal execution', {
+        parentSessionID,
+        execution,
+        currentGeneration: current?.generation,
+      });
+      continue;
+    }
+    state.backgroundJobBoard.markReconciled(execution.taskID);
+  }
+}
+
 export function rememberInjectedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
+  executions: readonly BackgroundJobExecution[],
   promptShapeKey: string,
 ): void {
-  const taskIDs = state.backgroundJobBoard
-    .list(parentSessionID)
-    .filter((job) => job.terminalUnreconciled)
-    .map((job) => job.taskID);
-  if (taskIDs.length === 0) return;
+  if (!parentSessionID || executions.length === 0) return;
 
-  log('[task-session-manager] terminal jobs injected for reconciliation', {
-    parentSessionID,
-    taskIDs,
-  });
+  const uniqueExecutions = new Map(
+    executions.map((execution) => [executionKey(execution), execution]),
+  );
+  if (uniqueExecutions.size === 0) return;
 
   const existing = state.terminalJobsInjectedByParent.get(parentSessionID);
   if (existing && existing.promptShapeKey === promptShapeKey) {
-    // Same prompt shape: union the task IDs into the existing set
-    for (const taskID of taskIDs) {
-      existing.taskIDs.add(taskID);
+    // Same prompt shape: union the executions delivered by each payload.
+    for (const [key, execution] of uniqueExecutions) {
+      existing.executions.set(key, { ...execution });
     }
   } else {
-    // Different prompt shape or new entry: overwrite
+    // A different shape is normally reconciled before this point. Replace
+    // the entry defensively so executions from an older payload cannot leak
+    // into the new delivered batch.
     state.terminalJobsInjectedByParent.set(parentSessionID, {
-      taskIDs: new Set(taskIDs),
+      executions: new Map(
+        [...uniqueExecutions].map(([key, execution]) => [
+          key,
+          { ...execution },
+        ]),
+      ),
       promptShapeKey,
     });
   }
+
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID);
+  if (pending) {
+    for (const key of uniqueExecutions.keys()) pending.delete(key);
+    if (pending.size === 0) {
+      state.pendingInjectedTerminalJobsByParent.delete(parentSessionID);
+    }
+  }
+
+  log('[task-session-manager] terminal jobs injected for reconciliation', {
+    parentSessionID,
+    executions: [...uniqueExecutions.values()],
+    promptShapeKey,
+  });
 }
 
 export function reconcileInjectedTerminalJobs(
@@ -313,17 +395,26 @@ export function reconcileInjectedTerminalJobs(
   parentSessionID: string,
 ): void {
   const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
-  if (!entry) return;
+  const pending =
+    state.pendingInjectedTerminalJobsByParent.get(parentSessionID);
+  if (!entry && !pending) return;
+
+  const executions = new Map<string, BackgroundJobExecution>();
+  for (const [key, execution] of entry?.executions ?? []) {
+    executions.set(key, execution);
+  }
+  for (const [key, execution] of pending ?? []) {
+    executions.set(key, execution);
+  }
 
   log('[task-session-manager] reconciling injected terminal jobs', {
     parentSessionID,
-    taskIDs: [...entry.taskIDs],
+    executions: [...executions.values()],
   });
 
-  for (const taskID of entry.taskIDs) {
-    state.backgroundJobBoard.markReconciled(taskID);
-  }
+  reconcileExecutionBatch(state, parentSessionID, executions.values());
   state.terminalJobsInjectedByParent.delete(parentSessionID);
+  state.pendingInjectedTerminalJobsByParent.delete(parentSessionID);
 }
 
 function reconcileConsumedTerminalJobs(
@@ -334,8 +425,14 @@ function reconcileConsumedTerminalJobs(
   const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
   if (!entry || entry.promptShapeKey === promptShapeKey) return;
   // The model produced at least one new part after the request that carried
-  // these completions, so it has consumed them. Stop re-announcing.
-  reconcileInjectedTerminalJobs(state, parentSessionID);
+  // these completions, so it has consumed that shaped delivery. Pending
+  // synthetic completions belong to a later delivery and remain pending.
+  log('[task-session-manager] reconciling consumed terminal jobs', {
+    parentSessionID,
+    executions: [...entry.executions.values()],
+  });
+  reconcileExecutionBatch(state, parentSessionID, entry.executions.values());
+  state.terminalJobsInjectedByParent.delete(parentSessionID);
 }
 
 export async function injectBackgroundJobBoard(
@@ -382,12 +479,18 @@ export async function injectBackgroundJobBoard(
     const shapeKey = promptShapeKey(realMessages(messages, state.metadataKey));
     reconcileConsumedTerminalJobs(state, message.info.sessionID, shapeKey);
 
-    const reminder = state.backgroundJobBoard.formatForPrompt(
+    const boardMeta = state.backgroundJobBoard.formatForPromptWithMetadata(
       message.info.sessionID,
     );
+    const reminder = boardMeta?.text;
     if (!reminder) return;
 
-    rememberInjectedTerminalJobs(state, message.info.sessionID, shapeKey);
+    rememberInjectedTerminalJobs(
+      state,
+      message.info.sessionID,
+      boardMeta.terminalUnreconciledTaskIDs,
+      shapeKey,
+    );
     // Append the board as its own trailing message rather than mutating
     // an existing user message. In long tool loops the latest user
     // message becomes deep history; rewriting it on board state changes
@@ -437,7 +540,9 @@ function injectCheckpointBoard(
 
   if (canSurface) reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
 
-  const reminder = state.backgroundJobBoard.formatForPrompt(sessionID);
+  const boardMeta =
+    state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
+  const reminder = boardMeta?.text;
   const canCreateSnapshot = canSurface && reminder !== undefined;
 
   const replayBaseMessage = triggeringMessage ?? tailMessage;
@@ -449,7 +554,14 @@ function injectCheckpointBoard(
 
   if (canCreateSnapshot && reminder) {
     const anchorKey = findLastMessageAnchorKey(currentMessages);
-    if (anchorKey && snapshotState.snapshots.at(-1)?.text !== reminder) {
+    const previousSnapshot = snapshotState.snapshots.at(-1);
+    const sameSnapshot =
+      previousSnapshot?.text === reminder &&
+      sameExecutionIdentity(
+        previousSnapshot.terminalUnreconciledTaskIDs,
+        boardMeta.terminalUnreconciledTaskIDs,
+      );
+    if (anchorKey && !sameSnapshot) {
       const encodedSessionID = encodeURIComponent(sessionID);
       const sequence = snapshotState.nextSnapshotSequence;
       snapshotState.nextSnapshotSequence += 1;
@@ -461,18 +573,21 @@ function injectCheckpointBoard(
         anchorKey,
         id: `oh-my-opencode-slim:background-job-board:${encodedSessionID}:${sequence}`,
         text: reminder,
+        terminalUnreconciledTaskIDs: boardMeta.terminalUnreconciledTaskIDs,
       });
     }
-    rememberInjectedTerminalJobs(state, sessionID, shapeKey);
   }
 
-  replayCheckpointBoard(
+  const replayedIDs = replayCheckpointBoard(
     messages,
     replayBaseMessage,
     sessionID,
     snapshotState,
     state.metadataKey,
   );
+  if (replayedIDs.length > 0) {
+    rememberInjectedTerminalJobs(state, sessionID, replayedIDs, shapeKey);
+  }
 }
 
 function findLastMessageAnchorKey(
@@ -641,7 +756,7 @@ function replayBoardSnapshots(
   sessionID: string,
   snapshotState: RetainedBoardSnapshotState,
   metadataKey: string,
-): void {
+): BackgroundJobExecution[] {
   const realMessageList = realMessages(messages, metadataKey);
   const currentAnchorKeys = messageAnchorKeys(realMessageList);
   const snapshotsByAnchor = new Map<string, RetainedBoardSnapshot[]>();
@@ -658,6 +773,7 @@ function replayBoardSnapshots(
   );
 
   const rebuiltMessages: unknown[] = [];
+  const replayedIDs: BackgroundJobExecution[] = [];
   let realMessageIndex = 0;
   for (const message of messages) {
     rebuiltMessages.push(message);
@@ -679,10 +795,14 @@ function replayBoardSnapshots(
           usedMessageIDs,
         ),
       );
+      if (snapshot.terminalUnreconciledTaskIDs?.length) {
+        replayedIDs.push(...snapshot.terminalUnreconciledTaskIDs);
+      }
     }
   }
 
   messages.splice(0, messages.length, ...rebuiltMessages);
+  return replayedIDs;
 }
 
 function replayCheckpointBoard(
@@ -691,15 +811,14 @@ function replayCheckpointBoard(
   sessionID: string,
   snapshotState: RetainedBoardSnapshotState,
   metadataKey: string,
-): void {
+): BackgroundJobExecution[] {
   stripTaggedContent(messages, metadataKey);
-  replayBoardSnapshots(
+  const ids = replayBoardSnapshots(
     messages,
     baseMessage,
     sessionID,
     snapshotState,
     metadataKey,
   );
-  // The caller records terminal jobs before this replay so that the normal
-  // idle reconciliation path can consume them after the prompt is processed.
+  return ids;
 }

@@ -16,10 +16,21 @@ export interface ContextFile {
   lastReadAt: number;
 }
 
+export interface BackgroundJobExecution {
+  taskID: string;
+  generation: number;
+}
+
+export interface BackgroundJobPromptMetadata {
+  text: string | undefined;
+  terminalUnreconciledTaskIDs: BackgroundJobExecution[];
+}
+
 export type BackgroundJobState = TaskOutputState | 'reconciled';
 
 export interface BackgroundJobRecord {
   taskID: string;
+  generation: number;
   parentSessionID: string;
   agent: string;
   description: string;
@@ -93,6 +104,7 @@ const AGENT_PREFIX: Record<string, string> = {
 export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly jobs = new Map<string, BackgroundJobRecord>();
   private readonly counters = new Map<string, number>();
+  private executionSequence = 0;
   private terminalStateListeners: TerminalStateListener[] = [];
 
   private readonly maxReusablePerAgent: number;
@@ -139,11 +151,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord {
     const now = input.now ?? Date.now();
+    const generation = ++this.executionSequence;
     const existing = this.jobs.get(input.taskID);
 
     if (existing) {
       const updated = {
         ...existing,
+        generation,
         agent: input.agent || existing.agent,
         description: input.description || existing.description,
         objective: input.objective ?? existing.objective,
@@ -170,6 +184,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
+      generation,
       parentSessionID: input.parentSessionID,
       agent: input.agent,
       description: input.description || `background ${input.agent} task`,
@@ -495,7 +510,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return errors >= threshold || timeouts >= threshold;
   }
 
-  formatForPrompt(parentSessionID: string, _now?: number): string | undefined {
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    _now?: number,
+  ): BackgroundJobPromptMetadata | undefined {
     const jobs = this.list(parentSessionID);
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
@@ -504,7 +522,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     if (active.length === 0 && reusable.length === 0) return undefined;
 
-    return formatSystemReminder(
+    const text = formatSystemReminder(
       [
         '### Background Job Board',
         'SENTINEL: background-job-board-v2',
@@ -521,6 +539,16 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : ['- none']),
       ].join('\n'),
     );
+
+    const terminalUnreconciledTaskIDs = active
+      .filter((job) => job.terminalUnreconciled)
+      .map(({ taskID, generation }) => ({ taskID, generation }));
+
+    return { text, terminalUnreconciledTaskIDs };
+  }
+
+  formatForPrompt(parentSessionID: string, now?: number): string | undefined {
+    return this.formatForPromptWithMetadata(parentSessionID, now)?.text;
   }
 
   clearParent(parentSessionID: string): void {

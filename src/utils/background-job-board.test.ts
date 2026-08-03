@@ -139,6 +139,44 @@ describe('BackgroundJobBoard', () => {
     expect(prompt).toEndWith('</system-reminder>');
   });
 
+  test('formats prompt metadata with only the terminal jobs in the payload', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first result',
+    });
+    board.updateStatus({ taskID: 'ses_1', state: 'completed' });
+    board.registerLaunch({
+      taskID: 'ses_2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'second result',
+    });
+    board.updateStatus({ taskID: 'ses_2', state: 'completed' });
+    board.registerLaunch({
+      taskID: 'ses_other',
+      parentSessionID: 'parent-2',
+      agent: 'oracle',
+      description: 'other parent result',
+    });
+    board.updateStatus({ taskID: 'ses_other', state: 'completed' });
+
+    const metadata = board.formatForPromptWithMetadata('parent-1');
+
+    expect(metadata?.text).toBe(board.formatForPrompt('parent-1'));
+    expect(metadata?.terminalUnreconciledTaskIDs).toEqual([
+      { taskID: 'ses_1', generation: 1 },
+      { taskID: 'ses_2', generation: 2 },
+    ]);
+    expect(
+      metadata?.terminalUnreconciledTaskIDs.some(
+        (execution) => execution.taskID === 'ses_other',
+      ),
+    ).toBe(false);
+  });
+
   test('escapes dynamic job content inside system reminders', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
