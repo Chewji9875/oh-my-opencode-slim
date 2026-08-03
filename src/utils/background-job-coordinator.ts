@@ -5,12 +5,15 @@ import type {
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
+  WallClockTimeoutClaimInput,
+  WallClockTimeoutFinalizeInput,
 } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
 import { log } from './logger';
 import type { TaskOutputState } from './task';
 
 type TerminalStateListener = (taskID: string) => void;
+type TerminalOutcomeListener = (record: BackgroundJobRecord) => void;
 
 /**
  * BackgroundJobCoordinator owns the lifecycle policy for background jobs.
@@ -25,6 +28,7 @@ type TerminalStateListener = (taskID: string) => void;
  */
 export class BackgroundJobCoordinator implements BackgroundJobStore {
   private terminalStateListeners: TerminalStateListener[] = [];
+  private terminalOutcomeListeners: TerminalOutcomeListener[] = [];
   // Stores session IDs (which equal task IDs) awaiting close after background job completes
   private readonly deferredIdleCloses = new Set<string>();
 
@@ -70,6 +74,24 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
         }
       }
     }
+
+    const record = this.board.get?.(taskID);
+    if (record) {
+      for (const listener of this.terminalOutcomeListeners) {
+        listener(record);
+      }
+    }
+  }
+
+  /** Observe every canonical terminal publication, including non-idle jobs. */
+  addTerminalOutcomeListener(listener: TerminalOutcomeListener): void {
+    this.terminalOutcomeListeners.push(listener);
+  }
+
+  removeTerminalOutcomeListener(listener: TerminalOutcomeListener): void {
+    this.terminalOutcomeListeners = this.terminalOutcomeListeners.filter(
+      (entry) => entry !== listener,
+    );
   }
 
   // ── Lifecycle policy ─────────────────────────────────────────────
@@ -117,6 +139,18 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
 
   updateFromStatusOutput(output: string): BackgroundJobRecord | undefined {
     return this.board.updateFromStatusOutput(output);
+  }
+
+  claimWallClockDeadline(
+    input: WallClockTimeoutClaimInput,
+  ): BackgroundJobRecord | undefined {
+    return this.board.claimWallClockDeadline(input);
+  }
+
+  finalizeWallClockTimeout(
+    input: WallClockTimeoutFinalizeInput,
+  ): BackgroundJobRecord | undefined {
+    return this.board.finalizeWallClockTimeout(input);
   }
 
   markRunningFromLiveSession(
