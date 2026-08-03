@@ -1087,6 +1087,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: {
         sessionID: string;
         agent?: string;
+        model?: {
+          providerID: string;
+          modelID: string;
+        };
+        variant?: string;
         parts?: unknown[];
         /** OpenCode chat.message message identity when present. */
         messageID?: string;
@@ -1097,6 +1102,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
           agent?: string;
           role?: string;
           sessionID?: string;
+          model?: {
+            providerID: string;
+            modelID: string;
+            variant?: string;
+          };
         };
         parts?: unknown[];
       },
