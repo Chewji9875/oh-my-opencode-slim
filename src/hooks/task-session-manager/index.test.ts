@@ -4007,6 +4007,43 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).not.toHaveBeenCalled();
   });
 
+  test('continues after reconciling an injected parent terminal job', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board);
+    const promptAsync = mock(async () => ({}));
+    const { hook } = createContinuationHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 0,
+      sessionClient: {
+        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
+        children: mock(async () => ({ data: [] })),
+        status: mock(async () => ({ data: {} })),
+        promptAsync,
+      },
+    });
+
+    await hook.injectBackgroundJobBoard({}, createMessages('parent-1'));
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushContinuation();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          parts: [expect.objectContaining({ synthetic: true })],
+        }),
+      }),
+    );
+  });
+
   test('nudges once for incomplete todos when parent and children are inactive', async () => {
     const promptAsync = mock(async () => ({}));
     const { hook } = createContinuationHook({
@@ -4036,8 +4073,11 @@ describe('task-session-manager hook', () => {
   });
 
   test('paired idle events submit at most one continuation', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board);
     const promptAsync = mock(async () => ({}));
     const { hook } = createContinuationHook({
+      backgroundJobBoard: board,
       idleReconcileDelayMs: 0,
       sessionClient: {
         todo: mock(async () => ({ data: [{ status: 'pending' }] })),
@@ -4046,6 +4086,8 @@ describe('task-session-manager hook', () => {
         promptAsync,
       },
     });
+
+    await hook.injectBackgroundJobBoard({}, createMessages('parent-1'));
 
     await Promise.all([
       hook.event({
@@ -4060,6 +4102,7 @@ describe('task-session-manager hook', () => {
     ]);
     await flushContinuation();
 
+    expect(board.get('child-1')?.terminalUnreconciled).toBe(false);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 

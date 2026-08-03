@@ -51,11 +51,11 @@ All modules depend on `BackgroundJobBoard` from `src/utils/background-job-board.
     - Injects a `<system-reminder>` part containing the `### Background Job Board` section into user messages for managed sessions
     - Lists active, unreconciled, and reusable sessions
     - Remembers injected terminal jobs to reconcile them on the next request after the completion was surfaced to the model (via `reconcileConsumedTerminalJobs`)
-    - The idle timer remains as a backstop for when the model ends its turn without further requests
+    - The idle timer remains a backstop for when the model ends its turn without further requests; after reconciling injected terminal results, the opt-in continuation evaluator can run in the same idle cycle under its existing guards
 
 5. **Lifecycle Events (`event`)**
     - `session.created`: Adds new task IDs to pending managed set
-    - `session.idle` / `session.status` (idle): Reconciles injected terminal jobs for the parent session (backstop path)
+    - `session.idle` / `session.status` (idle): Reconciles injected terminal jobs for the parent session (backstop path), then can run the opt-in continuation evaluator in the same idle cycle under its existing guards
     - `session.status` (busy): Marks sessions as running from live session state
     - `session.deleted`: Clears job state, child jobs, and pending call records for the session
 
@@ -72,6 +72,7 @@ User task call → tool.execute.before → PendingTaskCall created → task ID r
 → tool.execute.after → BackgroundJobBoard.registerLaunch() → context extracted/added
 → Message transform → BackgroundJobBoard.formatForPrompt() injected as a system-reminder message part
 → session.idle → reconcileInjectedTerminalJobs() → BackgroundJobBoard.markReconciled()
+→ opt-in continuation evaluator (same idle cycle, existing guards)
 ```
 
 ## Integration
