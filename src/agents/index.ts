@@ -197,6 +197,9 @@ function applyOverrides(
   if (override.displayName) {
     agent.displayName = override.displayName;
   }
+  if (override.description) {
+    agent.description = override.description;
+  }
   if (override.permission) {
     agent.config.permission = override.permission;
   }
@@ -236,9 +239,11 @@ function buildCustomAgentDefinition(
     `You are the ${name} specialist.`,
   );
   const primaryModel = getPrimaryModelFromOverride(override);
+  const description = override.description ?? `Custom subagent '${name}'`;
 
   return {
     name,
+    description,
     config: {
       model: primaryModel ?? DEFAULT_MODELS.oracle,
       temperature: 0.2,
