@@ -222,7 +222,6 @@ async function abortAndVerifySession(
   taskID: string,
 ): Promise<void> {
   log('[cancel-task] abort attempt starting', { taskID });
-  const abortStartedAt = Date.now();
   try {
     // ponytail: abortSessionWithTimeout now takes v2 OpencodeClient
     await abortSessionWithTimeout(
@@ -251,7 +250,7 @@ async function deleteAndVerifySession(
 ): Promise<void> {
   const v2 = getClient(options.input);
 
-  log('[cancel-task] deleting session after unstable abort', {
+  log('[cancel-task] deleting session after abort attempt', {
     taskID,
     reason,
   });

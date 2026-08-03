@@ -230,10 +230,13 @@ async function runSecondaryModel(
   const v2 = getClient(input);
   const directory = input.directory;
 
-  const sessionResponse = await v2.session.create({
-    directory,
-    title: 'smartfetch-secondary',
-  });
+  const sessionResponse = await v2.session.create(
+    {
+      directory,
+      title: 'smartfetch-secondary',
+    },
+    { throwOnError: true },
+  );
 
   const session = sessionResponse.data;
   const sessionId = session?.id;
@@ -261,11 +264,13 @@ async function runSecondaryModel(
       (toolIDs || []).map((id: string) => [id, false]),
     );
 
+    const { variant, ...modelOnly } = model;
     const result = await Promise.race([
       v2.session.prompt({
         sessionID: sessionId,
         directory,
-        model,
+        model: modelOnly,
+        ...(variant ? { variant } : {}),
         system:
           'Answer only from the supplied content. Do not use tools or outside knowledge.',
         tools: disabledTools,
