@@ -19,6 +19,7 @@ import {
   AGENT_ALIASES,
   DEFAULT_MAX_CONTEXT_LINES,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
+  DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   DEFAULT_MAX_SESSIONS_PER_AGENT,
   DEFAULT_READ_CONTEXT_MAX_FILES,
   DEFAULT_READ_CONTEXT_MIN_LINES,
@@ -75,6 +76,7 @@ import {
 } from './utils';
 import { isPluginDisabledByEnv } from './utils/env';
 import { initLogger, log } from './utils/logger';
+import { SessionMetadataStore } from './utils/session-metadata';
 import { collapseSystemInPlace } from './utils/system-collapse';
 
 /**
@@ -147,10 +149,15 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let multiplexerEnabled: boolean;
   let multiplexerSessionManager: MultiplexerSessionManager;
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
-  let sessionAgentMap: Map<string, string>;
-  // ponytail: cache sessionID -> project directory so TUI model writes
-  // land in the right per-project file after a project switch (ctx.directory is stale)
-  const sessionDirectories = new Map<string, string>();
+  const sessionMetadata = new SessionMetadataStore({
+    maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+    onEvict: (sessionID) => {
+      log('[session] evicted oldest session metadata', {
+        threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+        droppedSessionId: sessionID,
+      });
+    },
+  });
   let sessionLifecycle: SessionLifecycle;
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
@@ -319,9 +326,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       companion: config.companion,
     });
 
-    // Track session → agent mapping for serve-mode system prompt injection
-    sessionAgentMap = new Map<string, string>();
-
     chatHeadersHook = createChatHeadersHook(ctx);
 
     // Initialize foreground fallback manager for runtime model switching.
@@ -355,9 +359,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       continueOnIdle: config.backgroundJobs?.continueOnIdle === true,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionAgentMap.set(sessionID, 'orchestrator');
+        sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
@@ -396,7 +400,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Both message transforms share this gate so a rejected nudge cannot be
     // followed by a phase reminder in the same outgoing turn.
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
-      sessionAgentMap.get(sessionID) === 'orchestrator';
+      sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
     phaseReminder = createPhaseReminderHook({
       shouldInject: shouldInjectOrchestratorReminder,
@@ -438,14 +442,14 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       client: ctx.client,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
       resolveAgentName: (agent) => resolveRuntimeAgentName(config, agent),
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionAgentMap.set(sessionID, 'orchestrator');
+        sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
       beginUserWait: (sessionID) =>
         taskSessionManagerHook.beginUserWait(sessionID),
@@ -944,6 +948,24 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
       };
 
+      const eventSessionID =
+        event.properties?.info?.id ?? event.properties?.sessionID;
+      const statusType = event.properties?.status?.type;
+      if (eventSessionID) {
+        if (
+          event.type === 'session.status' &&
+          (statusType === 'busy' || statusType === 'retry')
+        ) {
+          sessionMetadata.markOrchestratorActive(eventSessionID);
+        } else if (
+          event.type === 'session.idle' ||
+          (event.type === 'session.status' && statusType === 'idle') ||
+          event.type === 'session.deleted'
+        ) {
+          sessionMetadata.markOrchestratorIdle(eventSessionID);
+        }
+      }
+
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         const providerID =
@@ -968,7 +990,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
               model,
               variant: variant ?? null,
             },
-            (info?.sessionID && sessionDirectories.get(info.sessionID)) ??
+            (info?.sessionID && sessionMetadata.getDirectory(info.sessionID)) ??
               ctx.directory,
           );
         }
@@ -978,7 +1000,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionId = event.properties?.info?.id;
         const createdSessionDir = event.properties?.info?.directory;
         if (createdSessionId && createdSessionDir) {
-          sessionDirectories.set(createdSessionId, createdSessionDir);
+          sessionMetadata.setDirectory(createdSessionId, createdSessionDir);
         }
       }
 
@@ -1040,7 +1062,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const sessionID = props?.sessionID;
         companionManager.onSessionStatus({
           sessionId: sessionID,
-          agent: sessionID ? sessionAgentMap.get(sessionID) : undefined,
+          agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,
           status: props?.status?.type,
         });
       }
@@ -1056,8 +1078,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
-          sessionAgentMap.delete(sessionID);
-          sessionDirectories.delete(sessionID);
+          sessionMetadata.delete(sessionID);
         }
       }
     },
@@ -1145,7 +1166,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       if (agent) {
         foregroundFallback.registerSessionAgent(input.sessionID, agent);
-        sessionAgentMap.set(input.sessionID, agent);
+        sessionMetadata.setAgent(input.sessionID, agent);
         // A chat message means this session is actively working. This also
         // covers the race where session.status busy fires before the
         // session's agent is known.
@@ -1169,7 +1190,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { system: string[] },
     ): Promise<void> => {
       const agentName = input.sessionID
-        ? sessionAgentMap.get(input.sessionID)
+        ? sessionMetadata.getAgent(input.sessionID)
         : undefined;
       if (agentName === 'orchestrator') {
         const alreadyInjected = output.system.some(

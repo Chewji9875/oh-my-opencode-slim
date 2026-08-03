@@ -94,6 +94,13 @@ export const DEFAULT_READ_CONTEXT_MIN_LINES = 10;
 export const DEFAULT_READ_CONTEXT_MAX_FILES = 8;
 export const DEFAULT_MAX_RETAINED_SNAPSHOTS = 20;
 
+/**
+ * Maximum session metadata entries retained per plugin instance.
+ * Prevents unbounded growth when session.deleted events are missed.
+ * Oldest entries are evicted first when this threshold is reached.
+ */
+export const DEFAULT_MAX_SESSION_METADATA_ENTRIES = 1000;
+
 export type ImageRouting = 'auto' | 'direct';
 
 /**
