@@ -312,6 +312,25 @@ function rememberPendingInjectedTerminalJob(
   state.pendingInjectedTerminalJobsByParent.set(parentSessionID, pending);
 }
 
+function reconcileExecutionBatch(
+  state: InjectionState,
+  parentSessionID: string,
+  executions: Iterable<BackgroundJobExecution>,
+): void {
+  for (const execution of executions) {
+    const current = state.backgroundJobBoard.get(execution.taskID);
+    if (!current || current.generation !== execution.generation) {
+      log('[task-session-manager] skipped stale terminal execution', {
+        parentSessionID,
+        execution,
+        currentGeneration: current?.generation,
+      });
+      continue;
+    }
+    state.backgroundJobBoard.markReconciled(execution.taskID);
+  }
+}
+
 export function rememberInjectedTerminalJobs(
   state: InjectionState,
   parentSessionID: string,
@@ -384,18 +403,7 @@ export function reconcileInjectedTerminalJobs(
     executions: [...executions.values()],
   });
 
-  for (const execution of executions.values()) {
-    const current = state.backgroundJobBoard.get(execution.taskID);
-    if (!current || current.generation !== execution.generation) {
-      log('[task-session-manager] skipped stale terminal execution', {
-        parentSessionID,
-        execution,
-        currentGeneration: current?.generation,
-      });
-      continue;
-    }
-    state.backgroundJobBoard.markReconciled(execution.taskID);
-  }
+  reconcileExecutionBatch(state, parentSessionID, executions.values());
   state.terminalJobsInjectedByParent.delete(parentSessionID);
   state.pendingInjectedTerminalJobsByParent.delete(parentSessionID);
 }
@@ -408,8 +416,14 @@ function reconcileConsumedTerminalJobs(
   const entry = state.terminalJobsInjectedByParent.get(parentSessionID);
   if (!entry || entry.promptShapeKey === promptShapeKey) return;
   // The model produced at least one new part after the request that carried
-  // these completions, so it has consumed them. Stop re-announcing.
-  reconcileInjectedTerminalJobs(state, parentSessionID);
+  // these completions, so it has consumed that shaped delivery. Pending
+  // synthetic completions belong to a later delivery and remain pending.
+  log('[task-session-manager] reconciling consumed terminal jobs', {
+    parentSessionID,
+    executions: [...entry.executions.values()],
+  });
+  reconcileExecutionBatch(state, parentSessionID, entry.executions.values());
+  state.terminalJobsInjectedByParent.delete(parentSessionID);
 }
 
 export async function injectBackgroundJobBoard(

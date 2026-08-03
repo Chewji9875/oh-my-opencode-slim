@@ -104,6 +104,7 @@ const AGENT_PREFIX: Record<string, string> = {
 export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly jobs = new Map<string, BackgroundJobRecord>();
   private readonly counters = new Map<string, number>();
+  private executionSequence = 0;
   private terminalStateListeners: TerminalStateListener[] = [];
 
   private readonly maxReusablePerAgent: number;
@@ -150,12 +151,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord {
     const now = input.now ?? Date.now();
+    const generation = ++this.executionSequence;
     const existing = this.jobs.get(input.taskID);
 
     if (existing) {
       const updated = {
         ...existing,
-        generation: existing.generation + 1,
+        generation,
         agent: input.agent || existing.agent,
         description: input.description || existing.description,
         objective: input.objective ?? existing.objective,
@@ -182,7 +184,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
-      generation: 1,
+      generation,
       parentSessionID: input.parentSessionID,
       agent: input.agent,
       description: input.description || `background ${input.agent} task`,

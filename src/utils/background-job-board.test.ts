@@ -168,7 +168,7 @@ describe('BackgroundJobBoard', () => {
     expect(metadata?.text).toBe(board.formatForPrompt('parent-1'));
     expect(metadata?.terminalUnreconciledTaskIDs).toEqual([
       { taskID: 'ses_1', generation: 1 },
-      { taskID: 'ses_2', generation: 1 },
+      { taskID: 'ses_2', generation: 2 },
     ]);
     expect(
       metadata?.terminalUnreconciledTaskIDs.some(
