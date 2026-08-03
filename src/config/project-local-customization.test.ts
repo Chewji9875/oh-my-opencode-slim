@@ -129,8 +129,8 @@ describe('Project-local customization - 15 core cases', () => {
     );
   });
 
-  // Test Case 6: File prompt overrides inline built-in prompt
-  test('6. File prompt overrides inline built-in prompt', () => {
+  // Test Case 6: Inline prompt overrides file prompt
+  test('6. Inline prompt overrides file prompt', () => {
     const config = {
       agents: {
         oracle: {
@@ -150,7 +150,9 @@ describe('Project-local customization - 15 core cases', () => {
 
     const agents = createAgents(config);
     const oracle = agents.find((a) => a.name === 'oracle');
-    expect(oracle?.config.prompt).toBe('File prompt override content');
+    expect(oracle?.config.prompt).toBe(
+      'You are the inline oracle prompt override.',
+    );
   });
 
   // Test Case 7: Append file appends to inline built-in prompt

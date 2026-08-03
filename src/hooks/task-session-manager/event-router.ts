@@ -5,10 +5,15 @@
  * session.idle, session.error, session.status, session.deleted) to
  * the appropriate subsystems.
  */
+import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
+import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
 import { log } from '../../utils/logger';
 import { isFailoverError } from '../foreground-fallback/index';
-import type { RetainedBoardSnapshotState } from './board-injection';
+import type {
+  InjectedTerminalJobs,
+  RetainedBoardSnapshotState,
+} from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 
 export async function handleEvent(
@@ -74,8 +79,13 @@ export async function handleEvent(
       clearSession(sessionID: string): void;
       prune(board: { taskIDs(): Set<string> }): void;
     };
-    terminalJobsInjectedByParent: Map<string, Set<string>>;
+    terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
+    pendingInjectedTerminalJobsByParent: Map<
+      string,
+      Map<string, BackgroundJobExecution>
+    >;
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
+    backgroundJobSupervisor?: BackgroundJobSupervisor;
   },
 ): Promise<void> {
   deps.inputWaits.trackInputWait(input.event);
@@ -122,9 +132,13 @@ export async function handleEvent(
           agent: pending.agentType,
           description: pending.label,
           objective: pending.label,
+          // session.created has no reliable call identity. Keep this
+          // registration tentative so an unrelated foreground call cannot
+          // accidentally arm wall-clock supervision.
+          background: false,
         });
         log(
-          '[task-session-manager] early board registration from session.created',
+          '[task-session-manager] tentative early board registration from session.created',
           {
             taskID: record.taskID,
             alias: record.alias,
@@ -138,6 +152,7 @@ export async function handleEvent(
   }
 
   if (input.event.type === 'server.instance.disposed') {
+    deps.backgroundJobSupervisor?.dispose();
     deps.retainedBoardSnapshots.clear();
     const idleSessionIds = deps.idleReconciler.clearAllTimers();
     // Local-only: release this instance's uncommitted reservations and drop
@@ -171,7 +186,9 @@ export async function handleEvent(
         ? deps.options.shouldManageSession(sessionId)
         : false,
       terminalJobsPending: sessionId
-        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.size ?? 0)
+        ? (deps.terminalJobsInjectedByParent.get(sessionId)?.executions.size ??
+            0) +
+          (deps.pendingInjectedTerminalJobsByParent.get(sessionId)?.size ?? 0)
         : 0,
       runningJobForSession: job?.state === 'running' || false,
     });
@@ -207,6 +224,7 @@ export async function handleEvent(
       const props = input.event.properties as { error?: unknown } | undefined;
       if (!props?.error || !isFailoverError(props.error)) {
         deps.terminalJobsInjectedByParent.delete(sessionId);
+        deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
         // orchestrator sees the failure instead of a false completion.
         const job = deps.backgroundJobBoard.get(sessionId);
@@ -307,6 +325,12 @@ export async function handleEvent(
   }
   deps.inputWaits.clearInputWaits(sessionId);
   deps.retainedBoardSnapshots.delete(sessionId);
+  const fallbackInProgress =
+    deps.options.isFallbackInProgress?.(sessionId) === true;
+  const job = deps.backgroundJobBoard.get(sessionId);
+  if (!fallbackInProgress || job?.deadlineExceededAt !== undefined) {
+    deps.backgroundJobSupervisor?.onSessionDeleted(sessionId);
+  }
 
   log('[task-session-manager] session.deleted observed', {
     sessionID: sessionId,

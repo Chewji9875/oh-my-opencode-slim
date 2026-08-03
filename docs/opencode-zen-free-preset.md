@@ -36,7 +36,7 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
         "model": "opencode/deepseek-v4-flash-free",
         "temperature": 0.2,
         "skills": [],
-        "mcps": ["websearch", "context7", "gh_grep"]
+        "mcps": ["context7", "gh_grep"]
       },
       "designer": {
         "model": "opencode/mimo-v2.5-free",

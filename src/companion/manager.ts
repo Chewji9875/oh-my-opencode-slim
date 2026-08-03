@@ -371,7 +371,9 @@ export class CompanionManager {
       if (this.companionProcess) {
         try {
           this.companionProcess.kill();
-        } catch {}
+        } catch (err) {
+          log('[companion] kill failed', String(err));
+        }
       }
     }
     this.companionProcess = null;

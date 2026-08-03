@@ -836,12 +836,78 @@ describe('AgentOverrideConfigSchema options validation', () => {
     expect(result.success).toBe(false);
   });
 
-  test('rejects description field on overrides', () => {
+  test('accepts description field on overrides', () => {
     const result = AgentOverrideConfigSchema.safeParse({
       model: 'openai/gpt-5.6',
-      description: 'not supported for custom agents',
-    } as Record<string, unknown>);
+      description: 'A custom reviewer agent',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.description).toBe('A custom reviewer agent');
+    }
+  });
+
+  test('rejects empty description field', () => {
+    const result = AgentOverrideConfigSchema.safeParse({
+      model: 'openai/gpt-5.6',
+      description: '',
+    });
     expect(result.success).toBe(false);
+  });
+
+  test('description propagates through buildCustomAgentDefinition', () => {
+    const config: PluginConfig = {
+      agents: {
+        reviewer: {
+          model: 'openai/gpt-5.6',
+          description: 'Code review specialist',
+        },
+      },
+    };
+    const agents = createAgents(config);
+    const reviewer = agents.find((a) => a.name === 'reviewer');
+    expect(reviewer).toBeDefined();
+    expect(reviewer?.description).toBe('Code review specialist');
+  });
+
+  test('description defaults to generated string when not provided', () => {
+    const config: PluginConfig = {
+      agents: {
+        reviewer: {
+          model: 'openai/gpt-5.6',
+        },
+      },
+    };
+    const agents = createAgents(config);
+    const reviewer = agents.find((a) => a.name === 'reviewer');
+    expect(reviewer).toBeDefined();
+    expect(reviewer?.description).toBe("Custom subagent 'reviewer'");
+  });
+
+  test('description propagates through getAgentConfigs to SDK output', () => {
+    const config: PluginConfig = {
+      agents: {
+        reviewer: {
+          model: 'openai/gpt-5.6',
+          description: 'SDK reviewer agent',
+        },
+      },
+    };
+    const configs = getAgentConfigs(config);
+    expect(configs.reviewer.description).toBe('SDK reviewer agent');
+  });
+
+  test('description override applies to built-in agents', () => {
+    const config: PluginConfig = {
+      agents: {
+        oracle: {
+          model: 'openai/gpt-5.6',
+          description: 'Custom oracle description',
+        },
+      },
+    };
+    const configs = getAgentConfigs(config);
+    expect(configs.oracle.description).toBe('Custom oracle description');
   });
 });
 
@@ -1164,5 +1230,66 @@ describe('AgentOverrideConfigSchema permission validation', () => {
       },
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('getDisabledAgents with malformed config', () => {
+  test('falls back to DEFAULT_DISABLED_AGENTS when disabled_agents is not an array', () => {
+    const config: PluginConfig = {
+      disabled_agents: 'not-an-array' as any,
+    };
+    const disabled = getDisabledAgents(config);
+    const expected = getDisabledAgents(undefined);
+    expect(disabled).toEqual(expected);
+  });
+
+  test('falls back to DEFAULT_DISABLED_AGENTS when disabled_agents is an object', () => {
+    const config: PluginConfig = {
+      disabled_agents: { invalid: 'object' } as any,
+    };
+    const disabled = getDisabledAgents(config);
+    const expected = getDisabledAgents(undefined);
+    expect(disabled).toEqual(expected);
+  });
+
+  test('handles valid array normally', () => {
+    const config: PluginConfig = {
+      disabled_agents: ['explorer'],
+    };
+    const disabled = getDisabledAgents(config);
+    expect(disabled.has('explorer')).toBe(true);
+  });
+});
+
+describe('createAgents with malformed disabled_tools', () => {
+  test('does not throw when disabled_tools is not an array', () => {
+    const config: PluginConfig = {
+      disabled_tools: 'not-an-array' as any,
+    };
+    expect(() => createAgents(config)).not.toThrow();
+  });
+
+  test('does not throw when disabled_tools is an object', () => {
+    const config: PluginConfig = {
+      disabled_tools: {} as any,
+    };
+    expect(() => createAgents(config)).not.toThrow();
+  });
+
+  test('orchestrator is created with wait_for_user enabled when disabled_tools is malformed', () => {
+    const config: PluginConfig = {
+      disabled_tools: 'not-an-array' as any,
+    };
+    const agents = createAgents(config);
+    const orchestrator = agents.find((a) => a.name === 'orchestrator');
+    expect(orchestrator).toBeDefined();
+    // When disabled_tools is malformed (treated as empty array), wait_for_user
+    // should be enabled, which is reflected in the prompt text
+    expect(orchestrator?.config.prompt).toContain(
+      'call `wait_for_user` as your final tool action',
+    );
+    expect(orchestrator?.config.prompt).not.toContain(
+      '`wait_for_user` is disabled',
+    );
   });
 });
