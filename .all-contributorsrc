@@ -830,6 +830,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "lih54767-coder",
+      "name": "zhaohaofan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/271720354?v=4",
+      "profile": "https://github.com/lih54767-coder",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
