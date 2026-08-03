@@ -532,6 +532,26 @@ describe('BackgroundJobBoard', () => {
     expect(listener).not.toHaveBeenCalled();
   });
 
+  test('throws in one listener does not prevent subsequent listeners from receiving notification', () => {
+    const board = new BackgroundJobBoard();
+    const order: string[] = [];
+    board.addTerminalStateListener(() => {
+      throw new Error('first listener failed');
+    });
+    board.addTerminalStateListener(() => {
+      order.push('second');
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    board.updateStatus({ taskID: 'ses_1', state: 'completed' });
+
+    expect(order).toEqual(['second']);
+  });
+
   test('cancelled jobs ignore late non-cancelled terminal statuses', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
