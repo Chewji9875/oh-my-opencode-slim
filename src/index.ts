@@ -29,6 +29,7 @@ import {
   setActiveRuntimePreset,
 } from './config/runtime-preset';
 import { applyOrchestratorModelConfig } from './config/strip-orchestrator-model';
+import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
   createApplyPatchHook,
   createAutoUpdateCheckerHook,
@@ -96,47 +97,6 @@ async function appLog(
       level === 'error' ? 'ERROR' : level === 'warn' ? 'WARN' : 'INFO';
     console.error(`[oh-my-opencode-slim] ${prefix}: ${message}`);
   }
-}
-
-/** Minimum expected registrations for a healthy plugin load. */
-const HEALTH_CHECK = {
-  minAgents: 5,
-  // Default tool set when council and ACP agents are not configured:
-  // cancel_task, wait_for_user, webfetch, ast_grep_search, ast_grep_replace.
-  minTools: 5,
-  minMcps: 1,
-} as const;
-
-const BASELINE_TOOL_NAMES = new Set([
-  'cancel_task',
-  'wait_for_user',
-  'webfetch',
-  'ast_grep_search',
-  'ast_grep_replace',
-]);
-
-/**
- * Compute the minimum tool count the health check should expect, accounting
- * for baseline tools the user has intentionally disabled.
- *
- * @internal Exposed for deterministic health-threshold tests.
- * @param disabledTools - Tool names disabled via config; non-array/malformed
- *   values (which should never occur post-validation, but are not trusted at
- *   runtime) are treated as "nothing disabled".
- * @returns The adjusted minimum expected tool count
- */
-export function minimumExpectedToolCount(
-  disabledTools: readonly string[] = [],
-): number {
-  // Config values come from user-edited JSON/JSONC (and can be re-derived
-  // via runtime preset switches); never trust the declared type at
-  // runtime. Fall back to "no disabled tools" instead of crashing plugin
-  // init if this isn't actually an array.
-  const safeDisabledTools = Array.isArray(disabledTools) ? disabledTools : [];
-  const disabledBaselineTools = new Set(
-    safeDisabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
-  );
-  return HEALTH_CHECK.minTools - disabledBaselineTools.size;
 }
 
 /**
