@@ -821,6 +821,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "brucemead",
+      "name": "Bruce",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5895525?v=4",
+      "profile": "https://github.com/brucemead",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
