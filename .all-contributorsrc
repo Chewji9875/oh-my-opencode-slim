@@ -794,6 +794,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "major",
+      "name": "Major Hayden",
+      "avatar_url": "https://avatars.githubusercontent.com/u/89910?v=4",
+      "profile": "https://major.io/",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
