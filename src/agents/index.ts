@@ -235,7 +235,6 @@ function buildCustomAgentDefinition(
   const defaultPrompt = appendTaskRejectionInstruction(
     `You are the ${name} specialist.`,
   );
-  const basePrompt = override.prompt ?? defaultPrompt;
   const primaryModel = getPrimaryModelFromOverride(override);
 
   return {
@@ -243,7 +242,13 @@ function buildCustomAgentDefinition(
     config: {
       model: primaryModel ?? DEFAULT_MODELS.oracle,
       temperature: 0.2,
-      prompt: resolvePrompt(basePrompt, filePrompt, fileAppendPrompt),
+      prompt: resolvePrompt(
+        name,
+        override.prompt,
+        filePrompt,
+        defaultPrompt,
+        fileAppendPrompt,
+      ),
     },
   } as AgentDefinition;
 }
@@ -401,11 +406,11 @@ export function createAgents(
         agent.config.prompt ?? '',
       );
 
-      const basePrompt =
-        inlinePrompt !== undefined ? inlinePrompt : defaultPrompt;
       agent.config.prompt = resolvePrompt(
-        basePrompt,
+        name,
+        inlinePrompt,
         customPrompts.prompt,
+        defaultPrompt,
         customPrompts.appendPrompt,
       );
 
@@ -550,13 +555,11 @@ export function createAgents(
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
   const defaultOrchestratorPrompt = orchestrator.config.prompt ?? '';
 
-  const baseOrchestratorPrompt =
-    inlineOrchestratorPrompt !== undefined
-      ? inlineOrchestratorPrompt
-      : defaultOrchestratorPrompt;
   orchestrator.config.prompt = resolvePrompt(
-    baseOrchestratorPrompt,
+    'orchestrator',
+    inlineOrchestratorPrompt,
     orchestratorPrompts.prompt,
+    defaultOrchestratorPrompt,
     orchestratorPrompts.appendPrompt,
   );
 
