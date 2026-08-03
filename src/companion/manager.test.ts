@@ -61,6 +61,18 @@ function attachFakeChild(manager: CompanionManager): { killed: () => boolean } {
   return { killed: () => killed };
 }
 
+function attachFailingChild(manager: CompanionManager): void {
+  (
+    manager as unknown as {
+      companionProcess: { kill: () => void } | null;
+    }
+  ).companionProcess = {
+    kill: () => {
+      throw new Error('mock kill failure');
+    },
+  };
+}
+
 function companionPidFile(): string {
   return path.join(path.dirname(stateFilePath()), 'companion.pid');
 }
@@ -692,5 +704,21 @@ describe('CompanionManager', () => {
     const state = readState();
     expect(state.version).toBe(1);
     expect(state.sessions).toHaveLength(1);
+  });
+
+  it('logs and swallows kill() failure gracefully during exit', () => {
+    mkdirSync(path.dirname(stateFilePath()), { recursive: true });
+    const pidFile = companionPidFile();
+    writeFileSync(pidFile, String(process.pid));
+
+    const m = make('test-kill-failure');
+    attachFailingChild(m);
+    (m as unknown as { wasSpawner: boolean }).wasSpawner = true;
+    (m as unknown as { spawnedCompanionPid: number }).spawnedCompanionPid =
+      process.pid;
+
+    // Must not propagate the kill() exception
+    expect(() => m.onExit()).not.toThrow();
+    expect(existsSync(pidFile)).toBe(false);
   });
 });

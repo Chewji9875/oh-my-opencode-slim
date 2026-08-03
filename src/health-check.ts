@@ -36,10 +36,12 @@ const BASELINE_TOOL_NAMES = new Set([
  * @param disabledTools - Tool names disabled via config; non-array/malformed
  *   values (which should never occur post-validation, but are not trusted at
  *   runtime) are treated as "nothing disabled".
+ * @param webfetchEnabled - Whether the enhanced webfetch tool is registered.
  * @returns The adjusted minimum expected tool count
  */
 export function minimumExpectedToolCount(
   disabledTools: readonly string[] = [],
+  webfetchEnabled = true,
 ): number {
   // Config values come from user-edited JSON/JSONC (and can be re-derived
   // via runtime preset switches); never trust the declared type at
@@ -47,7 +49,14 @@ export function minimumExpectedToolCount(
   // init if this isn't actually an array.
   const safeDisabledTools = Array.isArray(disabledTools) ? disabledTools : [];
   const disabledBaselineTools = new Set(
-    safeDisabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
+    safeDisabledTools.filter(
+      (toolName) =>
+        BASELINE_TOOL_NAMES.has(toolName) &&
+        (toolName !== 'webfetch' || webfetchEnabled),
+    ),
   );
-  return HEALTH_CHECK.minTools - disabledBaselineTools.size;
+  const webfetchAdjustment = webfetchEnabled ? 0 : 1;
+  return (
+    HEALTH_CHECK.minTools - webfetchAdjustment - disabledBaselineTools.size
+  );
 }

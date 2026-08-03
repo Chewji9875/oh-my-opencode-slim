@@ -3,6 +3,7 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin';
+import { log } from './logger';
 
 type OpencodeClient = PluginInput['client'];
 
@@ -109,7 +110,12 @@ export async function promptWithTimeout(
 
   try {
     const promptPromise = client.session.prompt(args);
-    promptPromise.catch(() => {});
+    promptPromise.catch((error) => {
+      log('[session] suppressed prompt rejection (race loser)', {
+        sessionId,
+        error: String(error),
+      });
+    });
 
     const racers: Array<Promise<unknown>> = [promptPromise];
 
