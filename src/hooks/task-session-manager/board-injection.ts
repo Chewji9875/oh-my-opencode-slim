@@ -300,6 +300,15 @@ function executionKey(execution: BackgroundJobExecution): string {
   return `${execution.taskID}\u001f${execution.generation}`;
 }
 
+function sameExecutionIdentity(
+  left: readonly BackgroundJobExecution[],
+  right: readonly BackgroundJobExecution[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const leftKeys = new Set(left.map(executionKey));
+  return right.every((execution) => leftKeys.has(executionKey(execution)));
+}
+
 function rememberPendingInjectedTerminalJob(
   state: InjectionState,
   parentSessionID: string,
@@ -545,7 +554,14 @@ function injectCheckpointBoard(
 
   if (canCreateSnapshot && reminder) {
     const anchorKey = findLastMessageAnchorKey(currentMessages);
-    if (anchorKey && snapshotState.snapshots.at(-1)?.text !== reminder) {
+    const previousSnapshot = snapshotState.snapshots.at(-1);
+    const sameSnapshot =
+      previousSnapshot?.text === reminder &&
+      sameExecutionIdentity(
+        previousSnapshot.terminalUnreconciledTaskIDs,
+        boardMeta.terminalUnreconciledTaskIDs,
+      );
+    if (anchorKey && !sameSnapshot) {
       const encodedSessionID = encodeURIComponent(sessionID);
       const sequence = snapshotState.nextSnapshotSequence;
       snapshotState.nextSnapshotSequence += 1;

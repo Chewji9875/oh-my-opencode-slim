@@ -1932,6 +1932,101 @@ describe('task-session-manager hook', () => {
     });
   });
 
+  test('checkpoint creates a new execution-aware snapshot when visible board text is unchanged', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      strategy: 'checkpoint-compatible',
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'same execution text',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'same result',
+    });
+
+    const firstRequest = createAnchoredMessages('parent-1', ['turn 1']);
+    await transformMessages(hook, firstRequest);
+    const firstBoardText = boardText(firstRequest);
+    expect(firstBoardText).toContain('Result: same result');
+    expect(boardSnapshotIDs(firstRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'same execution text',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'same result',
+    });
+    expect(board.formatForPrompt('parent-1')).toBe(firstBoardText);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      terminalUnreconciled: true,
+    });
+
+    let reconciliationCount = 0;
+    const markReconciled = board.markReconciled.bind(board);
+    board.markReconciled = (taskID, now) => {
+      reconciliationCount += 1;
+      return markReconciled(taskID, now);
+    };
+
+    const secondRequest = {
+      messages: [
+        ...firstRequest.messages,
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ type: 'text', text: 'response 1' }],
+        },
+      ],
+    };
+    await transformMessages(hook, secondRequest);
+    expect(boardSnapshotIDs(secondRequest)).toEqual([
+      'oh-my-opencode-slim:background-job-board:parent-1:0',
+      'oh-my-opencode-slim:background-job-board:parent-1:1',
+    ]);
+
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(reconciliationCount).toBe(1);
+    expect(board.get('child-1')).toMatchObject({
+      generation: 2,
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
+  });
+
   test('ignores non-synthetic user text that resembles task status', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
