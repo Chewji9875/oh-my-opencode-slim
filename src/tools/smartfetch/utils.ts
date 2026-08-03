@@ -6,6 +6,27 @@ import type { CachedFetch, ExtractedContent } from './types';
 
 export { escapeHtml, parseFrontmatter };
 
+const CSS_TREE_WARN_PREFIX = '[csstree-match]';
+
+/**
+ * Suppresses css-tree lexer warnings ([csstree-match] prefix) emitted
+ * synchronously during JSDOM construction (jsdom uses css-tree to parse
+ * stylesheets; css-tree calls the global console.warn directly, bypassing
+ * jsdom's virtualConsole). Other warnings pass through untouched.
+ */
+export function withCssTreeWarningsSuppressed<T>(fn: () => T): T {
+  const originalWarn = console.warn;
+  console.warn = ((...args: unknown[]) => {
+    const first = typeof args[0] === 'string' ? args[0] : '';
+    if (!first.startsWith(CSS_TREE_WARN_PREFIX)) originalWarn(...args);
+  }) as typeof console.warn;
+  try {
+    return fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 let jsdomPromise: Promise<typeof import('jsdom')> | undefined;
 
 async function getJSDOM() {
@@ -284,7 +305,9 @@ export async function extractFromHtml(
   extractMain: boolean,
 ): Promise<ExtractedContent> {
   const JSDOM = await getJSDOM();
-  const dom = new JSDOM(html, { url: finalUrl });
+  const dom = withCssTreeWarningsSuppressed(
+    () => new JSDOM(html, { url: finalUrl }),
+  );
   const document = dom.window.document;
   const title = document.title || undefined;
   const canonical =
@@ -306,7 +329,9 @@ export async function extractFromHtml(
     .slice(0, 12);
 
   if (extractMain) {
-    const readerDom = new JSDOM(html, { url: finalUrl });
+    const readerDom = withCssTreeWarningsSuppressed(
+      () => new JSDOM(html, { url: finalUrl }),
+    );
     const article = new Readability(readerDom.window.document).parse();
     if (article?.content?.trim()) {
       const articleContainer = readerDom.window.document.createElement('div');

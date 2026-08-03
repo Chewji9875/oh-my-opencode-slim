@@ -17,11 +17,14 @@ import {
 import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
+  DEFAULT_MAX_CONTEXT_LINES,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
+  DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   DEFAULT_MAX_SESSIONS_PER_AGENT,
   DEFAULT_READ_CONTEXT_MAX_FILES,
   DEFAULT_READ_CONTEXT_MIN_LINES,
   resolveImageRouting,
+  TOAST_DURATION_MS,
 } from './config/constants';
 import {
   getActiveRuntimePreset,
@@ -29,6 +32,7 @@ import {
   setActiveRuntimePreset,
 } from './config/runtime-preset';
 import { applyOrchestratorModelConfig } from './config/strip-orchestrator-model';
+import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
   createApplyPatchHook,
   createAutoUpdateCheckerHook,
@@ -68,11 +72,13 @@ import { recordTuiAgentModel, recordTuiAgentModels } from './tui-state';
 import {
   BackgroundJobBoard,
   BackgroundJobCoordinator,
+  BackgroundJobSupervisor,
   createDisplayNameMentionRewriter,
   resolveRuntimeAgentName,
 } from './utils';
 import { isPluginDisabledByEnv } from './utils/env';
 import { initLogger, log } from './utils/logger';
+import { SessionMetadataStore } from './utils/session-metadata';
 import { collapseSystemInPlace } from './utils/system-collapse';
 
 /**
@@ -98,32 +104,9 @@ async function appLog(
   }
 }
 
-/** Minimum expected registrations for a healthy plugin load. */
-const HEALTH_CHECK = {
-  minAgents: 5,
-  // Default tool set when council and ACP agents are not configured:
-  // cancel_task, wait_for_user, webfetch, ast_grep_search, ast_grep_replace.
-  minTools: 5,
-  minMcps: 1,
-} as const;
-
-const BASELINE_TOOL_NAMES = new Set([
-  'cancel_task',
-  'wait_for_user',
-  'webfetch',
-  'ast_grep_search',
-  'ast_grep_replace',
-]);
-
-/** @internal Exposed for deterministic health-threshold tests. */
-export function minimumExpectedToolCount(
-  disabledTools: readonly string[] = [],
-): number {
-  const disabledBaselineTools = new Set(
-    disabledTools.filter((toolName) => BASELINE_TOOL_NAMES.has(toolName)),
-  );
-  return HEALTH_CHECK.minTools - disabledBaselineTools.size;
-}
+// Debounce: only show image-skipped toast once per 60 seconds per project
+const lastImageSkippedToastByDir = new Map<string, number>();
+const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
 
 /**
  * Probe jsdom at init time so the first webfetch call doesn't fail
@@ -172,10 +155,15 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let multiplexerEnabled: boolean;
   let multiplexerSessionManager: MultiplexerSessionManager;
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
-  let sessionAgentMap: Map<string, string>;
-  // ponytail: cache sessionID -> project directory so TUI model writes
-  // land in the right per-project file after a project switch (ctx.directory is stale)
-  const sessionDirectories = new Map<string, string>();
+  const sessionMetadata = new SessionMetadataStore({
+    maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+    onEvict: (sessionID) => {
+      log('[session] evicted oldest session metadata', {
+        threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+        droppedSessionId: sessionID,
+      });
+    },
+  });
   let sessionLifecycle: SessionLifecycle;
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
@@ -195,6 +183,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
+  let backgroundJobSupervisor: BackgroundJobSupervisor;
   let interviewManager: ReturnType<typeof createInterviewManager>;
   let companionManager: CompanionManager;
   let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
@@ -212,11 +201,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   try {
     config = loadPluginConfig(ctx.directory);
 
-    // Safety net: if a runtime preset was set via /preset command and
-    // OpenCode ever fully re-runs the plugin function (not just the
-    // config() hook), override config.preset so agents are created with
-    // the correct models. Currently only the config() hook re-runs after
-    // Instance.dispose(), so this is a defensive guard.
+    // Safety net: instance disposal reruns the plugin factory and rebuilds
+    // factory-local state, while module-level runtime preset state may persist.
+    // Reapply that persisted preset so each fresh generation creates agents
+    // with the correct models.
     const runtimePreset = getActiveRuntimePreset();
     if (runtimePreset && config.presets?.[runtimePreset]) {
       config.preset = runtimePreset;
@@ -277,16 +265,41 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       startAvailabilityCheck(multiplexerConfig);
     }
 
-    mcps = createBuiltinMcps(config.disabled_mcps, config.websearch);
+    mcps = createBuiltinMcps(config.disabled_mcps);
     acpRunTools =
       Object.keys(config.acpAgents ?? {}).length > 0
         ? { acp_run: createAcpRunTool(config.acpAgents) }
         : {};
-    webfetch = createWebfetchTool(ctx);
+    const webfetchModel = config.webfetch?.model;
+    const webfetchModels = (() => {
+      if (!webfetchModel) return undefined;
+      const entries = Array.isArray(webfetchModel)
+        ? webfetchModel
+        : [webfetchModel];
+      type ModelRefInput = string | { id: string; variant?: string };
+      const models: Array<{ id: string; variant?: string }> = [];
+      for (const entry of entries as ModelRefInput[]) {
+        const id = typeof entry === 'string' ? entry : entry.id;
+        if (!id) continue;
+        models.push({
+          id,
+          ...(typeof entry === 'object' && entry.variant
+            ? { variant: entry.variant }
+            : {}),
+        });
+      }
+      return models.length > 0 ? models : undefined;
+    })();
+    webfetch = createWebfetchTool(ctx, {
+      binaryDir: undefined,
+      webfetchModels,
+    });
     backgroundJobBoard = new BackgroundJobBoard({
       maxReusablePerAgent:
         config.backgroundJobs?.maxSessionsPerAgent ??
         DEFAULT_MAX_SESSIONS_PER_AGENT,
+      maxContextLines:
+        config.backgroundJobs?.maxContextLines ?? DEFAULT_MAX_CONTEXT_LINES,
       readContextMinLines:
         config.backgroundJobs?.readContextMinLines ??
         DEFAULT_READ_CONTEXT_MIN_LINES,
@@ -299,6 +312,18 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const backgroundJobCoordinator = new BackgroundJobCoordinator(
       backgroundJobBoard,
     );
+    backgroundJobSupervisor = new BackgroundJobSupervisor({
+      backgroundJobStore: backgroundJobCoordinator,
+      wallClockTimeoutMs: config.backgroundJobs?.wallClockTimeoutMs ?? 0,
+      abortGraceMs: config.backgroundJobs?.abortGraceMs ?? 10_000,
+      abort: (taskID) =>
+        ctx.client.session.abort({
+          path: { id: taskID },
+        }),
+    });
+    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      backgroundJobSupervisor.onTerminal(record);
+    });
 
     // Initialize MultiplexerSessionManager to handle OpenCode's built-in
     // Task tool sessions
@@ -310,6 +335,12 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     backgroundJobCoordinator.addTerminalStateListener((taskID) => {
       void multiplexerSessionManager.closeSessionFromCoordinator(taskID);
     });
+    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      if (record.deadlineExceededAt === undefined) return;
+      void multiplexerSessionManager.closeSessionPermanentlyFromCoordinator(
+        record.taskID,
+      );
+    });
 
     sessionLifecycle = new SessionLifecycle(log);
 
@@ -318,9 +349,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       autoUpdate: config.autoUpdate ?? true,
       companion: config.companion,
     });
-
-    // Track session → agent mapping for serve-mode system prompt injection
-    sessionAgentMap = new Map<string, string>();
 
     chatHeadersHook = createChatHeadersHook(ctx);
 
@@ -352,12 +380,13 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMaxFiles:
         config.backgroundJobs?.readContextMaxFiles ??
         DEFAULT_READ_CONTEXT_MAX_FILES,
-      continueOnIdle: config.backgroundJobs?.continueOnIdle !== false,
+      continueOnIdle: config.backgroundJobs?.continueOnIdle === true,
       backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobSupervisor,
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionAgentMap.set(sessionID, 'orchestrator');
+        sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
@@ -396,7 +425,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Both message transforms share this gate so a rejected nudge cannot be
     // followed by a phase reminder in the same outgoing turn.
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
-      sessionAgentMap.get(sessionID) === 'orchestrator';
+      sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
     phaseReminder = createPhaseReminderHook({
       shouldInject: shouldInjectOrchestratorReminder,
@@ -438,28 +467,32 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
-        sessionAgentMap.get(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
       resolveAgentName: (agent) => resolveRuntimeAgentName(config, agent),
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionAgentMap.set(sessionID, 'orchestrator');
+        sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
       beginUserWait: (sessionID) =>
         taskSessionManagerHook.beginUserWait(sessionID),
     });
 
+    const shouldRegisterWebfetch = config.webfetch?.enabled !== false;
     tools = {
       ...cancelTaskTools,
       ...waitForUserTools,
       ...acpRunTools,
-      webfetch,
+      ...(shouldRegisterWebfetch ? { webfetch } : {}),
       ast_grep_search,
       ast_grep_replace,
     };
-    if (config.disabled_tools && config.disabled_tools.length > 0) {
+    if (
+      Array.isArray(config.disabled_tools) &&
+      config.disabled_tools.length > 0
+    ) {
       const disabledTools = new Set(config.disabled_tools);
       tools = Object.fromEntries(
         Object.entries(tools).filter(([name]) => !disabledTools.has(name)),
@@ -484,11 +517,13 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const mcpCount = Object.keys(mcps).length;
   // Skip MCP threshold when user explicitly disabled all built-in MCPs
   const mcpThreshold =
-    config.disabled_mcps && config.disabled_mcps.length > 0
+    Array.isArray(config.disabled_mcps) && config.disabled_mcps.length > 0
       ? 0
       : HEALTH_CHECK.minMcps;
-  const toolThreshold = minimumExpectedToolCount(config.disabled_tools);
-
+  const toolThreshold = minimumExpectedToolCount(
+    config.disabled_tools,
+    config.webfetch?.enabled !== false,
+  );
   if (
     agentCount < HEALTH_CHECK.minAgents ||
     toolCount < toolThreshold ||
@@ -683,11 +718,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
 
-      // Runtime preset override: if /preset switched to a runtime preset,
-      // override the model/variant/temperature from the preset's agent
-      // config. This runs after the normal model resolution because the
-      // config() hook re-runs with stale modelArrayMap after dispose(),
-      // but the runtime preset data is in the captured `config` closure.
+      // Runtime preset override: instance disposal recreates the plugin
+      // factory and its factory-local state, while module-level runtime
+      // preset data may persist. Apply that persisted selection after normal
+      // model resolution for the current generation.
       const runtimePresetName = getActiveRuntimePreset();
       if (runtimePresetName && config.presets?.[runtimePresetName]) {
         const runtimePreset = config.presets[runtimePresetName];
@@ -938,6 +972,24 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
       };
 
+      const eventSessionID =
+        event.properties?.info?.id ?? event.properties?.sessionID;
+      const statusType = event.properties?.status?.type;
+      if (eventSessionID) {
+        if (
+          event.type === 'session.status' &&
+          (statusType === 'busy' || statusType === 'retry')
+        ) {
+          sessionMetadata.markOrchestratorActive(eventSessionID);
+        } else if (
+          event.type === 'session.idle' ||
+          (event.type === 'session.status' && statusType === 'idle') ||
+          event.type === 'session.deleted'
+        ) {
+          sessionMetadata.markOrchestratorIdle(eventSessionID);
+        }
+      }
+
       if (event.type === 'message.updated') {
         const info = event.properties?.info;
         const providerID =
@@ -962,7 +1014,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
               model,
               variant: variant ?? null,
             },
-            (info?.sessionID && sessionDirectories.get(info.sessionID)) ??
+            (info?.sessionID && sessionMetadata.getDirectory(info.sessionID)) ??
               ctx.directory,
           );
         }
@@ -972,7 +1024,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionId = event.properties?.info?.id;
         const createdSessionDir = event.properties?.info?.directory;
         if (createdSessionId && createdSessionDir) {
-          sessionDirectories.set(createdSessionId, createdSessionDir);
+          sessionMetadata.setDirectory(createdSessionId, createdSessionDir);
         }
       }
 
@@ -1034,7 +1086,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const sessionID = props?.sessionID;
         companionManager.onSessionStatus({
           sessionId: sessionID,
-          agent: sessionID ? sessionAgentMap.get(sessionID) : undefined,
+          agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,
           status: props?.status?.type,
         });
       }
@@ -1050,10 +1102,16 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
-          sessionAgentMap.delete(sessionID);
-          sessionDirectories.delete(sessionID);
+          sessionMetadata.delete(sessionID);
         }
       }
+    },
+
+    dispose: async () => {
+      await taskSessionManagerHook.event({
+        event: { type: 'server.instance.disposed' },
+      });
+      await multiplexerSessionManager.cleanupOnInstanceDisposed();
     },
 
     'tool.execute.before': async (input, output) => {
@@ -1110,6 +1168,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: {
         sessionID: string;
         agent?: string;
+        model?: {
+          providerID: string;
+          modelID: string;
+        };
+        variant?: string;
         parts?: unknown[];
         /** OpenCode chat.message message identity when present. */
         messageID?: string;
@@ -1120,6 +1183,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
           agent?: string;
           role?: string;
           sessionID?: string;
+          model?: {
+            providerID: string;
+            modelID: string;
+            variant?: string;
+          };
         };
         parts?: unknown[];
       },
@@ -1139,7 +1207,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       if (agent) {
         foregroundFallback.registerSessionAgent(input.sessionID, agent);
-        sessionAgentMap.set(input.sessionID, agent);
+        sessionMetadata.setAgent(input.sessionID, agent);
         // A chat message means this session is actively working. This also
         // covers the race where session.status busy fires before the
         // session's agent is known.
@@ -1163,7 +1231,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { system: string[] },
     ): Promise<void> => {
       const agentName = input.sessionID
-        ? sessionAgentMap.get(input.sessionID)
+        ? sessionMetadata.getAgent(input.sessionID)
         : undefined;
       if (agentName === 'orchestrator') {
         const alreadyInjected = output.system.some(
@@ -1173,12 +1241,12 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
             s.includes('orchestrator'),
         );
         if (!alreadyInjected) {
-          // Prepend the orchestrator prompt to the system array. Use the
-          // resolved prompt from the orchestrator agent definition (which
-          // includes any custom replacement or append from orchestrator.md
-          // / orchestrator_append.md) Fall back to
-          // buildOrchestratorPrompt only if the resolved prompt is
-          // missing.
+          // Place the orchestrator prompt after AGENTS.md so the user's
+          // behavioral rules (language, code conventions, etc.) retain
+          // their intended priority. AGENTS.md is injected by OpenCode
+          // core into system[0]; prepending the orchestrator prompt before
+          // it buries user-defined rules under thousands of lines of
+          // orchestration instructions.
           const orchestratorDef = agentDefs.find(
             (a) => a.name === 'orchestrator',
           );
@@ -1186,9 +1254,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
             typeof orchestratorDef?.config?.prompt === 'string'
               ? orchestratorDef.config.prompt
               : buildOrchestratorPrompt(disabledAgents);
-          output.system[0] =
-            orchestratorPrompt +
-            (output.system[0] ? `\n\n${output.system[0]}` : '');
+          output.system[0] = `${output.system[0] || ''}\n\n${orchestratorPrompt}`;
         }
       }
 
@@ -1228,13 +1294,39 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // input, the API call fails before the LLM can respond. We replace
       // image bytes with a text nudge so the orchestrator delegates to
       // @observer instead.
-      processImageAttachments({
+      const imageResult = processImageAttachments({
         messages: typedOutput.messages,
         workDir: ctx.directory,
-        imageRouting: resolveImageRouting(config.image_routing),
+        imageRouting: resolveImageRouting(
+          config.image_routing,
+          !disabledAgents.has('observer'),
+        ),
         disabledAgents,
         log,
       });
+      if (imageResult) {
+        const now = Date.now();
+        const last = lastImageSkippedToastByDir.get(ctx.directory) ?? 0;
+        if (now - last > IMAGE_SKIPPED_DEBOUNCE_MS) {
+          ctx.client.tui
+            .showToast({
+              body: {
+                title: 'Images skipped',
+                message:
+                  'Observer agent is disabled, so images can\'t be analyzed. Set image_routing to "direct" to send images to your model, or enable observer.',
+                variant: 'warning',
+                duration: TOAST_DURATION_MS,
+              },
+            })
+            .then(() => {
+              // Only advance the debounce window on a successful toast
+              // so a failed attempt doesn't suppress the next warning.
+              // Greptile: "Failed Toast Starts Debounce Window".
+              lastImageSkippedToastByDir.set(ctx.directory, now);
+            })
+            .catch(() => {});
+        }
+      }
 
       // Repair session mappings before reminder gates; nudge metadata precedes phase dedup.
       await taskSessionManagerHook['experimental.chat.messages.transform'](

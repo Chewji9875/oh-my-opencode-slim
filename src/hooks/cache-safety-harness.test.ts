@@ -14,7 +14,7 @@ import {
 } from '../config/constants';
 import { BackgroundJobBoard, createInternalAgentTextPart } from '../utils';
 import { createDisplayNameMentionRewriter } from '../utils/agent-variant';
-import { isVolatileTaggedMessage } from './cache-safe-injection';
+import { isTaggedPart } from './cache-safe-injection';
 import { createFilterAvailableSkillsHook } from './filter-available-skills';
 import { processImageAttachments } from './image-hook';
 import { createPhaseReminderHook } from './phase-reminder';
@@ -25,11 +25,19 @@ import {
   createTaskSessionManagerHook,
 } from './task-session-manager';
 import type { MessageWithParts } from './types';
+import { isMessageWithParts } from './types';
 
 export const SESSION_ID = 'ses_cache_safety_fixture';
 export const FIXTURE_NOW = 1_700_000_000_000;
 
 export type TransformOutput = { messages: unknown[] };
+
+export type BoardStrategy = 'latest' | 'checkpoint-compatible';
+
+export interface PipelineOptions {
+  /** Board injection strategy under test; defaults to the production default. */
+  strategy?: BoardStrategy;
+}
 
 export interface Pipeline {
   run: (output: TransformOutput) => Promise<void>;
@@ -42,7 +50,7 @@ export interface Pipeline {
  * cache-safety.property.test.ts fails when the two fall out of sync — update
  * BOTH when adding, removing, or reordering a transform step.
  */
-export function createPipeline(): Pipeline {
+export function createPipeline(options: PipelineOptions = {}): Pipeline {
   const sessionAgentMap = new Map<string, string>();
   const board = new BackgroundJobBoard();
   const lifecycle = new SessionLifecycle(() => {});
@@ -67,6 +75,7 @@ export function createPipeline(): Pipeline {
     {
       maxSessionsPerAgent: 2,
       maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
+      ...(options.strategy ? { strategy: options.strategy } : {}),
       backgroundJobBoard: board,
       shouldManageSession: (sessionID) =>
         sessionAgentMap.get(sessionID) === 'orchestrator',
@@ -103,7 +112,7 @@ export function createPipeline(): Pipeline {
     processImageAttachments({
       messages: output.messages as MessageWithParts[],
       workDir: '/tmp/cache-safety-fixture',
-      imageRouting: resolveImageRouting(undefined),
+      imageRouting: resolveImageRouting(undefined, true),
       disabledAgents: new Set(),
       log: noopLog,
     });
@@ -221,11 +230,19 @@ export function turnEndIndices(history: unknown[]): number[] {
 }
 
 export function stableFingerprints(messages: unknown[]): string[] {
+  // The volatile board is a tagged part appended to the last real message (or,
+  // for legacy paths, a whole tagged trailing message). Both must be excluded
+  // from the stable fingerprint: strip tagged parts from every message and
+  // drop any message that was wholly volatile, then fingerprint what remains.
   return messages
-    .filter(
-      (message) =>
-        !isVolatileTaggedMessage(message, BACKGROUND_JOB_BOARD_METADATA_KEY),
-    )
+    .flatMap((message) => {
+      if (!isMessageWithParts(message)) return [message];
+      const stableParts = message.parts.filter(
+        (part) => !isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+      );
+      if (stableParts.length === 0) return [];
+      return [{ ...message, parts: stableParts }];
+    })
     .map((message) => JSON.stringify(message));
 }
 

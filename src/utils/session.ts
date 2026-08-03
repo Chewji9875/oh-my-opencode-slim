@@ -2,7 +2,8 @@
  * Shared session utilities for council and background managers.
  */
 
-import type { OpencodeClient } from '@opencode-ai/sdk/v2';
+import { type OpencodeClient } from '@opencode-ai/sdk/v2';
+import { log } from './logger';
 
 export const SESSION_ABORT_TIMEOUT_MS = 1_000;
 
@@ -107,7 +108,12 @@ export async function promptWithTimeout(
 
   try {
     const promptPromise = client.session.prompt(args);
-    promptPromise.catch(() => {});
+    promptPromise.catch((error) => {
+      log('[session] suppressed prompt rejection (race loser)', {
+        sessionId,
+        error: String(error),
+      });
+    });
 
     const racers: Array<Promise<unknown>> = [promptPromise];
 

@@ -1,8 +1,11 @@
 import type {
   BackgroundJobLaunchInput,
+  BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
   ContextFile,
+  WallClockTimeoutClaimInput,
+  WallClockTimeoutFinalizeInput,
 } from './background-job-board';
 import type { TaskOutputState } from './task';
 
@@ -19,6 +22,12 @@ export interface BackgroundJobStore {
     input: BackgroundJobStatusInput,
   ): BackgroundJobRecord | undefined;
   updateFromStatusOutput(output: string): BackgroundJobRecord | undefined;
+  claimWallClockDeadline(
+    input: WallClockTimeoutClaimInput,
+  ): BackgroundJobRecord | undefined;
+  finalizeWallClockTimeout(
+    input: WallClockTimeoutFinalizeInput,
+  ): BackgroundJobRecord | undefined;
   markRunningFromLiveSession(
     taskID: string,
     now?: number,
@@ -67,6 +76,10 @@ export interface BackgroundJobStore {
   hasTerminalUnreconciled(parentSessionID: string): boolean;
   hasConvergenceSignals(taskID: string, threshold?: number): boolean;
   formatForPrompt(parentSessionID: string, now?: number): string | undefined;
+  formatForPromptWithMetadata(
+    parentSessionID: string,
+    now?: number,
+  ): BackgroundJobPromptMetadata | undefined;
 
   // ── Lifecycle policy ─────────────────────────────────────────────
   /** Evaluate close policy. Returns true if session should close now.

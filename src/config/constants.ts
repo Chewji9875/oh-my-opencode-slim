@@ -83,26 +83,35 @@ export const COUNCILLOR_STAGGER_MS = 250;
 // Polling stability
 export const STABLE_POLLS_THRESHOLD = 3;
 
+// Toast duration (ms) used by all OMOS toasts
+export const TOAST_DURATION_MS = 10_000;
+
 /** Agents that are disabled by default. Users must explicitly enable them
  *  by removing from disabled_agents and configuring an appropriate model. */
 export const DEFAULT_DISABLED_AGENTS: string[] = ['observer'];
 
 // Background job defaults
 export const DEFAULT_MAX_SESSIONS_PER_AGENT = 2;
+export const DEFAULT_MAX_CONTEXT_LINES = 50_000;
 export const DEFAULT_READ_CONTEXT_MIN_LINES = 10;
 export const DEFAULT_READ_CONTEXT_MAX_FILES = 8;
 export const DEFAULT_MAX_RETAINED_SNAPSHOTS = 20;
 
-export type ImageRouting = 'auto' | 'direct';
-
 /**
- * Used when image_routing is omitted, preserving legacy conditional Observer
- * routing. Explicit "auto" is validated separately after config layers merge.
+ * Maximum session metadata entries retained per plugin instance.
+ * Prevents unbounded growth when session.deleted events are missed.
+ * Oldest entries are evicted first when this threshold is reached.
  */
-export const DEFAULT_IMAGE_ROUTING: ImageRouting = 'auto';
+export const DEFAULT_MAX_SESSION_METADATA_ENTRIES = 1000;
+
+export type ImageRouting = 'auto' | 'direct';
 
 export function resolveImageRouting(
   imageRouting: ImageRouting | undefined,
+  observerEnabled: boolean,
 ): ImageRouting {
-  return imageRouting ?? DEFAULT_IMAGE_ROUTING;
+  // Explicit value: use it
+  if (imageRouting !== undefined) return imageRouting;
+  // Legacy conditional: intercept only when observer is enabled
+  return observerEnabled ? 'auto' : 'direct';
 }

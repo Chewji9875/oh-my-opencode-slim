@@ -11,6 +11,10 @@ import { createInternalAgentTextPart } from '../../utils';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
+import {
+  type ContinuationModelSelection,
+  parseContinuationModelSelection,
+} from './continuation-model-selection';
 import { isActiveStatus } from './status-utils';
 
 const CONTINUATION_NUDGE =
@@ -95,11 +99,15 @@ export async function evaluateContinuation(
     options: {
       isFallbackInProgress?: (sessionID: string) => boolean;
     };
+    getObservedModelSelection: (
+      sessionID: string,
+    ) => ContinuationModelSelection | undefined;
     sessionSdk?: {
-      todo?: (...args: unknown[]) => Promise<{ data?: unknown }>;
-      children?: (...args: unknown[]) => Promise<{ data?: unknown }>;
-      status?: (...args: unknown[]) => Promise<{ data?: unknown }>;
-      promptAsync?: (...args: unknown[]) => Promise<unknown>;
+      todo?: (input: unknown) => Promise<{ data?: unknown }>;
+      children?: (input: unknown) => Promise<{ data?: unknown }>;
+      status?: (input: unknown) => Promise<{ data?: unknown }>;
+      get?: (input: unknown) => Promise<{ data?: unknown }>;
+      promptAsync?: (input: unknown) => Promise<unknown>;
     };
   },
 ): Promise<void> {
@@ -155,15 +163,15 @@ export async function evaluateContinuation(
   let committed = false;
   try {
     const [todoResponse, childrenResponse, statusResponse] = await Promise.all([
-      deps.sessionSdk.todo(
-        { sessionID: parentSessionID },
-        { throwOnError: true },
-      ),
-      deps.sessionSdk.children(
-        { sessionID: parentSessionID },
-        { throwOnError: true },
-      ),
-      deps.sessionSdk.status({}, { throwOnError: true }),
+      deps.sessionSdk.todo({
+        path: { id: parentSessionID },
+        throwOnError: true,
+      }),
+      deps.sessionSdk.children({
+        path: { id: parentSessionID },
+        throwOnError: true,
+      }),
+      deps.sessionSdk.status({ throwOnError: true }),
     ]);
     if (
       !Array.isArray(todoResponse.data) ||
@@ -203,11 +211,11 @@ export async function evaluateContinuation(
     // Re-read liveness immediately before queuing work; board state is only
     // authoritative for terminal results observed by this plugin instance.
     const [latestChildrenResponse, latestStatusResponse] = await Promise.all([
-      deps.sessionSdk.children(
-        { sessionID: parentSessionID },
-        { throwOnError: true },
-      ),
-      deps.sessionSdk.status({}, { throwOnError: true }),
+      deps.sessionSdk.children({
+        path: { id: parentSessionID },
+        throwOnError: true,
+      }),
+      deps.sessionSdk.status({ throwOnError: true }),
     ]);
     if (
       !Array.isArray(latestChildrenResponse.data) ||
@@ -230,6 +238,25 @@ export async function evaluateContinuation(
       return;
     }
 
+    let currentModelSelection: ContinuationModelSelection | undefined;
+    if (deps.sessionSdk.get) {
+      try {
+        const sessionResponse = await deps.sessionSdk.get({
+          sessionID: parentSessionID,
+          throwOnError: true,
+        });
+        const session = isObjectRecord(sessionResponse?.data)
+          ? sessionResponse.data
+          : undefined;
+        currentModelSelection = parseContinuationModelSelection(session?.model);
+      } catch {
+        // Model enrichment is fail-soft. Older OpenCode session payloads do
+        // not expose Session.model, so fall back to the filtered chat hook.
+      }
+    }
+    const modelSelection =
+      currentModelSelection ?? deps.getObservedModelSelection(parentSessionID);
+
     if (
       isEvaluationAborted(parentSessionID, sessionToken, evaluationToken, deps)
     ) {
@@ -246,11 +273,12 @@ export async function evaluateContinuation(
     committed = true;
     await deps.sessionSdk.promptAsync({
       sessionID: parentSessionID,
-        agent: 'orchestrator',
-        parts: [createInternalAgentTextPart(CONTINUATION_NUDGE)],
-      },
-      { throwOnError: true },
-    );
+      agent: 'orchestrator',
+      ...(modelSelection ? { model: modelSelection.model } : {}),
+      ...(modelSelection?.variant ? { variant: modelSelection.variant } : {}),
+      parts: [createInternalAgentTextPart(CONTINUATION_NUDGE)],
+      throwOnError: true,
+    });
   } catch (error) {
     log(
       '[task-session-manager] continuation nudge suppressed after SDK error',

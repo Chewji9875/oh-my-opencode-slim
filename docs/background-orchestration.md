@@ -144,7 +144,7 @@ Rules:
 - Review tasks can run in parallel with read-only discovery, but not with edits
   they are supposed to review.
 
-### 4. Wait, cancel, and reconcile
+### 4. Wait and cancel
 
 Background tasks are not complete until OpenCode injects their terminal result or
 hook-driven completion marks them terminal.
@@ -158,14 +158,15 @@ The orchestrator should use background completion events to:
 
 The orchestrator should use `cancel_task` only when the user asks, or when a
 running lane is obsolete, wrong, or conflicts with a safer replacement plan.
-Cancellation is not rollback: if cancelling a writer, inspect and reconcile
-partial file changes before launching a replacement lane.
+Cancellation is not rollback: if cancelling a writer, inspect its partial file
+changes before launching a replacement lane.
 
-**Note on reconciliation:** Idle-based reconciliation is a heuristic. A job marked
-as reconciled means its terminal result was injected into an orchestrator turn
-that completed and the parent returned to idle; it is not proof the result was
-explicitly acknowledged or used. The orchestrator should still verify it consumed
-the relevant outputs before finalizing.
+Terminal jobs are reconciled automatically after their result is injected into
+the orchestrator session. That lifecycle state is not proof the output was used;
+the orchestrator must still verify it consumed the relevant result before
+finalizing. When idle reconciliation performs that reconciliation, the opt-in
+continuation evaluator can run in the same idle cycle, subject to its existing
+guards.
 
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
@@ -321,22 +322,22 @@ multiplexer panes attached while the parent orchestrator continues scheduling.
 
 ### Incomplete-todo continuation nudge
 
-Automatic incomplete-todo continuation is **enabled by default**. Idle
-reconciliation and background-job orchestration always run; set
-`continueOnIdle` to `false` to keep those without hidden continuation prompts:
+Automatic incomplete-todo continuation is an **opt-in beta feature**. Idle
+reconciliation and background-job orchestration always run without it. Enable
+the beta only when you want hidden continuation prompts:
 
 ```jsonc
 {
   "backgroundJobs": {
-    "continueOnIdle": false
+    "continueOnIdle": true
   }
 }
 ```
 
-When `backgroundJobs.continueOnIdle` is `true` (the default), after an
-orchestrator session becomes idle the plugin may send **at most one** internal,
-delayed continuation prompt when OpenCode reports incomplete todos. That limit
-is per session between real external user messages (text/file/image).
+When `backgroundJobs.continueOnIdle` is `true`, after an orchestrator session
+becomes idle the plugin may send **at most one** internal, delayed continuation
+prompt when OpenCode reports incomplete todos. That limit is per session between
+real external user messages (text/file/image).
 Synthetic/internal inputs and subsequent idle/busy events do not rearm it. A
 real user message rearms the one-shot nudge once per message identity
 (`chat.message` `messageID` / `message.id`), shared across hook instances in the
@@ -350,6 +351,10 @@ response, after the orchestrator calls `wait_for_user`, or whenever SDK data is
 unavailable or malformed. A matching reply, or a rejected question, clears its
 tool-backed wait but does not itself inject a nudge; the normal session lifecycle
 decides whether a later nudge is needed.
+
+When idle reconciliation first reconciles an injected terminal result, the
+opt-in evaluator may run in that same idle cycle; the existing liveness,
+wait, fallback, and one-attempt guards still apply.
 
 For external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers
@@ -406,6 +411,49 @@ and only the new current snapshot is kept. This intentionally creates one cache
 miss at the epoch boundary, after which a fresh run of up to the configured limit
 can accumulate. The cache is lost on plugin restart, so snapshots are not
 restored beyond those present in the current OpenCode message history.
+
+### Opt-in Wall-clock Supervisor
+
+The plugin can apply a one-shot wall-clock deadline to native background task
+child sessions. It is disabled by default:
+
+```jsonc
+{
+  "backgroundJobs": {
+    "wallClockTimeoutMs": 900000,
+    "abortGraceMs": 10000
+  }
+}
+```
+
+This supervisor recognizes only an explicit `task(..., background: true)` call.
+Foreground tasks and calls where `background` is omitted or `false` are not
+supervised. The deadline begins at the first launch observation for the current
+run. Duplicate `session.created`/tool-hook observations, busy activity, tool
+activity, and liveness timestamps do not renew it. An explicit relaunch or reuse
+starts a new run generation.
+
+When the deadline wins a race with a real terminal transition, the board records
+a persistent hard-deadline marker, marks cancellation as requested, starts the
+bounded abort grace period, and issues exactly one native session abort. The
+grace timer is independent of whether the SDK abort resolves, rejects, or hangs.
+An error, cancellation, or child deletion during grace publishes one stable
+timed-out terminal outcome. If no terminal confirmation arrives before grace
+expires, the outcome is `error`, `timedOut: true`, and `statusUncertain: true`,
+with a summary stating that abort was not confirmed.
+
+Late completion, busy, retry, or error events cannot replace a published hard
+timeout, and a hard wall-clock timeout is not recoverable through the existing
+external task-wait timeout path. The timeout outcome remains visible to the
+parent through the normal terminal-unreconciled Background Job Board flow; no
+prompt or raw task-result rewrite is used. Timeout terminals also issue a
+permanent logical pane-close intent so generic and cmux multiplexer paths do not
+respawn a pane on late busy events.
+
+`wallClockTimeoutMs` accepts `0` or integers from `60000` through `2147483647`;
+`abortGraceMs` accepts integers from `1000` through `60000`. This feature is
+wall-clock-only: no no-progress/plateau policy, foreground fallback, model swap,
+session deletion retry, or worker-death guarantee is implied.
 
 ---
 

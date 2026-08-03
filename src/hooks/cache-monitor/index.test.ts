@@ -100,13 +100,156 @@ describe('createCacheMonitorHook', () => {
     expect(warnings).toHaveLength(2);
   });
 
-  test('stays silent for providers that never report cache tokens', async () => {
+  test('stays silent for modest sessions that never report cache tokens', async () => {
     const { hook, warnings } = createHarness();
 
+    // Cache-less providers are indistinguishable from busted sessions
+    // (OpenCode coalesces missing telemetry to zeros); below the cumulative
+    // input threshold the monitor must give them the benefit of the doubt.
     for (const id of ['c1', 'c2', 'c3']) {
       await hook.event(
         assistantMessageEvent({ messageID: id, input: 20000, cacheRead: 0 }),
       );
+    }
+
+    expect(warnings).toHaveLength(0);
+  });
+
+  test('warns once for a large session that never hits the cache', async () => {
+    const { hook, warnings } = createHarness();
+
+    // The v2.2.5 checkpoint-board signature: consecutive ~146K-input
+    // requests, zero cache reads from the very first turn.
+    for (const id of ['g1', 'g2']) {
+      await hook.event(
+        assistantMessageEvent({ messageID: id, input: 146000, cacheRead: 0 }),
+      );
+    }
+    expect(warnings).toHaveLength(0);
+
+    await hook.event(
+      assistantMessageEvent({ messageID: 'g3', input: 146000, cacheRead: 0 }),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('never hit the provider cache');
+    expect(warnings[0].data).toMatchObject({
+      sessionID: 'ses_monitor',
+      consecutiveUncachedRequests: 3,
+      uncachedInputTokens: 438000,
+    });
+
+    // Once per session, even as the streak keeps growing.
+    await hook.event(
+      assistantMessageEvent({ messageID: 'g4', input: 146000, cacheRead: 0 }),
+    );
+    expect(warnings).toHaveLength(1);
+  });
+
+  test('any reported cache activity disarms the never-cached warning', async () => {
+    const { hook, warnings } = createHarness();
+
+    // An Anthropic-style first request reports a cache write; later misses
+    // are the everReportedCache bust signature, not the never-cached one.
+    await hook.event(
+      assistantMessageEvent({
+        messageID: 'h1',
+        input: 146000,
+        cacheRead: 0,
+        cacheWrite: 140000,
+      }),
+    );
+    for (const id of ['h2', 'h3', 'h4']) {
+      await hook.event(
+        assistantMessageEvent({ messageID: id, input: 146000, cacheRead: 0 }),
+      );
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('prompt-cache bust');
+  });
+
+  test('warns when cache-read plateaus while sizeable input accumulates', async () => {
+    const { hook, warnings } = createHarness();
+
+    // Issue #874 signature: read frozen at one boundary while uncached
+    // input keeps growing turn over turn.
+    await hook.event(
+      assistantMessageEvent({ messageID: 'p1', input: 7000, cacheRead: 42496 }),
+    );
+    for (const [index, id] of ['p2', 'p3', 'p4', 'p5'].entries()) {
+      await hook.event(
+        assistantMessageEvent({
+          messageID: id,
+          input: 15000 + index,
+          cacheRead: 42496,
+        }),
+      );
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('cache-read plateau');
+    expect(warnings[0].data).toMatchObject({
+      sessionID: 'ses_monitor',
+      frozenCacheRead: 42496,
+      consecutiveFrozenRequests: 4,
+    });
+
+    // Once per plateau, even as the streak keeps growing.
+    await hook.event(
+      assistantMessageEvent({
+        messageID: 'p6',
+        input: 20000,
+        cacheRead: 42496,
+      }),
+    );
+    expect(warnings).toHaveLength(1);
+
+    // Growth ends the plateau and re-arms the warning for a new one.
+    await hook.event(
+      assistantMessageEvent({ messageID: 'p7', input: 900, cacheRead: 60416 }),
+    );
+    for (const id of ['p8', 'p9', 'p10', 'p11']) {
+      await hook.event(
+        assistantMessageEvent({
+          messageID: id,
+          input: 16000,
+          cacheRead: 60416,
+        }),
+      );
+    }
+    expect(warnings).toHaveLength(2);
+  });
+
+  test('stays silent on frozen reads with small accumulated input', async () => {
+    const { hook, warnings } = createHarness();
+
+    // Providers round reads to coarse boundaries; identical reads across
+    // small turns are normal and must not warn.
+    await hook.event(
+      assistantMessageEvent({ messageID: 'q1', input: 8000, cacheRead: 17920 }),
+    );
+    for (const id of ['q2', 'q3', 'q4', 'q5', 'q6']) {
+      await hook.event(
+        assistantMessageEvent({ messageID: id, input: 400, cacheRead: 17920 }),
+      );
+    }
+
+    expect(warnings).toHaveLength(0);
+  });
+
+  test('stays silent while cache-read keeps growing', async () => {
+    const { hook, warnings } = createHarness();
+
+    let read = 17920;
+    for (const [index, id] of ['r1', 'r2', 'r3', 'r4', 'r5'].entries()) {
+      await hook.event(
+        assistantMessageEvent({
+          messageID: `${id}-${index}`,
+          input: 20000,
+          cacheRead: read,
+        }),
+      );
+      read += 1024;
     }
 
     expect(warnings).toHaveLength(0);

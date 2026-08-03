@@ -9,7 +9,7 @@
 
 The `build` agent turn with empty input is **the same class of bug** as the original `/preset` issue fixed in #818: a plugin hook calls `sessionSdk.promptAsync({ body: { parts: [createInternalAgentTextPart(...)] } })` **without specifying an `agent` field**. opencode then resolves the agent via `agents.defaultInfo()`, which falls back to the built-in `build` agent whenever `default_agent` is unset, user-overridden, or not effectively applied. The `synthetic: true` flag hides the injected text from the TUI, so the user perceives the `build` turn as having "empty input."
 
-**Update (Issue #854):** the incomplete-todo continuation path now passes `agent: 'orchestrator'`, is enabled by default via `backgroundJobs.continueOnIdle` (opt out with `false`), and uses a process-local one-attempt gate. Remaining agent-less `promptAsync` call sites are interview/smartfetch (below).
+**Update (Issue #854):** the incomplete-todo continuation path now passes `agent: 'orchestrator'`, is an opt-in beta via `backgroundJobs.continueOnIdle: true`, and uses a process-local one-attempt gate. Remaining agent-less `promptAsync` call sites are interview/smartfetch (below).
 
 ## Root cause (causal chain, cross-validated)
 
@@ -40,7 +40,7 @@ The `build` agent turn with empty input is **the same class of bug** as the orig
 
 | File:line | Trigger | Body omits `agent`? | Gate |
 |---|---|---|---|
-| `src/hooks/task-session-manager/continuation-evaluator.ts` (`promptAsync`) | `session.idle` / `session.status(idle)` on orchestrator session with incomplete todos when `backgroundJobs.continueOnIdle` is `true` (default **on**) | **No** (`agent: 'orchestrator'`) | `continueOnIdle`, process-local one-attempt gate (reserve→commit), `hasInputWait`, `isCurrentContinuation`, `isFallbackInProgress`, `backgroundJobBoard.hasTerminalUnreconciled`, malformed/active SDK short-circuits |
+| `src/hooks/task-session-manager/continuation-evaluator.ts` (`promptAsync`) | `session.idle` / `session.status(idle)` on orchestrator session with incomplete todos when the opt-in beta `backgroundJobs.continueOnIdle` is `true` | **No** (`agent: 'orchestrator'`) | `continueOnIdle`, process-local one-attempt gate (reserve→commit), `hasInputWait`, `isCurrentContinuation`, `isFallbackInProgress`, `backgroundJobBoard.hasTerminalUnreconciled`, malformed/active SDK short-circuits |
 | `src/interview/service.ts:622` | User submits interview dashboard input | **Yes** | `sessionBusy` lock, interview active state |
 | `src/interview/service.ts:871` | User submits interview chat | **Yes** | same |
 | `src/interview/service.ts:933` | User submits interview answer | **Yes** | same |
@@ -65,10 +65,11 @@ This is the pattern every `promptAsync` caller in omos should follow.
 The gate exists and works in the common case (see `continuation-evaluator.ts` and
 `task-session-manager/index.test.ts` continuation cases). Notes:
 
-1. **Continuation is on by default.** `backgroundJobs.continueOnIdle` defaults
-   to `true`; set `false` to keep idle reconciliation without continuation SDK
-   calls. When enabled, a process-local reserve/commit gate allows at most one
-   `promptAsync` per session epoch between real user messages.
+1. **Continuation is opt-in beta.** `backgroundJobs.continueOnIdle` defaults
+   to `false`; set it to `true` to enable continuation SDK calls. Idle
+   reconciliation remains active either way. When enabled, a process-local
+   reserve/commit gate allows at most one `promptAsync` per session epoch
+   between real user messages.
 
 2. **Documented race window (when enabled).** `IDLE_RECONCILE_DELAY_MS = 2_000`.
    The idle-reconciliation comment admits late completions can still race the
@@ -111,7 +112,7 @@ opencode's `default_agent` resolution, eliminating the path to `build`.
 ## Evidence index
 
 ### omos source
-- **Continuation nudge (fixed agent + default-on + one-attempt gate):** `src/hooks/task-session-manager/continuation-evaluator.ts`, `continuation-attempt-gate.ts`, `backgroundJobs.continueOnIdle` in `src/config/schema.ts`
+- **Continuation nudge (fixed agent + opt-in beta + one-attempt gate):** `src/hooks/task-session-manager/continuation-evaluator.ts`, `continuation-attempt-gate.ts`, `backgroundJobs.continueOnIdle` in `src/config/schema.ts`
 - **Missing `agent` field (skill flow):** `src/interview/service.ts:622, 871, 933, 1007`
 - **Correct pattern for comparison:** `src/hooks/foreground-fallback/index.ts:635-639`
 - **omos sets `default_agent` only when absent:** `src/index.ts:546-551`

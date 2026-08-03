@@ -61,7 +61,7 @@ function canExecute(
       env: environment,
       // Required on Windows to execute .cmd/.bat shims produced by npm/pnpm/yarn
       // (Node's CVE-2024-27980 patch blocks them without a shell).
-      shell: isWindows,
+      shell: isWindows && !/\.exe$/i.test(command),
     });
     return result.status === 0;
   } catch {

@@ -81,6 +81,10 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bupstream outage\b/i,
   /\bprovider outage\b/i,
   /\bprovider unavailable\b/i,
+  /\bmodel\b.*\bnot available\b/i,
+  /\bmodel is not available\b/i,
+  /\bunsupported model\b/i,
+  /\bunknown model\b/i,
 ];
 
 function extractStatusCode(error: {

@@ -37,7 +37,7 @@ oh-my-opencode-slim 是一个用于 OpenCode 的智能体编排插件。它内�
 - **[Companion](docs/companion.md)** —— 可选的浮动桌面窗口，显示哪些智能体正在运行，包括并行后台专家。
 - **[多路复用器集成](docs/multiplexer-integration.md)** —— 在 Tmux、Zellij、Herdr 或 cmux 窗格中实时观察智能体工作。
 - **[预设切换](docs/preset-switching.md)** —— 使用 `/preset` 在运行时更换整支团队的模型。
-- **[代码智能工具](docs/tools.md)** —— LSP 工具、支持 25 种语言的 AST 感知搜索，以及用于 Web 搜索、文档和 GitHub 代码搜索的内置 MCP。
+- **[代码智能工具](docs/tools.md)** —— LSP 工具、支持 25 种语言的 AST 感知搜索，以及用于文档和 GitHub 代码搜索的内置 MCP。
 - **[完全可定制](docs/configuration.md)** —— 自定义智能体、提示词覆盖、按智能体控制的 Skill/MCP 权限，以及[项目本地定制](docs/project-local-customization.md)。
 
 ### OpenAI GPT-5.6
@@ -148,19 +148,19 @@ bun run build
     "openai": {
       "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
       "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["websearch", "context7", "gh_grep"] },
+      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
       "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
     },
     "opencode-go": {
-      "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "max", "skills": [ "*" ], "mcps": [ "*", "!context7" ] },
-      "oracle": { "model": "opencode-go/qwen3.7-max", "variant": "max", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "opencode-go/deepseek-v4-flash", "variant": "high", "skills": [], "mcps": [ "websearch", "context7", "gh_grep" ] },
-      "explorer": { "model": "opencode-go/deepseek-v4-flash", "variant": "max", "skills": [], "mcps": [] },
-      "designer": { "model": "opencode-go/kimi-k2.7-code", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "opencode-go/deepseek-v4-flash", "variant": "high", "skills": [], "mcps": [] },
-      "observer": { "model": "opencode-go/mimo-v2.5", "variant": "max", "skills": [], "mcps": [] }
+      "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
+      "oracle": { "model": "opencode-go/qwen3.7-max", "variant": "max" },
+      "librarian": { "model": "opencode-go/deepseek-v4-flash", "variant": "high" },
+      "explorer": { "model": "opencode-go/deepseek-v4-flash", "variant": "high" },
+      "designer": { "model": "opencode-go/kimi-k2.7-code" },
+      "fixer": { "model": "opencode-go/deepseek-v4-flash", "variant": "high" },
+      "observer": { "model": "opencode-go/mimo-v2.5" }
     }
   }
 }
@@ -617,7 +617,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[后台编排](docs/background-orchestration.md)** | 围绕原生后台子智能体构建的调度器优先 Orchestrator 模型 |
 | **[维护者指南](docs/maintainers.md)** | issue 分流规则、标签含义、支持路由和仓库维护工作流 |
 | **[Skills](docs/skills.md)** | `simplify`、`codemap`、`clonedeps`、`deepwork`、`verification-planning`、`reflect`、`worktrees` 和 `oh-my-opencode-slim` 等捆绑技能 |
-| **[MCPs](docs/mcps.md)** | `websearch`、`context7`、`gh_grep` 以及每个智能体的 MCP 权限机制 |
+| **[MCPs](docs/mcps.md)** | `context7`、`gh_grep` 以及每个智能体的 MCP 权限机制 |
 | **[Tools](docs/tools.md)** | `webfetch`、LSP 工具、代码搜索和格式化工具等内置工具能力 |
 
 ### 💡 预设配置

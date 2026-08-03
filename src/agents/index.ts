@@ -197,6 +197,9 @@ function applyOverrides(
   if (override.displayName) {
     agent.displayName = override.displayName;
   }
+  if (override.description) {
+    agent.description = override.description;
+  }
   if (override.permission) {
     agent.config.permission = override.permission;
   }
@@ -235,15 +238,22 @@ function buildCustomAgentDefinition(
   const defaultPrompt = appendTaskRejectionInstruction(
     `You are the ${name} specialist.`,
   );
-  const basePrompt = override.prompt ?? defaultPrompt;
   const primaryModel = getPrimaryModelFromOverride(override);
+  const description = override.description ?? `Custom subagent '${name}'`;
 
   return {
     name,
+    description,
     config: {
       model: primaryModel ?? DEFAULT_MODELS.oracle,
       temperature: 0.2,
-      prompt: resolvePrompt(basePrompt, filePrompt, fileAppendPrompt),
+      prompt: resolvePrompt(
+        name,
+        override.prompt,
+        filePrompt,
+        defaultPrompt,
+        fileAppendPrompt,
+      ),
     },
   } as AgentDefinition;
 }
@@ -401,11 +411,11 @@ export function createAgents(
         agent.config.prompt ?? '',
       );
 
-      const basePrompt =
-        inlinePrompt !== undefined ? inlinePrompt : defaultPrompt;
       agent.config.prompt = resolvePrompt(
-        basePrompt,
+        name,
+        inlinePrompt,
         customPrompts.prompt,
+        defaultPrompt,
         customPrompts.appendPrompt,
       );
 
@@ -541,19 +551,20 @@ export function createAgents(
     undefined,
     disabled,
     councillorAgents.length > 0 ? ['council'] : undefined,
-    !config?.disabled_tools?.includes('wait_for_user'),
+    !(
+      Array.isArray(config?.disabled_tools) &&
+      config.disabled_tools.includes('wait_for_user')
+    ),
   );
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
   const defaultOrchestratorPrompt = orchestrator.config.prompt ?? '';
 
-  const baseOrchestratorPrompt =
-    inlineOrchestratorPrompt !== undefined
-      ? inlineOrchestratorPrompt
-      : defaultOrchestratorPrompt;
   orchestrator.config.prompt = resolvePrompt(
-    baseOrchestratorPrompt,
+    'orchestrator',
+    inlineOrchestratorPrompt,
     orchestratorPrompts.prompt,
+    defaultOrchestratorPrompt,
     orchestratorPrompts.appendPrompt,
   );
 
@@ -756,8 +767,9 @@ export function getAgentConfigs(
  */
 export function getDisabledAgents(config?: PluginConfig): Set<string> {
   const userDisabled = config?.disabled_agents;
-  const disabledSource =
-    userDisabled !== undefined ? userDisabled : DEFAULT_DISABLED_AGENTS;
+  const disabledSource = Array.isArray(userDisabled)
+    ? userDisabled
+    : DEFAULT_DISABLED_AGENTS;
   const disabled = new Set<string>();
   for (const name of disabledSource) {
     if (!PROTECTED_AGENTS.has(name)) {

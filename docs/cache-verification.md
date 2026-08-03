@@ -15,6 +15,10 @@ and should not be conflated.
   cache guarantee.
 - **Runtime cache monitoring** watches provider-reported cache telemetry
   during real sessions and logs a warning when a cache bust signature appears.
+- **Live cache smoke** (`bun run cache:smoke`) is a one-command operational
+  probe: it starts a real `opencode serve` with your normal config/auth/plugin,
+  runs short scripted conversations, and reports per-request provider cache
+  telemetry with a verdict.
 
 ## Continuous cache-safety tests (CI)
 
@@ -42,15 +46,82 @@ mistakes that have not been made before:
 All hook injections must go through `src/hooks/cache-safe-injection.ts`; see
 the Prompt Cache Safety section in `AGENTS.md` for the authoring rules.
 
+## Live cache smoke (`bun run cache:smoke`)
+
+Answers "is provider prompt caching working in my setup right now?" at the
+cost of a handful of real requests. It starts an isolated `opencode serve`
+(your global config, auth, and plugin apply), runs scripted scenarios in
+fresh sessions, then reads `tokens.cache.read/write` from the stored
+assistant messages — including the subagent child sessions that delegation
+scenarios spawn.
+
+Each scenario is designed to fire specific plugin payload machinery:
+
+| Scenario | Triggers | Default |
+|---|---|---|
+| `plain` | phase reminder, skills filter, system transform | ✅ |
+| `tools` | tool-result growth across steps | ✅ |
+| `nudge` | post-file-tool nudge injection, phase-reminder equilibrium | extensive |
+| `todos` | todowrite churn (create/update/complete across turns) | extensive |
+| `long` | sliding cache breakpoints over a six-turn history | extensive |
+| `board` | job-board trailing injection, injected completion, reconcile | extensive |
+| `board-churn` | board strip/re-append across many turns; plateau detection (issue #874) | extensive |
+| `running-lane` | running task tool_result mid-history across consecutive requests (PR #871) | extensive |
+| `agents` | repeated delegation, task-session reuse, subagent caching | extensive |
+
+```bash
+bun run cache:smoke                          # plain + tools (fast, cheap)
+bun run cache:smoke -- --scenario extensive  # full matrix, several minutes
+bun run cache:smoke -- --scenario board,agents
+bun run cache:smoke -- --provider anthropic --model claude-sonnet-5
+bun run cache:smoke -- --server http://127.0.0.1:4096   # reuse a running server
+
+# Issue #874 A/B: pin the board strategy via a scratch project config
+bun run cache:smoke -- --scenario board-churn --board-strategy latest
+bun run cache:smoke -- --scenario board-churn --board-strategy checkpoint-compatible
+```
+
+Two failure signatures are detected, plus an inconclusive case:
+
+- A request is flagged **SUSPECT** when it is not the first request of its
+  session, its input is ≥4096 tokens (above every provider's minimum
+  cacheable prefix), and it read zero cached tokens — the bust signature.
+- A session is flagged **plateau** when `cache-read` stays frozen at the
+  same nonzero value for 3+ consecutive requests while ≥6144 uncached input
+  tokens accumulate — the issue #874 signature, where the reusable prefix
+  stops growing even though nothing reads zero.
+
+Exit codes: `0` caching works, `1` bust or plateau detected, `2` inconclusive
+(provider reported no cache telemetry), `3` setup error. Providers with
+read-only telemetry (OpenAI-style `cached_tokens`) show `cache-write 0` —
+normal, not a failure.
+
 ## Runtime cache monitoring
 
 `src/hooks/cache-monitor/` observes `message.updated` events and the
-provider-reported `tokens.cache.read` / `tokens.cache.write` counters. When a
-session that previously hit the cache reports zero cache-read tokens on a
-sizeable request, it logs a `[cache-monitor] possible prompt-cache bust`
-warning (once per bust streak) to the plugin log. Providers that never report
-cache telemetry produce no warnings. This is the field safety net for
-provider-side behavior no offline test can model.
+provider-reported `tokens.cache.read` / `tokens.cache.write` counters. It
+logs three warning shapes (observation only, to the plugin log):
+
+- `possible prompt-cache bust` — a session that previously hit the cache
+  reports zero cache-read tokens on a sizeable request (once per bust
+  streak). The signature of a mid-session prompt-prefix change.
+- `never hit the provider cache` — a session reports zero cached tokens on
+  every sizeable request from its first turn, past both a consecutive-request
+  and a cumulative-uncached-input threshold (once per session). The signature
+  of a prefix that changes on *every* request — how the v2.2.5
+  checkpoint-board regression looked in the field. OpenCode coalesces missing
+  provider telemetry to zeros, so a cache-less provider is indistinguishable
+  from this; the thresholds and hedged wording keep that ambiguity from
+  becoming noise, and modest sessions on cache-less providers stay silent.
+- `cache-read plateau` — reads frozen at the same nonzero value for 4+
+  consecutive requests while ≥50K uncached input tokens accumulate (once per
+  plateau; re-arms when the read value changes). The issue #874 signature:
+  the reusable prefix has stopped growing even though nothing reads zero.
+  The warning suggests trying `backgroundJobs.strategy`
+  `"checkpoint-compatible"`.
+
+This is the field safety net for provider-side behavior no offline test can
+model.
 
 ## Prerequisites
 

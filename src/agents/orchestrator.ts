@@ -11,16 +11,26 @@ export interface AgentDefinition {
 }
 
 /**
- * Resolve agent prompt from base/custom/append inputs.
- * If customPrompt is provided, it replaces the base entirely.
- * If customAppendPrompt is provided, it appends after whichever base won.
+ * Resolve agent prompt from inline/file/append inputs.
+ *
+ * Precedence: inline prompt > file prompt > fallback. An explicit inline
+ * `override.prompt` wins over a `<agent>.md` file; the file is the
+ * shared default. `customAppendPrompt` always appends after whichever base
+ * won. Deterministic per session (construction-time only) — cache-safe.
  */
 export function resolvePrompt(
-  base: string,
-  customPrompt?: string,
+  agentName: string,
+  inlinePrompt: string | undefined,
+  filePrompt: string | undefined,
+  fallback: string,
   customAppendPrompt?: string,
 ): string {
-  const effectiveBase = customPrompt !== undefined ? customPrompt : base;
+  if (inlinePrompt !== undefined && filePrompt !== undefined) {
+    console.warn(
+      `[oh-my-opencode] Agent '${agentName}': inline prompt overrides prompt file (${agentName}.md). Remove the inline prompt to use the file.`,
+    );
+  }
+  const effectiveBase = inlinePrompt ?? filePrompt ?? fallback;
   return customAppendPrompt !== undefined
     ? `${effectiveBase}\n\n${customAppendPrompt}`
     : effectiveBase;
@@ -210,9 +220,14 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Continue orchestration only on non-overlapping work; otherwise briefly report what was launched and stop.
 - Before local edits or another writer task, compare against running task scopes.
 - Parallel background tasks are allowed only when their write scopes do not conflict.
-- Before final response, reconcile any terminal jobs shown in the Background Job Board.
 - Use \`cancel_task\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan.
 - Cancellation is not rollback: if cancelling a writer, inspect and reconcile partial file changes before launching a replacement lane.
+
+### Active Task Amendments
+- A task in the Active / Unreconciled section is still running and cannot receive another \`task\` call, even with its \`task_id\`. Do not try to resume, replace, or cancel it merely because the user adds to its existing scope.
+- For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then resume the same specialist only after its session appears in Reusable Sessions.
+- Cancel a running task only when its current objective is genuinely obsolete or must be replaced. Never create-and-cancel speculative duplicate sessions.
+- A \`running [resumed]\` board label reflects lifecycle bookkeeping, not confirmation that a new instruction reached the specialist.
 
 ### Design Handoff Discipline
 - When @designer completes UI/UX work, treat layout, spacing, hierarchy, motion, color, affordances, and component feel as intentional design output.
@@ -226,6 +241,7 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - When too much unrelated, and really needed, start a fresh session with the specialist
 - If multiple remembered sessions fit, prefer the most recently used matching session.
 - Prefer re-uses over creating new sessions all the time
+- Only sessions listed under Reusable Sessions may be resumed. Active / Unreconciled sessions are not resumable.
 - When reusing a specialist session, you MUST pass the existing session or alias in the task tool's \`task_id\` argument. Saying "reuse" in prose is not enough.
 - If the Background Job Board lists \`fix-1 / ses_abc / fixer\`, call task with \`subagent_type: "fixer"\` and \`task_id: "fix-1"\` or \`task_id: "ses_abc"\`.
 - Do not leave \`task_id\` empty when intending to reuse; omitted or empty \`task_id\` creates a new specialist session.
@@ -292,7 +308,13 @@ export function createOrchestratorAgent(
     excludeDescriptions,
     waitForUserEnabled,
   );
-  const prompt = resolvePrompt(basePrompt, customPrompt, customAppendPrompt);
+  const prompt = resolvePrompt(
+    'orchestrator',
+    undefined,
+    customPrompt,
+    basePrompt,
+    customAppendPrompt,
+  );
 
   const definition: AgentDefinition = {
     name: 'orchestrator',
