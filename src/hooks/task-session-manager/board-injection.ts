@@ -84,6 +84,11 @@ type RetainedTailBoard = {
   text: string;
 };
 
+type BoardAnchor = {
+  message: MessageWithParts;
+  id: string;
+};
+
 // ── State shape ────────────────────────────────────────────────────────
 
 export type InjectedTerminalJobs = {
@@ -545,10 +550,10 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   // freshening its board is free. Every earlier message was already sent, so
   // its board must never change.
   const anchor = findBoardAnchor(messages, state.metadataKey);
-  const anchorId = anchor ? boardAnchorId(anchor) : undefined;
+  const anchorId = anchor?.id;
 
   // Strip the board from the current tail zone only (byte-safe volatile zone).
-  stripCurrentTailBoard(messages, state.metadataKey, anchor);
+  stripCurrentTailBoard(messages, state.metadataKey, anchor?.message);
 
   // Eligibility is driven by the most recent orchestrator user message (the
   // triggering turn), which also guards against specialist/internal turns.
@@ -627,9 +632,9 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   //   (different role), so the assistant message keeps its own readable
   //   breakpoint, and it uses the USER `trigger.info` — never `anchor.info` —
   //   so the message carrying board text is genuinely user-role (A3).
-  const recordId = anchorId ?? boardAnchorFallbackId(anchor);
-  if (canCarryBoardPart(anchor)) {
-    appendTaggedSyntheticPart(anchor, {
+  const recordId = anchor.id;
+  if (canCarryBoardPart(anchor.message)) {
+    appendTaggedSyntheticPart(anchor.message, {
       text: reminder,
       metadataKey: state.metadataKey,
     });
@@ -669,19 +674,8 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
 function findBoardAnchor(
   messages: unknown[],
   metadataKey: string,
-): MessageWithParts | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (!isMessageWithParts(message)) continue;
-    if (
-      message.parts.length > 0 &&
-      message.parts.every((part) => isTaggedPart(part, metadataKey))
-    ) {
-      continue;
-    }
-    return message;
-  }
-  return undefined;
+): BoardAnchor | undefined {
+  return boardAnchors(messages, metadataKey).at(-1);
 }
 
 /**
@@ -716,26 +710,68 @@ function stripCurrentTailBoard(
 /**
  * A stable id for an anchor message that lacks an `info.id` (test fixtures,
  * legacy shapes). Derived from role + concatenated REAL text (tagged board
- * parts excluded) so the id is identical whether or not a board currently
- * rides on the message — otherwise appending a board would change the id and
- * defeat cross-request anchor matching.
+ * parts excluded) plus its append-order occurrence, so duplicate anonymous
+ * messages remain distinct while appending a later message leaves existing
+ * ids unchanged. The occurrence is internal and never enters the payload.
  */
-function boardAnchorFallbackId(message: MessageWithParts): string {
+function boardAnchorFallbackId(
+  message: MessageWithParts,
+  occurrence: number,
+  metadataKey: string,
+): string {
+  return `anon:${djb2Hash(boardAnchorFallbackBase(message, metadataKey))}:${occurrence}`;
+}
+
+function boardAnchorFallbackBase(
+  message: MessageWithParts,
+  metadataKey: string,
+): string {
   const text = message.parts
     .filter(
       (part) =>
-        !isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY) &&
+        !isTaggedPart(part, metadataKey) &&
         part.type === 'text' &&
         typeof part.text === 'string',
     )
     .map((part) => part.text)
     .join('\u0000');
-  return `anon:${djb2Hash(`${message.info.role}:${text}`)}`;
+  return `${message.info.role}:${text}`;
 }
 
-/** The id used to key a message in the retained-tail-board log. */
-function boardAnchorId(message: MessageWithParts): string {
-  return message.info.id ?? boardAnchorFallbackId(message);
+/**
+ * Build internal anchor identities in append order. Anonymous messages use an
+ * occurrence suffix so duplicate content remains distinct, while appending a
+ * later message leaves all existing identities unchanged. The identity never
+ * enters the provider-visible message payload.
+ */
+function boardAnchors(messages: unknown[], metadataKey: string): BoardAnchor[] {
+  const occurrences = new Map<string, number>();
+  const anchors: BoardAnchor[] = [];
+
+  for (const candidate of messages) {
+    if (!isMessageWithParts(candidate)) continue;
+    if (
+      candidate.parts.length > 0 &&
+      candidate.parts.every((part) => isTaggedPart(part, metadataKey))
+    ) {
+      continue;
+    }
+
+    if (candidate.info.id !== undefined) {
+      anchors.push({ message: candidate, id: candidate.info.id });
+      continue;
+    }
+
+    const base = boardAnchorFallbackBase(candidate, metadataKey);
+    const occurrence = occurrences.get(base) ?? 0;
+    occurrences.set(base, occurrence + 1);
+    anchors.push({
+      message: candidate,
+      id: boardAnchorFallbackId(candidate, occurrence, metadataKey),
+    });
+  }
+
+  return anchors;
 }
 
 /** Record (or refresh) a board placed on an anchor for later replay. */
@@ -798,15 +834,8 @@ function replayRetainedTailBoards(
   if (!perSession || perSession.size === 0) return;
 
   const anchorById = new Map<string, MessageWithParts>();
-  for (const message of messages) {
-    if (!isMessageWithParts(message)) continue;
-    if (
-      message.parts.length > 0 &&
-      message.parts.every((part) => isTaggedPart(part, state.metadataKey))
-    ) {
-      continue;
-    }
-    anchorById.set(boardAnchorId(message), message);
+  for (const anchor of boardAnchors(messages, state.metadataKey)) {
+    anchorById.set(anchor.id, anchor.message);
   }
 
   for (const [anchorId, board] of [...perSession.entries()]) {

@@ -58,6 +58,13 @@ function userMsg(id: string, text: string) {
   };
 }
 
+function anonymousUserMsg(text: string) {
+  return {
+    info: { role: 'user', agent: 'orchestrator', sessionID: SESSION },
+    parts: [{ type: 'text', text }],
+  };
+}
+
 /** An assistant turn issuing a tool call, followed by its user tool_result. */
 function toolTurn(id: string, output: string) {
   return [
@@ -385,6 +392,41 @@ describe('background job board cache breakpoint stability', () => {
     expect(
       oldTailB.parts.at(-1)?.metadata?.[BACKGROUND_JOB_BOARD_METADATA_KEY],
     ).toBe(true);
+  });
+
+  test('duplicate anonymous user turns preserve the first board on append', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: SESSION,
+      agent: 'librarian',
+      description: 'research',
+    });
+    const hook = createHook(board);
+
+    const firstRequest = await inject(hook, [anonymousUserMsg('continue')]);
+    const firstMessage = firstRequest[0] as Msg;
+    expect(
+      firstMessage.parts.at(-1)?.metadata?.[BACKGROUND_JOB_BOARD_METADATA_KEY],
+    ).toBe(true);
+
+    const secondRequest = await inject(hook, [
+      anonymousUserMsg('continue'),
+      anonymousUserMsg('continue'),
+    ]);
+
+    // The first anonymous message is the same append-stable anchor, while the
+    // second occurrence receives the fresh tail board.
+    expect(JSON.stringify(secondRequest[0])).toBe(
+      JSON.stringify(firstRequest[0]),
+    );
+    expect(
+      (secondRequest as Msg[]).flatMap((message) =>
+        message.parts.filter(
+          (part) => part.metadata?.[BACKGROUND_JOB_BOARD_METADATA_KEY] === true,
+        ),
+      ),
+    ).toHaveLength(2);
   });
 
   test('field-dump scenario: tail is a tool_result user turn preceded by an assistant turn', async () => {
