@@ -9,6 +9,9 @@ describe('plugin health thresholds', () => {
       4,
     );
     expect(minimumExpectedToolCount(['unknown_tool'])).toBe(5);
+    expect(minimumExpectedToolCount([], false)).toBe(4);
+    expect(minimumExpectedToolCount(['wait_for_user'], false)).toBe(3);
+    expect(minimumExpectedToolCount(['webfetch'], false)).toBe(4);
   });
 
   test('never throws when disabledTools is not an array', () => {
