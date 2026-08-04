@@ -2,10 +2,8 @@
  * Shared session utilities for council and background managers.
  */
 
-import type { PluginInput } from '@opencode-ai/plugin';
+import { type OpencodeClient } from '@opencode-ai/sdk/v2';
 import { log } from './logger';
-
-type OpencodeClient = PluginInput['client'];
 
 export const SESSION_ABORT_TIMEOUT_MS = 1_000;
 
@@ -44,7 +42,7 @@ export async function abortSessionWithTimeout(
   timeoutMs = SESSION_ABORT_TIMEOUT_MS,
 ): Promise<void> {
   await withTimeout(
-    client.session.abort({ path: { id: sessionId } }),
+    client.session.abort({ sessionID: sessionId }),
     timeoutMs,
     `Session abort timed out after ${timeoutMs}ms`,
   );
@@ -103,7 +101,7 @@ export async function promptWithTimeout(
 ): Promise<void> {
   if (signal?.aborted) throw new Error('Prompt cancelled');
 
-  const sessionId = args.path.id;
+  const sessionId = args.sessionID;
   const hasTimeout = timeoutMs > 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -201,8 +199,8 @@ export async function extractSessionResult(
   const includeReasoning = options?.includeReasoning ?? true;
 
   const messagesResult = await client.session.messages({
-    path: { id: sessionId },
-    ...(options?.directory ? { query: { directory: options.directory } } : {}),
+    sessionID: sessionId,
+    ...(options?.directory ? { directory: options.directory } : {}),
   });
   const messages = (messagesResult.data ?? []) as Array<{
     info?: { role: string };
