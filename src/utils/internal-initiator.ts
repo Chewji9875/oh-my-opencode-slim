@@ -29,5 +29,13 @@ export function isInternalInitiatorPart(part: unknown): boolean {
     return false;
   }
 
-  return part.metadata[INTERNAL_INITIATOR_METADATA_KEY] === true;
+  return (
+    part.metadata[INTERNAL_INITIATOR_METADATA_KEY] === true ||
+    // OpenCode's compaction continuation emits compaction_continue: true
+    // instead of our internal initiator key; treat it as internal to
+    // prevent board injection on the continuation turn (#922).
+    // Upstream key is not a stable plugin contract — graceful degradation
+    // if renamed: injection resumes, loop returns, no crash.
+    part.metadata['compaction_continue'] === true
+  );
 }
