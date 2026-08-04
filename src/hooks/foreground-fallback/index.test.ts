@@ -171,6 +171,27 @@ describe('isFailoverError', () => {
   test('returns true for "forbidden" (lowercase) in message', () => {
     expect(isRetryableError({ message: 'forbidden' })).toBe(true);
   });
+
+  test('returns true for NewAPI "no available channel" error shapes', () => {
+    const message =
+      'No available channel for model gpt-5.6-luna under group Codex专用 (distributor) (request id: abc123)';
+
+    expect(isRetryableError(message)).toBe(true);
+    expect(isRetryableError({ message })).toBe(true);
+    expect(
+      isRetryableError({
+        data: { statusCode: 400, responseBody: message },
+      }),
+    ).toBe(true);
+  });
+
+  test('returns false for permanent channel-not-found errors', () => {
+    expect(
+      isRetryableError({
+        message: 'channel not found for model gpt-5.6-luna',
+      }),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -242,6 +263,42 @@ describe('ForegroundFallbackManager session.error', () => {
     ];
     expect(call[0].path.id).toBe('sess-1');
     // Should have picked the next model after anthropic/claude-opus-4-5
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
+  });
+
+  test('triggers fallback on unavailable provider channel session.error', async () => {
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: {
+          message:
+            'No available channel for model gpt-5.6-luna under group Codex专用 (distributor)',
+        },
+      },
+    });
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const call = mocks.promptAsync.mock.calls[0] as [
+      {
+        body: { model: { providerID: string; modelID: string } };
+      },
+    ];
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
