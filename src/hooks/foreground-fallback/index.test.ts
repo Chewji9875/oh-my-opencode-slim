@@ -319,11 +319,11 @@ describe('ForegroundFallbackManager session.error', () => {
 
     const call = mocks.promptAsync.mock.calls[0] as [
       {
-        body: { model: { providerID: string; modelID: string } };
+        model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].body.model.providerID).toBe('openai');
-    expect(call[0].body.model.modelID).toBe('gpt-4o');
+    expect(call[0].model.providerID).toBe('openai');
+    expect(call[0].model.modelID).toBe('gpt-4o');
   });
 
   test('marks the replayed user prompt as an internal initiator', async () => {
