@@ -14,7 +14,7 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
   "presets": {
     "opencode-zen-free": {
       "orchestrator": {
-        "model": "opencode/hy3-free",
+        "model": "opencode/longcat-2.0-free",
         "temperature": 0.4,
         "skills": ["*"],
         "mcps": ["*", "!context7"]
@@ -46,9 +46,8 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
         "mcps": []
       },
       "fixer": {
-        "model": "opencode/deepseek-v4-flash-free",
+        "model": "opencode/laguna-s-2.1-free",
         "temperature": 0.2,
-        "variant": "high",
         "skills": [],
         "mcps": []
       },
