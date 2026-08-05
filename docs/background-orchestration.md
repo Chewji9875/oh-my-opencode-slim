@@ -171,19 +171,31 @@ guards.
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
 
-### 5. Verify
+### 5. Verify with a proportionate budget
 
-Verification remains orchestrator-owned, but not necessarily orchestrator-run.
+Verification remains orchestrator-owned, but not necessarily
+orchestrator-run. The orchestrator defines the success criteria, selects the
+minimum evidence that can establish them, reconciles the final state, and
+reports material uncertainty. Specialists own the focused validation of their
+bounded work and must return the checks and evidence they produced.
 
-Examples:
+Treat verification as a budget based on scope, semantic risk, uncertainty, and
+impact:
 
-- route UI review to `designer`,
-- route code review to `oracle`,
-- route test writing or test updates to `fixer`,
-- run final shell checks directly only when appropriate.
+- Start with the narrowest relevant validation.
+- Broaden it only when integration scope, uncertainty, or a failed focused
+  check justifies the additional cost.
+- Do not run project-wide checks by habit or impose a fixed
+  lint/build/format/test checklist merely because files changed.
+- Route UI review to `designer`, test writing or updates to `fixer`, and run
+  focused shell checks directly when that is the most efficient evidence path.
+- Treat Oracle as an independent escalation, not a default verification gate.
+  Dispatch it when semantic risk, architectural uncertainty, persistent
+  failures, or another high-cost decision makes the expected risk reduction
+  worth the coordination cost.
 
-The final response should only happen after relevant background work is terminal
-and reconciled.
+The final response should only happen after relevant background work is
+terminal, reconciled, and covered by proportionate final-state evidence.
 
 ---
 
@@ -485,16 +497,23 @@ Make background subagents first-class in this plugin.
 
 The orchestrator should do something like:
 
-1. Create todos for discovery, design, implementation, docs, tests, review.
+1. Create todos for discovery, design, implementation, docs, tests, and
+   proportionate verification.
 2. Launch Explorer in background to map task-session hooks and task lifecycle.
-3. Launch Oracle in background to review architecture risks.
+3. If the change has material semantic or architectural risk, launch Oracle in
+   background to review that risk; otherwise keep the Oracle review budget for
+   a later uncertainty that merits it.
 4. Continue by preparing the dependency graph and file ownership plan.
-5. Wait for Explorer and Oracle via hook-driven completion.
+5. Wait for Explorer and, if it was launched, Oracle via hook-driven
+   completion.
 6. Dispatch Fixer to implement prompt/config/hook changes with clear ownership.
 7. Dispatch a second Fixer for tests if file ownership is separate.
 8. Wait for implementation results.
-9. Dispatch Oracle for final review.
-10. Run final checks.
+9. Reconcile the implementation and dispatch Oracle for final review only if
+   semantic risk or unresolved uncertainty makes independent review worthwhile.
+10. Run the narrowest final-state checks that establish the requested behavior
+    and integration state; do not apply an unconditional lint/build/format/test
+    checklist.
 11. Report final state.
 
 At no point does the orchestrator become the main implementer.

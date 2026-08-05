@@ -36,7 +36,7 @@ Before every change, ask:
 - Does this produce the same output for every input?
 - Does this maintain the same error behavior?
 - Does this preserve the same side effects and ordering?
-- Do all existing tests still pass without modification?
+- What focused evidence would reveal a behavior change in the final state?
 
 ### 2. Follow Project Conventions
 
@@ -108,8 +108,9 @@ Make one simplification at a time.
 For each simplification:
 
 1. Make the change
-2. Run relevant tests
-3. Keep it only if behavior is preserved
+2. Identify the claim it affects and use the narrowest evidence that can
+   establish whether behavior was preserved
+3. Keep it only when the evidence supports the claim
 
 Separate refactoring from feature work whenever possible.
 
@@ -129,10 +130,16 @@ After simplifying, confirm:
 - Favor explicit names and smaller focused helpers when they improve readability
 - Keep refactors tightly scoped to the task or review feedback
 
-## Verification Checklist
+## Final-state verification budget
 
-- [ ] Existing tests pass without modification
-- [ ] Build/typecheck/lint still pass
-- [ ] No unrelated files were refactored
-- [ ] No error handling was weakened or removed
-- [ ] The result is simpler to review than the original
+Validate the final diff rather than applying a fixed command set. State each
+distinct preservation claim and assign one owner to establish or refute it.
+Reuse earlier evidence only if the relevant code, inputs, environment, and
+state remain valid; otherwise replace it with fresh evidence. Select the
+smallest orthogonal set that covers the claims and important boundaries.
+
+Run checks explicitly required by repository or release instructions. Broaden
+or repeat checks only for a stated narrow condition, such as a changed shared
+boundary, invalidated evidence, nondeterministic results, or stakes requiring
+independent confirmation. Keep the final review focused on behavior, error
+handling, side effects, conventions, and the absence of unrelated changes.

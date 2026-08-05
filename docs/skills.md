@@ -12,6 +12,27 @@ new bundled versions for customized skills are staged under
 
 ---
 
+## Verification and Review Budget
+
+Verification is an orchestrator-owned decision and report, but the evidence may
+be collected by the specialist who owns the change or routed to a focused
+verifier. Treat verification as a budget: choose the minimum evidence that is
+meaningful for the change's scope, semantic risk, uncertainty, and impact.
+
+- Start with the narrowest relevant validation and broaden it only when
+  integration scope, uncertainty, or a failed focused check justifies the cost.
+- Do not run project-wide checks by habit or require a fixed lint/build/format/
+  test checklist merely because files changed.
+- Oracle review is an independent escalation, not a default verification step.
+  Spend that review budget when semantic risk, architectural uncertainty, or a
+  persistent failure makes the expected risk reduction worth the coordination
+  cost.
+- Specialists own validation of their bounded work and must report the checks
+  and evidence they produced. The orchestrator owns final-state reconciliation,
+  verification selection, and disclosure of remaining uncertainty.
+
+---
+
 ## Available Skills
 
 ### Bundled in repo
@@ -220,7 +241,9 @@ Safety defaults:
 - Pre-flight check on Git repo status and dirty worktrees.
 - Strict confirmation gates for all git modifications (`worktree add/remove`, `merge`, `rebase`, `cherry-pick`, `reset --hard`, branch operations).
 - Branch names default to `omo/<slug>` but respect custom user patterns.
-- Automated diff validation and compilation/test check before final integration.
+- Proportionate final-state validation before final integration: inspect the
+  diff and run checks that meaningfully cover the changed behavior and
+  integration risk, rather than an unconditional lint/build/format/test list.
 
 See **[Worktrees](worktrees.md)** for the detailed safety protocol.
 

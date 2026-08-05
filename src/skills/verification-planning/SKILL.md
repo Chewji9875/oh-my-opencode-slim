@@ -37,6 +37,20 @@ trustworthy conclusion with proportionate cost, safety, and effort.
 **Complete when:** there is a preferred path, its limitations are understood,
 and a weaker or stronger alternative is available if circumstances change.
 
+## Set a verification budget
+
+Turn the change into distinct claims and assign one owner to establish or refute
+each claim. Reuse existing evidence only while it remains valid for the same
+claim: the relevant code, inputs, environment, and state must still match.
+
+At the final state, choose the minimum orthogonal set of evidence paths that
+covers the claims and important boundaries. Do not repeat overlapping checks
+merely for reassurance. Broaden or repeat verification only under narrow,
+stated conditions, such as a changed shared boundary, invalidated evidence,
+nondeterministic results, or stakes that require independent confirmation.
+Record why any additional evidence earns its cost. This is a budget for
+credible evidence, not a fixed command checklist.
+
 ## 3. Create a verification affordance when needed
 
 When the existing system leaves the decisive truth too indirect or ambiguous,
