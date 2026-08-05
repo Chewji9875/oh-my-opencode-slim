@@ -135,17 +135,13 @@ keeps them readable to OpenCode.
 
 ### Phase 3: Integration & Validation
 Before merging or integrating the worktree branch:
-1. State the distinct final-state claims, assign one owner to establish or
-   refute each, and select the minimum orthogonal evidence set for the changed
-   behavior and its important boundaries.
-2. Reuse evidence only while the relevant code, inputs, environment, and state
-   remain valid. Run checks explicitly required by repository or release
-   instructions, and broaden or repeat checks only when a stated condition
-   warrants the additional cost.
-3. Generate and display a clear diff comparing the worktree branch to the
+1. Apply a proportionate final-state verification plan to the changed behavior
+   and its important boundaries. Run checks required by repository or release
+   instructions.
+2. Generate and display a clear diff comparing the worktree branch to the
    integration base branch.
-4. Ask the user for confirmation to integrate.
-5. Perform the approved integration, such as merge or cherry-pick, from the main
+3. Ask the user for confirmation to integrate.
+4. Perform the approved integration, such as merge or cherry-pick, from the main
    checkout or the user-approved integration checkout.
 
 ### Phase 4: Cleanup & Pruning

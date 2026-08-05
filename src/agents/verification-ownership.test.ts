@@ -1,107 +1,40 @@
 import { describe, expect, test } from 'bun:test';
 import { createDesignerAgent } from './designer';
 import { createFixerAgent } from './fixer';
-import {
-  buildOrchestratorPrompt,
-  createOrchestratorAgent,
-} from './orchestrator';
+import { buildOrchestratorPrompt } from './orchestrator';
 
 describe('verification ownership prompt contracts', () => {
-  test('orchestrator assigns ownership and limits final-state verification', () => {
+  test('orchestrator assigns validation ownership and scope', () => {
     const prompt = buildOrchestratorPrompt();
 
-    expect(prompt).toContain('bounded contract');
-    expect(prompt).toContain('write scope');
-    expect(prompt).toContain('observable success claims');
-    expect(prompt).toContain('validation owner');
-    expect(prompt).toContain('maximum validation scope');
-    expect(prompt).toContain('exactly one owner');
     expect(prompt).toContain(
-      'Reconcile all writer lanes before entering final-state',
+      'Every delegation names a validation owner and allowed scope',
     );
-    expect(prompt).toContain('smallest orthogonal set of checks');
-    expect(prompt).toContain('Reuse reported evidence only while it applies');
-    expect(prompt).toContain('stale, failing, or ambiguous evidence');
-    expect(prompt).toContain('Do not automatically dispatch review lanes');
-    expect(prompt).toContain('A skipped check is not a passed check');
+    expect(prompt).toContain(
+      'Reconcile all writer lanes before final validation',
+    );
+    expect(prompt).toContain(
+      'Reuse still-valid evidence; do not repeat it unless the final state changed',
+    );
+    expect(prompt).toContain('an explicit requirement demands it');
   });
 
-  test('fixer limits validation to its assigned claim and scope', () => {
+  test('fixer runs and reports only assigned validation', () => {
     const prompt = createFixerAgent('test/model').config.prompt as string;
 
     expect(prompt).toContain(
-      'only when the Orchestrator explicitly assigns it',
+      'Run only validation assigned by the Orchestrator; do not broaden it',
     );
-    expect(prompt).toContain('success claim');
-    expect(prompt).toContain('maximum validation scope');
-    expect(prompt).toContain('broad lint, typecheck, build, full-test');
-    expect(prompt).toContain('exact command, result, and limitation');
-    expect(prompt).toMatch(/skipped is not\s+passed/);
-    expect(prompt).toContain('Skipped: no validation assigned');
-    expect(prompt).toContain('reviewer work');
+    expect(prompt).toContain('Report validation results and skips accurately');
   });
 
-  test('designer preserves user-visible validation ownership', () => {
+  test('designer runs and reports only assigned user-visible validation', () => {
     const prompt = createDesignerAgent('test/model').config.prompt as string;
 
     expect(prompt).toContain(
-      'only when the Orchestrator explicitly assigns it',
+      'Run only validation assigned by the Orchestrator; do not broaden it',
     );
-    expect(prompt).toContain('success claim');
-    expect(prompt).toContain('maximum validation scope');
-    expect(prompt).toContain('user-visible behavior');
-    expect(prompt).toContain('visual hierarchy');
-    expect(prompt).toContain('exact route, viewport,');
-    expect(prompt).toContain('interaction steps');
-    expect(prompt).toContain('exact command, result, and limitation');
-    expect(prompt).toMatch(/skipped is not\s+passed/);
-  });
-
-  test('specialist overrides retain replacement and append semantics', () => {
-    const fixerReplacement = createFixerAgent(
-      'test/model',
-      'replacement fixer prompt',
-      'ignored fixer append',
-    );
-    const fixerAppend = createFixerAgent(
-      'test/model',
-      undefined,
-      'fixer append prompt',
-    );
-    const designerReplacement = createDesignerAgent(
-      'test/model',
-      'replacement designer prompt',
-      'ignored designer append',
-    );
-    const designerAppend = createDesignerAgent(
-      'test/model',
-      undefined,
-      'designer append prompt',
-    );
-
-    expect(fixerReplacement.config.prompt).toBe('replacement fixer prompt');
-    expect(fixerAppend.config.prompt).toEndWith('fixer append prompt');
-    expect(designerReplacement.config.prompt).toBe(
-      'replacement designer prompt',
-    );
-    expect(designerAppend.config.prompt).toEndWith('designer append prompt');
-  });
-
-  test('orchestrator overrides retain replacement and append semantics', () => {
-    const replacement = createOrchestratorAgent(
-      'test/model',
-      'replacement orchestrator prompt',
-      'orchestrator append prompt',
-    );
-    const appended = createOrchestratorAgent(
-      'test/model',
-      undefined,
-      'orchestrator append prompt',
-    );
-
-    expect(replacement.config.prompt).toBe(
-      'replacement orchestrator prompt\n\norchestrator append prompt',
-    );
-    expect(appended.config.prompt).toEndWith('orchestrator append prompt');
+    expect(prompt).toContain('Report validation results and skips accurately');
+    expect(prompt).toContain('Assigned validation should be user-visible');
   });
 });

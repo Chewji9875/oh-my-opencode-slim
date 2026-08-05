@@ -47,7 +47,7 @@ A glossary of the terms used in this project's domain. Definitions describe what
 
 ## Skills
 
-- **Skill** — A bundled, self-contained workflow or capability shipped with the plugin. Bundled skills (eight, including managed `verification-planning`): codemap, clonedeps, simplify, deepwork, verification-planning, reflect, worktrees, oh-my-opencode-slim. Note: `loop-engineering` exists on disk but is not registered as a bundled skill.
+- **Skill** — A bundled, self-contained workflow or capability shipped with the plugin. Bundled skills: codemap, clonedeps, simplify, deepwork, reflect, worktrees, oh-my-opencode-slim. Note: `loop-engineering` exists on disk but is not registered as a bundled skill.
 
 ## Hooks
 

@@ -75,17 +75,14 @@ Osmani's framework identifies five primitives that compose a loop, plus durable 
 
 | Feature | Claude Code | Codex | OpenCode |
 |---------|-------------|-------|----------|
-| `/goal` command | Yes | Yes | No |
-| `/loop` command | Yes | No | Yes (registered, prompt-driven) |
+| `/goal` command | Yes | Yes | No (spec only) |
+| `/loop` command | Yes | No | No (spec only) |
 | `/batch` command | Yes | No | No |
 | Scheduled automations | Yes (hooks, GitHub Actions) | Yes (Automations tab) | No (Phase 4) |
 | Event triggers | Yes (hooks) | Yes (triage inbox) | No |
 | Cron-like scheduling | Yes | Yes | No |
 
-**Verdict:** Claude Code and Codex both ship full automation primitives. OpenCode
-has a registered, prompt-driven `/loop` entry point, but no scheduling
-automation or fully integrated runtime `LoopEngine`; `LoopSession` primitives
-exist separately.
+**Verdict:** Claude Code and Codex both ship full automation primitives. OpenCode has the loop engine fully designed in spec but not yet implemented.
 
 ### Worktrees (Isolation)
 
@@ -94,7 +91,7 @@ exist separately.
 | Git worktree support | Yes (`--worktree`) | Yes (built-in per thread) | Yes (orchestrator skill) |
 | Sub-agent isolation | Yes (`isolation: worktree`) | Yes (built-in) | Yes (apply-patch hook) |
 | Programmatic creation | Yes | Yes | No (skill-only, prompt-driven) |
-| Loop integration | Yes | Yes | No (runtime integration absent) |
+| Loop integration | Yes | Yes | No (spec only) |
 
 **Verdict:** Claude Code and Codex have worktrees as runtime primitives integrated with their loop engines. OpenCode has worktrees as an orchestrator skill with apply-patch support, but no programmatic runtime integration yet.
 
@@ -104,13 +101,11 @@ exist separately.
 |---------|-------------|-------|----------|
 | `SKILL.md` format | Yes | Yes | Yes |
 | Per-agent assignment | Yes | Yes | Yes (with permissions) |
-| Bundled skills | No (user-created) | Yes (Agent Skills) | Yes (8 bundled) |
+| Bundled skills | No (user-created) | Yes (Agent Skills) | Yes (7 bundled) |
 | Skill marketplace | Yes (plugins) | Yes | No |
 | Intent debt prevention | Yes | Yes | Yes |
 
-**Verdict:** All three have mature skill systems. OpenCode's is notably rich
-with 8 bundled skills, per-agent permission control, and automatic sync on
-plugin updates.
+**Verdict:** All three have mature skill systems. OpenCode's is notably rich with 7 bundled skills, per-agent permission control, and automatic sync on plugin updates.
 
 ### Connectors / MCP
 
@@ -143,17 +138,14 @@ plugin updates.
 
 | Feature | Claude Code | Codex | OpenCode |
 |---------|-------------|-------|----------|
-| Built-in loop command | Yes (`/goal`, `/loop`) | Yes (`/goal`) | Yes (`/loop`, registered and prompt-driven) |
-| Success criteria | Yes (test, build, lint) | Yes | Partial (criteria types exist in `LoopSession`; no integrated runtime) |
-| Iteration cap | Yes | Yes | Partial (`LoopSession` stores `maxAttempts`; no integrated runtime) |
-| No-progress detection | Yes | Yes | No integrated runtime (planned signals only) |
-| Escalation to human | Yes | Yes | Partial (`LoopSession` has escalation/manual-review state) |
-| Cost budgeting | Limited | Limited | No integrated runtime (planned) |
+| Built-in loop command | Yes (`/goal`, `/loop`) | Yes (`/goal`) | No (spec only) |
+| Success criteria | Yes (test, build, lint) | Yes | Yes (designed: test, build, lint, fileExists, command, oracle, observer) |
+| Iteration cap | Yes | Yes | Yes (designed) |
+| No-progress detection | Yes | Yes | Yes (designed: totalErrors, timeoutCount) |
+| Escalation to human | Yes | Yes | Yes (designed: @council at Layer 0) |
+| Cost budgeting | Limited | Limited | Yes (designed) |
 
-**Verdict:** Claude Code and Codex have working loop primitives. OpenCode's
-`/loop` entry point is registered and prompt-driven, and `LoopSession`
-primitives cover definitions, phases, attempts, and history. A fully
-integrated runtime `LoopEngine` is not implemented.
+**Verdict:** Claude Code and Codex have working loop primitives. OpenCode's loop engine is fully designed with a 3-layer architecture (Orchestrator -> LoopEngine -> Specialists) but not yet implemented.
 
 ---
 
@@ -221,47 +213,30 @@ In its purest form, Ralph is a Bash loop. That's it.
 
 | Building Block | Status | Implementation |
 |----------------|--------|----------------|
-| **Skills** | Mature | 8 bundled skills, per-agent permissions, auto-sync |
+| **Skills** | Mature | 7 bundled skills, per-agent permissions, auto-sync |
 | **Connectors/MCP** | Mature | 3 built-in MCPs, per-agent permission system |
 | **Sub-agents** | Mature | 9 agents, Background Job Board, session reuse |
 | **Worktrees** | Skill-only | Orchestrator skill, apply-patch hook support |
 | **Automations** | Not implemented | Deferred to Phase 4 |
-| **Loop engine** | Partial | Registered, prompt-driven `/loop` entry point and `LoopSession` primitives; no fully integrated runtime `LoopEngine` |
-
-### Existing Loop Primitives
-
-OpenCode currently has a registered, prompt-driven `/loop` entry point. The
-`LoopSession` module provides definitions, phases, attempts, success-criterion
-types, manual-review state, and per-attempt history persistence. These are
-building blocks, not a complete runtime loop.
+| **Loop engine** | Spec only | Fully designed, not implemented |
 
 ### What's Designed But Not Built
 
 The planned loop engineering runtime includes:
 
 - **LoopEngine** class with event-driven orchestration
-- **Integrated runtime wiring** from `/loop` parsing through `LoopSession`,
-  background execution, verification, iteration, and escalation
+- **LoopSession** state machine (executing <-> verifying binary oscillation)
 - **SuccessCriterion** routing (test, build, lint, fileExists, command, oracle, observer)
 - **Convergence signals** (totalErrors, timeoutCount, lastErrorAt)
-- **Integrated history compaction** across loop attempts and sessions
+- **.loop-history.md** context compaction
 - **Escalation via @council** at Layer 0 only
 - **Phased rollout:** Phase 1 (runtime engine) -> Phase 2 (loop skill) -> Phase 3 (routine integration) -> Phase 4 (triggers) -> Phase 5 (persistent memory)
 
 ### The Gap
 
-OpenCode has 3 of 5 building blocks fully wired (skills, connectors, sub-agents),
-worktrees as a skill, and automations still unimplemented. Loop support is
-partial: `/loop` is registered and prompt-driven, and `LoopSession` primitives
-exist, but a fully integrated runtime `LoopEngine` does not. The sub-agent
-infrastructure is the strongest piece - the Background Job Board, session reuse,
-and native depth tracking are more structured than what Claude Code or Codex
-expose.
+OpenCode has 3 of 5 building blocks fully wired (skills, connectors, sub-agents), worktrees as a skill, and automations + loop engine as unimplemented specs. The sub-agent infrastructure is the strongest piece - the Background Job Board, session reuse, and native depth tracking are more structured than what Claude Code or Codex expose.
 
-The missing piece is the integrated outer loop runtime: the scheduler and
-iteration engine that connect the prompt-driven entry point to execution,
-verification, and continued progress without human intervention. Once that
-lands, OpenCode will have a complete loop engineering stack.
+The missing piece is the outer loop itself: the scheduler that runs on a timer, spawns work, and keeps going without human intervention. Once that lands (Phase 1-2 of the spec), OpenCode will have a complete loop engineering stack.
 
 ---
 
@@ -329,11 +304,7 @@ lands, OpenCode will have a complete loop engineering stack.
 
 5. **Cost is the immediate bottleneck.** Token consumption scales linearly with loop iterations. Budget caps are mandatory, not optional.
 
-6. **OpenCode has a strong partial foundation.** Skills, connectors, and
-   sub-agents are mature. `/loop` is registered and prompt-driven, and
-   `LoopSession` primitives exist, but automations and a fully integrated runtime
-   `LoopEngine` remain incomplete. The sub-agent infrastructure is the strongest
-   piece of the stack.
+6. **OpenCode is 60% there.** Skills, connectors, and sub-agents are mature. The loop engine and automations are designed but unimplemented. The sub-agent infrastructure is the strongest piece of the stack.
 
 7. **autoresearch proves the minimum viable loop.** You don't need the full 5-block stack. A skill file + git + evaluation metric is enough to run autonomous experiments overnight. Start simple, add complexity when the task demands it.
 

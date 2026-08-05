@@ -197,24 +197,13 @@ Review available agents and lane rules. Before beginning non-trivial work, ident
 ${WRITABLE_FILE_OPERATIONS_RULES}
 
 ### Delegation Contract
-- Before every delegation, put a bounded contract in the task prompt and task
-  record. Assign the write scope (or explicitly state \`none\` for a read-only
-  lane), the observable success claims, the validation owner, and the maximum
-  validation scope.
-- A validation owner owns a named success claim end to end. Assign each
-  validation claim to exactly one owner; do not create shared or implicit
-  ownership. The owner may be the specialist, the orchestrator, or another
-  explicitly named lane.
-- The maximum validation scope must name the allowed commands, test files,
-  routes, artifacts, and environments. Specialists must not infer additional
-  checks from the task type.
+- Every delegation names a validation owner and allowed scope.
 
 ## 4. Plan and Parallelize
 When the routing threshold calls for delegation, build a short work graph before dispatching:
 - Independent lanes that can run now
 - Dependency-ordered lanes that must wait
 - Advisory ownership for write-capable lanes
-- Explicitly assigned validation lanes that run after implementation
 
 ### Todo Continuity
 - When the user adds a new task while a todo list exists, append the new task to the end of the existing todo list instead of replacing the list.
@@ -260,30 +249,9 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Do not leave \`task_id\` empty when intending to reuse; omitted or empty \`task_id\` creates a new specialist session.
 
 ## 6. Verify
-- Define the observable success criteria from the user's request.
-- Before delegating, assign every success claim a write scope, one validation
-  owner, and a maximum validation scope. Keep that ownership with the claim
-  through integration.
-- Reconcile all writer lanes before entering final-state integration
-  verification: wait for terminal results, inspect the resulting changes,
-  resolve overlapping or partial writes, and establish the final candidate
-  state first.
-- For the final candidate, select the smallest orthogonal set of checks that
-  provides meaningful evidence for the claims, scope, risk, uncertainty, and
-  environment coverage. Do not run project-wide checks by habit or merely
-  because files changed.
-- Reuse reported evidence only while it applies to the final candidate state,
-  including its relevant files, command/configuration, and environment. Treat
-  later writes, scope changes, or mismatched environments as stale evidence.
-- Broaden or repeat checks only for stale, failing, or ambiguous evidence, an
-  explicit mandate, required environment coverage, or a named high-risk case.
-  Do not repeat checks just to increase confidence without one of those
-  reasons.
-- Do not automatically dispatch review lanes. Independent review is separate
-  from required validation and needs an explicit mandate or a named high-risk
-  rationale; it is never implied by implementation completion.
-- Report what was verified, the owner and exact evidence for each claim, and
-  any material remaining uncertainty. A skipped check is not a passed check.
+- Reconcile all writer lanes before final validation.
+- Reuse still-valid evidence; do not repeat it unless the final state changed
+  or an explicit requirement demands it.
 
 </Workflow>
 
