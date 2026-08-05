@@ -208,6 +208,27 @@ describe('isFailoverError', () => {
     ).toBe(true);
   });
 
+  test('returns true for CliProxyAPI "auth unavailable" error shapes', () => {
+    const message =
+      'auth_unavailable: no auth available (providers=cli-proxy-api, model=gemini-3.6-flash)';
+
+    expect(isRetryableError(message)).toBe(true);
+    expect(isRetryableError({ message })).toBe(true);
+    expect(
+      isRetryableError({
+        data: { statusCode: 400, responseBody: message },
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableError({
+        data: {
+          responseBody:
+            '{"error":{"message":"auth_unavailable: no auth available","type":"server_error","code":"internal_server_error"}}',
+        },
+      }),
+    ).toBe(true);
+  });
+
   test('returns false for permanent channel-not-found errors', () => {
     expect(
       isRetryableError({
@@ -313,6 +334,42 @@ describe('ForegroundFallbackManager session.error', () => {
         error: {
           message:
             'No available channel for model gpt-5.6-luna under group Codex专用 (distributor)',
+        },
+      },
+    });
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const call = mocks.promptAsync.mock.calls[0] as [
+      {
+        model: { providerID: string; modelID: string };
+      },
+    ];
+    expect(call[0].model.providerID).toBe('openai');
+    expect(call[0].model.modelID).toBe('gpt-4o');
+  });
+
+  test('triggers fallback on CliProxyAPI auth-unavailable session.error', async () => {
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: {
+          message:
+            'auth_unavailable: no auth available (providers=cli-proxy-api, model=gemini-3.6-flash)',
         },
       },
     });

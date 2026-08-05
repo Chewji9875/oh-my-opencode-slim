@@ -54,6 +54,12 @@ const RETRYABLE_ERROR_PATTERNS = [
   /\b403\b/,
   /forbidden/i,
   /blocked by gateway/i,
+  // Auth/credential availability (e.g. CliProxyAPI disables an exhausted
+  // upstream and returns 503 "auth_unavailable: no auth available ...").
+  // The provider is temporarily unavailable, so the next model should be
+  // tried instead of retrying the same dead model.
+  /no auth available/i,
+  /auth_unavailable/i,
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
