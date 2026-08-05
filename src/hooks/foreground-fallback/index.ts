@@ -522,7 +522,7 @@ export class ForegroundFallbackManager {
 
     this.inProgress.add(sessionID);
     try {
-      await abortSessionWithTimeout(getClient(this.input!), sessionID);
+      await abortSessionWithTimeout(getClient(this.input), sessionID);
       await this.execFallback(sessionID);
     } finally {
       this.inProgress.delete(sessionID);
@@ -597,7 +597,7 @@ export class ForegroundFallbackManager {
             agentName,
             tried: [...tried],
           });
-          await abortSessionWithTimeout(getClient(this.input!), sessionID);
+          await abortSessionWithTimeout(getClient(this.input), sessionID);
           return;
         }
       }
@@ -615,7 +615,7 @@ export class ForegroundFallbackManager {
       }
 
       // Retrieve the last user message to re-submit with the fallback model.
-      const result = await getClient(this.input!).session.messages({
+      const result = await getClient(this.input).session.messages({
         sessionID,
       });
       // result.data may contain partial/streaming messages whose `info` is
@@ -630,7 +630,7 @@ export class ForegroundFallbackManager {
 
       // promptAsync queues the prompt and returns immediately - this avoids
       // blocking the event handler while waiting for a full LLM response.
-      const sessionClient = getClient(this.input!).session;
+      const sessionClient = getClient(this.input).session;
       if (typeof sessionClient.promptAsync !== 'function') {
         log('[foreground-fallback] promptAsync unavailable', { sessionID });
         return;
@@ -658,7 +658,7 @@ export class ForegroundFallbackManager {
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
         });
-        await abortSessionWithTimeout(getClient(this.input!), sessionID);
+        await abortSessionWithTimeout(getClient(this.input), sessionID);
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
         await sessionClient.promptAsync({ sessionID, ...promptBody });
       }
