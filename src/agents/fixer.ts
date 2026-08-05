@@ -34,9 +34,10 @@ Brief summary of what was implemented
 - file2.ts: Added Z function
 </changes>
 <verification>
-- Tests passed: [yes/no/skip reason]
-- Validation: [passed/failed/skip reason]
+- Performed: [command/check, or skipped with reason]
+- Result: [passed/failed/unknown]
 </verification>
+
 `;
 
 export function createFixerAgent(
