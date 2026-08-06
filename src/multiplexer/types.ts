@@ -5,7 +5,7 @@
  * herdr, etc.) to spawn and manage panes for child agent sessions.
  */
 
-import type { MultiplexerConfig, MultiplexerLayout } from '../config/schema';
+import type { MultiplexerLayout } from '../config/schema';
 
 export interface PaneResult {
   success: boolean;
@@ -60,11 +60,6 @@ export interface Multiplexer {
    */
   applyLayout(layout: MultiplexerLayout, mainPaneSize: number): Promise<void>;
 }
-
-/**
- * Factory function type for creating multiplexer instances
- */
-export type MultiplexerFactory = (config: MultiplexerConfig) => Multiplexer;
 
 /**
  * Server health check utility (shared across implementations)

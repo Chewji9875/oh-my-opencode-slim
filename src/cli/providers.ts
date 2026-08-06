@@ -58,14 +58,6 @@ export const MODEL_MAPPINGS = {
 export type PresetName = keyof typeof MODEL_MAPPINGS;
 export type GeneratedPresetName = (typeof GENERATED_PRESETS)[number];
 
-export function isPresetName(value: string): value is PresetName {
-  return Object.hasOwn(MODEL_MAPPINGS, value);
-}
-
-export function getPresetNames(): PresetName[] {
-  return Object.keys(MODEL_MAPPINGS) as PresetName[];
-}
-
 export function isGeneratedPresetName(
   value: string,
 ): value is GeneratedPresetName {

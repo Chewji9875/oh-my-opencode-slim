@@ -20,13 +20,8 @@ export function getActiveRuntimePreset(): string | null {
  * Returns the name of the previously active runtime preset (before the
  * current one), used to compute reset diffs when switching presets.
  */
-let previousRuntimePreset: string | null = null;
+const previousRuntimePreset: string | null = null;
 
 export function getPreviousRuntimePreset(): string | null {
   return previousRuntimePreset;
-}
-
-export function setActiveRuntimePresetWithPrevious(name: string | null): void {
-  previousRuntimePreset = activeRuntimePreset;
-  activeRuntimePreset = name;
 }

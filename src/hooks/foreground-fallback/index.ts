@@ -176,11 +176,6 @@ export function isRetryableError(error: unknown): boolean {
   return isFailoverError(error);
 }
 
-/** @deprecated Use isRetryableError instead. */
-export function isRateLimitError(error: unknown): boolean {
-  return isRetryableError(error);
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

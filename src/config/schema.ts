@@ -2,58 +2,12 @@ import { z } from 'zod';
 import { DEFAULT_MAX_RETAINED_SNAPSHOTS } from './constants';
 import { CouncilConfigSchema } from './council-schema';
 
-const MANUAL_AGENT_NAMES = [
-  'orchestrator',
-  'oracle',
-  'designer',
-  'explorer',
-  'librarian',
-  'fixer',
-] as const;
-
 export const ProviderModelIdSchema = z
   .string()
   .regex(
     /^[^/\s]+\/[^\s]+$/,
     'Expected provider/model format (provider/.../model)',
   );
-
-export const ManualAgentPlanSchema = z
-  .object({
-    primary: ProviderModelIdSchema,
-    fallback1: ProviderModelIdSchema,
-    fallback2: ProviderModelIdSchema,
-    fallback3: ProviderModelIdSchema,
-  })
-  .superRefine((value, ctx) => {
-    const unique = new Set([
-      value.primary,
-      value.fallback1,
-      value.fallback2,
-      value.fallback3,
-    ]);
-    if (unique.size !== 4) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'primary and fallbacks must be unique per agent',
-      });
-    }
-  });
-
-export const ManualPlanSchema = z
-  .object({
-    orchestrator: ManualAgentPlanSchema,
-    oracle: ManualAgentPlanSchema,
-    designer: ManualAgentPlanSchema,
-    explorer: ManualAgentPlanSchema,
-    librarian: ManualAgentPlanSchema,
-    fixer: ManualAgentPlanSchema,
-  })
-  .strict();
-
-export type ManualAgentName = (typeof MANUAL_AGENT_NAMES)[number];
-export type ManualAgentPlan = z.infer<typeof ManualAgentPlanSchema>;
-export type ManualPlan = z.infer<typeof ManualPlanSchema>;
 
 // Permission schemas — mirror the SDK's PermissionConfig type with shallow
 // validation. Action values are validated; unknown tool keys pass through.

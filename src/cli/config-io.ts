@@ -644,18 +644,6 @@ export function enableLspByDefault(): ConfigMergeResult {
   }
 }
 
-export function canModifyOpenCodeConfig(): boolean {
-  try {
-    const configPath = getExistingConfigPath();
-    if (!existsSync(configPath)) return true; // Will be created
-    const stat = statSync(configPath);
-    // Check if writable - simple check for now
-    return !!(stat.mode & 0o200);
-  } catch {
-    return false;
-  }
-}
-
 // Antigravity, Google provider, and Chutes provider functions removed in simplification refactor.
 
 export function detectCurrentConfig(): DetectedConfig {

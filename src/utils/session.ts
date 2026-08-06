@@ -49,25 +49,6 @@ export async function abortSessionWithTimeout(
 }
 
 /**
- * Extract the short model label from a "provider/model" string.
- * E.g. "openai/gpt-5.6-luna" → "gpt-5.6-luna"
- */
-export function shortModelLabel(model: string): string {
-  return model.split('/').pop() ?? model;
-}
-
-export type PromptBody = {
-  messageID?: string;
-  model?: { providerID: string; modelID: string };
-  agent?: string;
-  noReply?: boolean;
-  system?: string;
-  tools?: { [key: string]: boolean };
-  parts: Array<{ type: 'text'; text: string }>;
-  variant?: string;
-};
-
-/**
  * Parse a model reference string into provider and model IDs.
  * @param model - Model string in format "provider/model"
  * @returns Object with providerID and modelID, or null if invalid
