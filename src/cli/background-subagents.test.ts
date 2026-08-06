@@ -187,6 +187,69 @@ describe('configureBackgroundSubagents', () => {
     }
   });
 
+  test.each(['true', '1', 'TRUE'])(
+    'returns already enabled without writing the target when Exa is %s',
+    async (exaValue) => {
+      tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+      const target = join(tempDir, '.zshrc');
+      writeFileSync(target, 'preserve=true\n');
+      process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
+      process.env.OPENCODE_ENABLE_EXA = exaValue;
+      const log = spyOn(console, 'log').mockImplementation(() => undefined);
+
+      try {
+        const result = await configureBackgroundSubagents({
+          installCustomSkills: false,
+          promptForStar: false,
+          reset: false,
+          backgroundSubagents: 'yes',
+          backgroundSubagentsTarget: target,
+        });
+
+        expect(result).toEqual({ enabledNow: true });
+        expect(readFileSync(target, 'utf8')).toBe('preserve=true\n');
+        expect(log.mock.calls.join('\n')).toContain(
+          'already enabled in environment',
+        );
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
+  test.each([undefined, 'yes'])(
+    'writes Exa configuration when Exa is %s',
+    async (exaValue) => {
+      tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+      const target = join(tempDir, '.zshrc');
+      process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
+      if (exaValue === undefined) {
+        delete process.env.OPENCODE_ENABLE_EXA;
+      } else {
+        process.env.OPENCODE_ENABLE_EXA = exaValue;
+      }
+      const log = spyOn(console, 'log').mockImplementation(() => undefined);
+
+      try {
+        const result = await configureBackgroundSubagents({
+          installCustomSkills: false,
+          promptForStar: false,
+          reset: false,
+          backgroundSubagents: 'yes',
+          backgroundSubagentsTarget: target,
+        });
+
+        expect(result).toEqual({ enabledNow: false, configuredTarget: target });
+        expect(readFileSync(target, 'utf8')).toContain('OPENCODE_ENABLE_EXA=1');
+        expect(log.mock.calls.join('\n')).not.toContain(
+          'already enabled in environment',
+        );
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
   test('writes shell config without prompting', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
     delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
@@ -217,29 +280,6 @@ describe('configureBackgroundSubagents', () => {
     } finally {
       process.env.SHELL = originalShell;
       process.env.HOME = originalHome;
-      log.mockRestore();
-    }
-  });
-
-  test('writes shell config when only background subagents are enabled', async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
-    process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
-    delete process.env.OPENCODE_ENABLE_EXA;
-    const log = spyOn(console, 'log').mockImplementation(() => undefined);
-
-    try {
-      await configureBackgroundSubagents({
-        installCustomSkills: false,
-        promptForStar: false,
-        reset: false,
-        backgroundSubagents: 'yes',
-        backgroundSubagentsTarget: join(tempDir, '.zshrc'),
-      });
-
-      expect(readFileSync(join(tempDir, '.zshrc'), 'utf8')).toContain(
-        'OPENCODE_ENABLE_EXA=1',
-      );
-    } finally {
       log.mockRestore();
     }
   });
