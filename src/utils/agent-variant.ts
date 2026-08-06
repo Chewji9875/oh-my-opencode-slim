@@ -63,7 +63,7 @@ export function resolveRuntimeAgentName(
   return normalized;
 }
 
-function escapeRegExp(value: string): string {
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 

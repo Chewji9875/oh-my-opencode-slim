@@ -15,6 +15,7 @@ import { homedir, platform, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { CompanionConfig } from '../config/schema';
+import { getErrorMessage } from '../hooks/apply-patch/errors';
 import { crossSpawn } from '../utils/compat';
 import { log } from '../utils/logger';
 
@@ -260,7 +261,7 @@ async function installCompanionArchive(
     return {
       status: 'failed',
       binaryPath: finalBinaryPath,
-      error: `Failed to fetch companion archive: ${formatError(err)}`,
+      error: `Failed to fetch companion archive: ${getErrorMessage(err)}`,
     };
   } finally {
     clearTimeout(timeout);
@@ -344,7 +345,7 @@ async function installCompanionArchive(
     return {
       status: 'failed',
       binaryPath: finalBinaryPath,
-      error: `Failed to install companion: ${formatError(err)}`,
+      error: `Failed to install companion: ${getErrorMessage(err)}`,
     };
   } finally {
     if (tempDir) {
@@ -455,8 +456,4 @@ function parseSemver(version: string): [number, number, number] | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function formatError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
