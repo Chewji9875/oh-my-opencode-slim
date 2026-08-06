@@ -168,8 +168,8 @@ export async function configureBackgroundSubagents(
   const backgroundSubagentsEnabled = isBackgroundSubagentsEnabled(
     process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
   );
-  const exaEnabled = isBackgroundSubagentsEnabled(
-    process.env.OPENCODE_ENABLE_EXA,
+  const exaEnabled = ['true', '1'].includes(
+    process.env.OPENCODE_ENABLE_EXA?.toLowerCase() ?? '',
   );
   if (backgroundSubagentsEnabled && exaEnabled) {
     printSuccess(
