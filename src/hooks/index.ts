@@ -17,7 +17,6 @@ export {
 } from './cache-safe-injection';
 export { createChatHeadersHook } from './chat-headers';
 export { createDeepworkCommandHook } from './deepwork';
-export { createDelegateTaskRetryHook } from './delegate-task-retry/hook';
 export { createFilterAvailableSkillsHook } from './filter-available-skills';
 export {
   ForegroundFallbackManager,
