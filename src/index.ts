@@ -39,7 +39,6 @@ import {
   createCacheMonitorHook,
   createChatHeadersHook,
   createDeepworkCommandHook,
-  createDelegateTaskRetryHook,
   createFilterAvailableSkillsHook,
   createJsonErrorRecoveryHook,
   createLoopCommandHook,
@@ -175,11 +174,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
   let filterAvailableSkills: ReturnType<typeof createFilterAvailableSkillsHook>;
   let postFileToolNudge: ReturnType<typeof createPostFileToolNudgeHook>;
-  let delegateTaskRetry: ReturnType<typeof createDelegateTaskRetryHook>;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let jsonErrorRecovery: ReturnType<typeof createJsonErrorRecoveryHook>;
   let postFileToolNudgeAfter: (i: unknown, o: unknown) => Promise<void>;
-  let delegateTaskRetryAfter: (i: unknown, o: unknown) => Promise<void>;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
@@ -438,8 +435,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       coordinator: sessionLifecycle,
     });
 
-    delegateTaskRetry = createDelegateTaskRetryHook(ctx);
-
     applyPatch = createApplyPatchHook(ctx);
 
     jsonErrorRecovery = createJsonErrorRecoveryHook(ctx);
@@ -447,9 +442,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Pre-created wrapped handlers for tool.execute.after (error-isolated)
     postFileToolNudgeAfter = wrapPostToolHook('post-file-tool-nudge', (i, o) =>
       postFileToolNudge['tool.execute.after'](i as never, o as never),
-    );
-    delegateTaskRetryAfter = wrapPostToolHook('delegate-task-retry', (i, o) =>
-      delegateTaskRetry['tool.execute.after'](i as never, o as never),
     );
     jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
       jsonErrorRecovery['tool.execute.after'](i as never, o as never),
@@ -1350,7 +1342,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'tool.execute.after': async (input, output) => {
       await postFileToolNudgeAfter(input, output);
-      await delegateTaskRetryAfter(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await taskSessionManagerAfter(input, output);
     },
