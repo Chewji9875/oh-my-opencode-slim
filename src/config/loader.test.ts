@@ -492,7 +492,7 @@ describe('onWarning callback', () => {
     expect(config.agents?.oracle?.model).toBe('valid/model');
   });
 
-  test('deprecated tmux key calls onWarning with invalid-schema and still loads', () => {
+  test('deprecated tmux key calls onWarning with deprecated-key and still loads', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     fs.mkdirSync(projectConfigDir, { recursive: true });
@@ -510,12 +510,12 @@ describe('onWarning callback', () => {
     });
 
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('deprecated-key');
     expect(warnings[0]?.message).toContain('Deprecated tmux config key');
     expect(config.agents?.oracle?.model).toBe('valid/model');
   });
 
-  test('deprecated council.master key calls onWarning with invalid-schema and still loads', () => {
+  test('deprecated council.master key calls onWarning with deprecated-key and still loads', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
     fs.mkdirSync(projectConfigDir, { recursive: true });
@@ -539,7 +539,7 @@ describe('onWarning callback', () => {
     });
 
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('deprecated-key');
     expect(warnings[0]?.message).toContain(
       'Deprecated council.master config key',
     );
@@ -858,7 +858,7 @@ describe('deepMerge behavior', () => {
     });
 
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('deprecated-key');
     expect(warnings[0]?.message).toContain('Deprecated fallback config keys');
     expect(warnings[0]?.message).toContain('timeoutMs');
     expect(config.fallback?.enabled).toBe(true);

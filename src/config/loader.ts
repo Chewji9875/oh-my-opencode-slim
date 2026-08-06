@@ -17,7 +17,8 @@ export type ConfigLoadWarningKind =
   | 'invalid-json'
   | 'invalid-schema'
   | 'read-error'
-  | 'missing-preset';
+  | 'missing-preset'
+  | 'deprecated-key';
 
 /**
  * A warning emitted while loading plugin configuration.
@@ -98,7 +99,7 @@ function loadConfigFromPath(
         'Deprecated tmux config key found and ignored. Use multiplexer config instead.';
       options?.onWarning?.({
         path: configPath,
-        kind: 'invalid-schema' as ConfigLoadWarningKind,
+        kind: 'deprecated-key',
         message: tmuxMsg,
       });
       if (!options?.silent) {
@@ -122,7 +123,7 @@ function loadConfigFromPath(
         'Deprecated council.master config key found and ignored. Configure council agents via presets instead.';
       options?.onWarning?.({
         path: configPath,
-        kind: 'invalid-schema' as ConfigLoadWarningKind,
+        kind: 'deprecated-key',
         message: masterMsg,
       });
       if (!options?.silent) {
@@ -146,7 +147,7 @@ function loadConfigFromPath(
         const fallbackMsg = `Deprecated fallback config key${present.length === 1 ? '' : 's'} ${present.join(', ')} found and ignored. These fields were removed in 2.3.x; fallback behavior is controlled by fallback.enabled and fallback.maxRetries.`;
         options?.onWarning?.({
           path: configPath,
-          kind: 'invalid-schema' as ConfigLoadWarningKind,
+          kind: 'deprecated-key',
           message: fallbackMsg,
         });
         if (!options?.silent) {
