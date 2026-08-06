@@ -14,6 +14,10 @@ Enable the built-in tool by setting these environment variables in your shell pr
 env OPENCODE_ENABLE_EXA=true OPENCODE_ENABLE_PARALLEL=true opencode
 ```
 
+The oh-my-opencode-slim installer sets `OPENCODE_ENABLE_EXA=1` alongside its
+background-subagents export when you accept the environment setup. Parallel
+search remains opt-in.
+
 The built-in tool is Exa-backed (optionally Parallel), needs no API key, and is only available when using the `opencode` provider OR when those flags are set. Control access per agent with `permission: { "websearch": "allow" }` (all tools are allowed by default).
 
 ---
