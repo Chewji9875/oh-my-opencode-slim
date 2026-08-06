@@ -62,12 +62,6 @@ A glossary of the terms used in this project's domain. Definitions describe what
 - **Verify agent** — The agent or strategy that verifies loop output (`oracle`, `observer`, or `test`).
 - **Success criterion** — A check that decides whether a loop iteration passed (test, build, lint, fileExists, command, oracle, observer, or manual).
 
-## Interview
-
-- **Interview** — A question/answer flow that builds a persistent specification document from an idea.
-- **Spec block** — A named section within a generated specification document.
-- **Interview dashboard** — The web UI for managing an interview and entering answers.
-
 ## Companion
 
 - **Companion** — A native desktop mascot that reflects agent activity; launched and tracked by the companion manager.

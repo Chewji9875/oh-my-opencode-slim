@@ -650,7 +650,6 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Clonedeps](docs/clonedeps.md)** | 선택한 의존성 소스를 무시된 로컬 워크스페이스에 복제하여 검사 |
 | **[Worktrees](docs/worktrees.md)** | `.slim/worktrees/` lane을 사용해 격리된 병렬 또는 고위험 코딩 작업 수행 |
 | **[Preset Switching](docs/preset-switching.md)** | `/preset`으로 런타임에 에이전트 모델 프리셋 전환 |
-| **[Interview](docs/interview.md)** | 브라우저 기반 Q&A 흐름을 통해 거친 아이디어를 구조화된 마크다운 명세로 변환 |
 | **[Companion](docs/companion.md)** | 파싱, 도움말, 타입을 위한 플로팅 창 companion |
 
 ### ⚙️ 설정 & 레퍼런스
