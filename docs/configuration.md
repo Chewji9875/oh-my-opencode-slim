@@ -167,11 +167,6 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `council.presets.<name>.<councillor>.prompt` | string | - | Optional role guidance for the councillor See [Council configuration note](#council-configuration-note). |
 | `council.default_preset` | string | `"default"` | Default preset when none is specified See [Council configuration note](#council-configuration-note). |
 | — | — | — | *Timeouts, execution mode, and retries are now handled by the orchestrator's council-mode prompt instructions; see `src/agents/council.ts`.* |
-| `interview.maxQuestions` | integer | `2` | Max questions per interview round (1–10) See [Interview configuration](interview.md). |
-| `interview.outputFolder` | string | `"interview"` | Directory where interview markdown files are written (relative to project root) See [Interview configuration](interview.md). |
-| `interview.autoOpenBrowser` | boolean | `true` | Automatically open the interview UI in your default browser during interactive runs; suppressed in tests and CI See [Interview configuration](interview.md). |
-| `interview.port` | integer | `0` | Interview server port (0–65535). `0` = OS-assigned random port (per-session mode). Any value > 0 enables [dashboard mode](interview.md#dashboard-mode) See [Interview configuration](interview.md). |
-| `interview.dashboard` | boolean | `false` | Enable [dashboard mode](interview.md#dashboard-mode) on the default port (43211). Setting `port` > 0 also enables dashboard mode. If both are set, `port` takes precedence See [Interview configuration](interview.md). |
 | `companion.enabled` | boolean | `false` | Enable/disable the floating window Rust companion See [Desktop Companion App](#desktop-companion-app). |
 | `companion.binaryPath` | string | - | Optional path to a custom companion binary to launch instead of the default install path See [Desktop Companion App](#desktop-companion-app). |
 | `companion.position` | string | `"bottom-right"` | The initial corner position of the companion window: `bottom-right`, `bottom-left`, `top-right`, or `top-left` See [Desktop Companion App](#desktop-companion-app). |

@@ -330,7 +330,6 @@ export function mergePluginConfigs(
     agents: deepMerge(base.agents, override.agents),
     presets: deepMerge(base.presets, override.presets),
     multiplexer: deepMerge(base.multiplexer, override.multiplexer),
-    interview: deepMerge(base.interview, override.interview),
     backgroundJobs: deepMerge(base.backgroundJobs, override.backgroundJobs),
     fallback: deepMerge(base.fallback, override.fallback),
     council: deepMerge(base.council, override.council),
