@@ -54,12 +54,16 @@ describe('background subagents helpers', () => {
   });
 
   test('builds shell-specific managed blocks with true', () => {
-    expect(getBackgroundSubagentsBlock('/tmp/.bashrc')).toContain(
+    const bashBlock = getBackgroundSubagentsBlock('/tmp/.bashrc');
+    const fishBlock = getBackgroundSubagentsBlock('/tmp/config.fish');
+    expect(bashBlock).toContain(
       'export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true',
     );
-    expect(getBackgroundSubagentsBlock('/tmp/config.fish')).toContain(
+    expect(bashBlock).toContain('export OPENCODE_ENABLE_EXA=1');
+    expect(fishBlock).toContain(
       'set -gx OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS true',
     );
+    expect(fishBlock).toContain('set -gx OPENCODE_ENABLE_EXA 1');
   });
 
   test('prints fish manual instructions for fish targets', () => {
@@ -71,8 +75,9 @@ describe('background subagents helpers', () => {
       'set -gx OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS true',
     );
     expect(instructions).toContain(
-      'env OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true opencode',
+      'env OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true OPENCODE_ENABLE_EXA=1 opencode',
     );
+    expect(instructions).toContain('set -gx OPENCODE_ENABLE_EXA 1');
   });
 
   test('expands tilde target paths', () => {
@@ -164,6 +169,7 @@ describe('configureBackgroundSubagents', () => {
   let tempDir: string | undefined;
   const originalBackgroundEnv =
     process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS;
+  const originalExaEnv = process.env.OPENCODE_ENABLE_EXA;
 
   afterEach(() => {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
@@ -173,6 +179,11 @@ describe('configureBackgroundSubagents', () => {
     } else {
       process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS =
         originalBackgroundEnv;
+    }
+    if (originalExaEnv === undefined) {
+      delete process.env.OPENCODE_ENABLE_EXA;
+    } else {
+      process.env.OPENCODE_ENABLE_EXA = originalExaEnv;
     }
   });
 
@@ -197,12 +208,38 @@ describe('configureBackgroundSubagents', () => {
       expect(readFileSync(join(tempDir, '.zshrc'), 'utf8')).toContain(
         'OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',
       );
+      expect(readFileSync(join(tempDir, '.zshrc'), 'utf8')).toContain(
+        'OPENCODE_ENABLE_EXA=1',
+      );
       expect(log.mock.calls.join('\n')).toContain(
-        'Background subagents enabled',
+        'Background subagents and Exa websearch enabled',
       );
     } finally {
       process.env.SHELL = originalShell;
       process.env.HOME = originalHome;
+      log.mockRestore();
+    }
+  });
+
+  test('writes shell config when only background subagents are enabled', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
+    process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = 'true';
+    delete process.env.OPENCODE_ENABLE_EXA;
+    const log = spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      await configureBackgroundSubagents({
+        installCustomSkills: false,
+        promptForStar: false,
+        reset: false,
+        backgroundSubagents: 'yes',
+        backgroundSubagentsTarget: join(tempDir, '.zshrc'),
+      });
+
+      expect(readFileSync(join(tempDir, '.zshrc'), 'utf8')).toContain(
+        'OPENCODE_ENABLE_EXA=1',
+      );
+    } finally {
       log.mockRestore();
     }
   });

@@ -165,13 +165,15 @@ async function checkOpenCodeInstalled(): Promise<{
 export async function configureBackgroundSubagents(
   config: InstallConfig,
 ): Promise<{ enabledNow: boolean; configuredTarget?: string }> {
-  if (
-    isBackgroundSubagentsEnabled(
-      process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
-    )
-  ) {
+  const backgroundSubagentsEnabled = isBackgroundSubagentsEnabled(
+    process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
+  );
+  const exaEnabled = isBackgroundSubagentsEnabled(
+    process.env.OPENCODE_ENABLE_EXA,
+  );
+  if (backgroundSubagentsEnabled && exaEnabled) {
     printSuccess(
-      'OpenCode background subagents already enabled in environment',
+      'OpenCode background subagents and Exa websearch already enabled in environment',
     );
     return { enabledNow: true };
   }
@@ -218,10 +220,10 @@ export async function configureBackgroundSubagents(
       'V2 requires OpenCode background subagents for default orchestration.',
     );
     printInfo(
-      `The installer can add the required environment export to ${target}.`,
+      `The installer can add the required environment exports to ${target}.`,
     );
     const shouldWrite = await confirm(
-      'Add OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true now?',
+      'Enable background subagents and Exa websearch now?',
       true,
     );
     if (!shouldWrite) {
@@ -244,7 +246,7 @@ export async function configureBackgroundSubagents(
   }
 
   printSuccess(
-    `Background subagents enabled ${SYMBOLS.arrow} ${DIM}${target}${RESET}`,
+    `Background subagents and Exa websearch enabled ${SYMBOLS.arrow} ${DIM}${target}${RESET}`,
   );
   return { enabledNow: false, configuredTarget: target };
 }
@@ -537,7 +539,7 @@ async function runInstall(config: InstallConfig): Promise<number> {
     );
   } else {
     console.log(
-      `     ${BLUE}$ OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true opencode${RESET}`,
+      `     ${BLUE}$ OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true OPENCODE_ENABLE_EXA=1 opencode${RESET}`,
     );
   }
   console.log();

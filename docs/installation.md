@@ -36,8 +36,8 @@ The installer supports the following options:
 | `--skills=yes|no` | Install bundled skills (default: yes) |
 | `--companion=ask\|yes\|no` | Install and enable the desktop Companion (`ask` by default; prompt defaults to no) |
 | `--preset=<name>` | Active generated config preset: `openai` or `opencode-go` (default: `openai`) |
-| `--background-subagents=ask\|yes\|no` | Configure the required background-subagents environment export (`ask` by default; prompt defaults to yes) |
-| `--background-subagents-target=<path>` | Write the background-subagents export to a specific shell/profile file |
+| `--background-subagents=ask\|yes\|no` | Configure the required background-subagents and Exa websearch environment exports (`ask` by default; prompt defaults to yes) |
+| `--background-subagents-target=<path>` | Write the background-subagents and websearch exports to a specific shell/profile file |
 | `--no-tui` | Non-interactive mode |
 | `--dry-run` | Simulate install without writing files |
 | `--reset` | Force overwrite of existing configuration |
@@ -49,10 +49,13 @@ background subagents, which are enabled by this environment variable:
 
 ```bash
 OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+OPENCODE_ENABLE_EXA=1
 ```
 
-The installer asks before adding that export to your shell startup file. The
+The installer asks before adding those exports to your shell startup file. The
 prompt defaults to `yes` because V2's default orchestration depends on it.
+The Exa flag enables OpenCode's built-in `websearch` tool without requiring an
+API key.
 
 ```bash
 bunx oh-my-opencode-slim@latest install
@@ -76,7 +79,7 @@ source ~/.bashrc
 For a one-shot manual launch without restarting your terminal:
 
 ```bash
-OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true opencode
+OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true OPENCODE_ENABLE_EXA=1 opencode
 ```
 
 ### Non-Destructive Behavior
