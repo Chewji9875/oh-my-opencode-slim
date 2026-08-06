@@ -18,12 +18,11 @@ import {
 } from '../../utils';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
+import { SESSION_ID_PATTERN } from '../../utils/session';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { normalizeLateCancelledTaskOutput } from './status-utils';
 import { extractReadFiles } from './task-context-tracker';
-
-const RAW_SESSION_ID_PATTERN = /^ses_[A-Za-z0-9_-]+$/;
 
 interface TaskArgs {
   description?: unknown;
@@ -122,7 +121,7 @@ export async function handleToolExecuteBefore(
 
       if (knownManagedTask) {
         delete args.task_id;
-      } else if (RAW_SESSION_ID_PATTERN.test(requested)) {
+      } else if (SESSION_ID_PATTERN.test(requested)) {
         pendingCall.resumedTaskId = requested;
       } else {
         delete args.task_id;

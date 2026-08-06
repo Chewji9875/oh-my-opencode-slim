@@ -7,6 +7,8 @@ import { log } from './logger';
 
 export const SESSION_ABORT_TIMEOUT_MS = 1_000;
 
+export const SESSION_ID_PATTERN = /^ses_[A-Za-z0-9_-]+$/;
+
 export class OperationTimeoutError extends Error {
   constructor(message: string) {
     super(message);

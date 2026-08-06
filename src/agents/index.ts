@@ -15,6 +15,7 @@ import {
   SUBAGENT_NAMES,
 } from '../config';
 import { getAgentMcpList } from '../config/agent-mcps';
+import { escapeRegExp, normalizeAgentName } from '../utils/agent-variant';
 
 import { createCouncilAgent } from './council';
 import { buildCouncillorAgents, getCouncillorSeatName } from './council-agents';
@@ -42,11 +43,6 @@ type AgentFactory = (
 
 const CANCEL_TASK_ALLOWED_AGENTS = new Set(['orchestrator']);
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
-
-function normalizeDisplayName(displayName: string): string {
-  const trimmed = displayName.trim();
-  return trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
-}
 
 function getPrimaryModelFromOverride(
   override: AgentOverrideConfig | undefined,
@@ -140,10 +136,6 @@ function buildAcpAgentDefinition(
 
 function isSafeDisplayName(displayName: string): boolean {
   return SAFE_AGENT_ALIAS_RE.test(displayName);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Agent Configuration Helpers
@@ -269,7 +261,7 @@ function injectDisplayNames(
   for (const [internalName, displayName] of nameMap) {
     prompt = prompt.replace(
       new RegExp(`@${escapeRegExp(internalName)}\\b`, 'g'),
-      `@${normalizeDisplayName(displayName)}`,
+      `@${normalizeAgentName(displayName)}`,
     );
   }
 
@@ -614,7 +606,7 @@ export function createAgents(
   // Validate display names
   const usedDisplayNames = new Set<string>();
   for (const [, displayName] of displayNameMap) {
-    const normalizedDisplayName = normalizeDisplayName(displayName);
+    const normalizedDisplayName = normalizeAgentName(displayName);
     if (!isSafeDisplayName(normalizedDisplayName)) {
       throw new Error(
         `displayName '${normalizedDisplayName}' must match /^[a-z][a-z0-9_-]*$/i`,
@@ -647,7 +639,7 @@ export function createAgents(
     for (const [internalName, displayName] of displayNameMap) {
       text = text.replace(
         new RegExp(`@${escapeRegExp(internalName)}\\b`, 'g'),
-        `@${normalizeDisplayName(displayName)}`,
+        `@${normalizeAgentName(displayName)}`,
       );
     }
     return text;
@@ -747,7 +739,7 @@ export function getAgentConfigs(
     applyClassification(a.name, sdkConfig);
 
     const normalizedDisplayName = a.displayName
-      ? normalizeDisplayName(a.displayName)
+      ? normalizeAgentName(a.displayName)
       : undefined;
 
     if (normalizedDisplayName && !isInternalOnly(a.name)) {

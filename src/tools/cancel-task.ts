@@ -7,7 +7,12 @@ import type { BackgroundJobStore } from '../utils/background-job-store';
 import { isRecord as isObjectRecord } from '../utils/guards';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
-import { abortSessionWithTimeout, withTimeout } from '../utils/session';
+import { delay } from '../utils/polling';
+import {
+  abortSessionWithTimeout,
+  SESSION_ID_PATTERN,
+  withTimeout,
+} from '../utils/session';
 
 const z = tool.schema;
 
@@ -74,7 +79,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. Accep
         cancellationRequested: job?.cancellationRequested,
       });
       if (!job) {
-        if (isSessionID(requested)) {
+        if (SESSION_ID_PATTERN.test(requested)) {
           if (requested === parentSessionID) {
             log('[cancel-task] rejected parent session cancellation', {
               parentSessionID,
@@ -359,14 +364,6 @@ async function getSessionStatus(
     });
     return { status: undefined, source: 'lookup-error', keys: [] };
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isSessionID(value: string): boolean {
-  return /^ses_[\w-]+$/.test(value);
 }
 
 function normalizeCancelReason(reason?: string): string {
