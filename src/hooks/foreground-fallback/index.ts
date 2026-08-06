@@ -78,6 +78,10 @@ const TRANSPORT_MESSAGE_PATTERNS = [
   /^request timeout$/i,
   /^connect ECONNREFUSED\b/i,
   /^getaddrinfo ENOTFOUND\b/i,
+  // Provider SDKs also report connection failures with natural-language
+  // messages (e.g. "stream error: Cannot connect to API") that carry no
+  // transport code. Match the narrow phrase only.
+  /cannot connect to api/i,
 ];
 const PROVIDER_OUTAGE_PATTERNS = [
   /\binternal server error\b/i,
