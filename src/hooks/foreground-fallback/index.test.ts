@@ -229,6 +229,18 @@ describe('isFailoverError', () => {
     ).toBe(true);
   });
 
+  test('returns true for "cannot connect to API" transport errors', () => {
+    expect(isRetryableError('Cannot connect to API')).toBe(true);
+    expect(isRetryableError('stream error: Cannot connect to API')).toBe(true);
+    expect(
+      isRetryableError({ message: 'stream error: Cannot connect to API' }),
+    ).toBe(true);
+  });
+
+  test('returns false for non-API connection errors', () => {
+    expect(isRetryableError('Cannot connect to database')).toBe(false);
+  });
+
   test('returns false for permanent channel-not-found errors', () => {
     expect(
       isRetryableError({
@@ -370,6 +382,41 @@ describe('ForegroundFallbackManager session.error', () => {
         error: {
           message:
             'auth_unavailable: no auth available (providers=cli-proxy-api, model=gemini-3.6-flash)',
+        },
+      },
+    });
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const call = mocks.promptAsync.mock.calls[0] as [
+      {
+        model: { providerID: string; modelID: string };
+      },
+    ];
+    expect(call[0].model.providerID).toBe('openai');
+    expect(call[0].model.modelID).toBe('gpt-4o');
+  });
+
+  test('triggers fallback on cannot-connect session.error', async () => {
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: {
+          message: 'stream error: Cannot connect to API',
         },
       },
     });
