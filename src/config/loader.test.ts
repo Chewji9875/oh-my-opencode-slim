@@ -834,6 +834,39 @@ describe('deepMerge behavior', () => {
     // Fallback deepMerge: project value wins over user value
     expect(config.fallback?.enabled).toBe(false);
   });
+
+  test('deprecated fallback.* keys warn and still load', () => {
+    const userOpencodeDir = path.join(userConfigDir, 'opencode');
+    fs.mkdirSync(userOpencodeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userOpencodeDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        fallback: {
+          enabled: true,
+          timeoutMs: 15000,
+          retryDelayMs: 500,
+          retry_on_empty: false,
+          runtimeOverride: true,
+        },
+        agents: { oracle: { model: 'valid/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(userConfigDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.message).toContain('Deprecated fallback config keys');
+    expect(warnings[0]?.message).toContain('timeoutMs');
+    expect(config.fallback?.enabled).toBe(true);
+    // Removed fields must not survive into the parsed config
+    expect(config.fallback).not.toHaveProperty('timeoutMs');
+    expect(config.fallback).not.toHaveProperty('runtimeOverride');
+    expect(config.agents?.oracle?.model).toBe('valid/model');
+  });
 });
 
 describe('preset resolution', () => {
