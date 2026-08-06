@@ -6,7 +6,6 @@ import type { PluginConfig } from '../config';
 import {
   buildPresetSummary,
   deletePreset,
-  formatPresetOneLine,
   removeAgentFromPreset,
   setAgentOverride,
   switchPresetOnDisk,
@@ -439,33 +438,6 @@ describe('setAgentOverride / removeAgentFromPreset', () => {
   test('removeAgentFromPreset is a no-op for absent agents', () => {
     const preset = { orchestrator: { model: 'a' } };
     expect(removeAgentFromPreset(preset, 'oracle')).toBe(preset);
-  });
-});
-
-describe('formatPresetOneLine', () => {
-  test('joins agent → model pairs', () => {
-    const config: PluginConfig = {
-      presets: {
-        team: {
-          orchestrator: { model: 'ustc/glm-5.2' },
-          oracle: { model: 'ustc/glm-5.2' },
-        },
-      },
-    };
-
-    expect(formatPresetOneLine(config.presets?.team ?? {})).toBe(
-      'orchestrator → ustc/glm-5.2, oracle → ustc/glm-5.2',
-    );
-  });
-
-  test('falls back to agent name when model is absent', () => {
-    const config: PluginConfig = {
-      presets: {
-        bare: { oracle: { temperature: 0.3 } },
-      },
-    };
-
-    expect(formatPresetOneLine(config.presets?.bare ?? {})).toBe('oracle');
   });
 });
 

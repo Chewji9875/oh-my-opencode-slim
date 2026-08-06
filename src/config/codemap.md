@@ -134,7 +134,6 @@ This allows consumers to import directly from `src/config` rather than individua
 - `setActiveRuntimePreset(name)`: Set currently active preset
 - `getActiveRuntimePreset()`: Get currently active preset
 - `getPreviousRuntimePreset()`: Get previously active preset
-- `setActiveRuntimePresetWithPrevious(name)`: Set active with previous tracking
 
 ### MCP Management
 
