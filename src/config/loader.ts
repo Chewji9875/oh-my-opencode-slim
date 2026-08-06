@@ -4,6 +4,7 @@ import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import {
+  LEGACY_FALLBACK_KEYS,
   type PluginConfig,
   PluginConfigSchema,
   WebfetchConfigSchema,
@@ -16,7 +17,8 @@ export type ConfigLoadWarningKind =
   | 'invalid-json'
   | 'invalid-schema'
   | 'read-error'
-  | 'missing-preset';
+  | 'missing-preset'
+  | 'deprecated-key';
 
 /**
  * A warning emitted while loading plugin configuration.
@@ -97,7 +99,7 @@ function loadConfigFromPath(
         'Deprecated tmux config key found and ignored. Use multiplexer config instead.';
       options?.onWarning?.({
         path: configPath,
-        kind: 'invalid-schema' as ConfigLoadWarningKind,
+        kind: 'deprecated-key',
         message: tmuxMsg,
       });
       if (!options?.silent) {
@@ -121,11 +123,36 @@ function loadConfigFromPath(
         'Deprecated council.master config key found and ignored. Configure council agents via presets instead.';
       options?.onWarning?.({
         path: configPath,
-        kind: 'invalid-schema' as ConfigLoadWarningKind,
+        kind: 'deprecated-key',
         message: masterMsg,
       });
       if (!options?.silent) {
         console.warn(`[oh-my-opencode-slim] ${masterMsg}`);
+      }
+    }
+
+    // Warn about deprecated fallback.* keys. The schema strips these before
+    // validation so the rest of the config still loads; without this warning
+    // users would not know their stale keys are ignored.
+    if (
+      typeof rawConfig === 'object' &&
+      rawConfig !== null &&
+      typeof (rawConfig as Record<string, unknown>).fallback === 'object' &&
+      (rawConfig as Record<string, unknown>).fallback !== null
+    ) {
+      const fallback = (rawConfig as Record<string, unknown>)
+        .fallback as Record<string, unknown>;
+      const present = LEGACY_FALLBACK_KEYS.filter((key) => key in fallback);
+      if (present.length > 0) {
+        const fallbackMsg = `Deprecated fallback config key${present.length === 1 ? '' : 's'} ${present.join(', ')} found and ignored. These fields were removed in 2.3.x; fallback behavior is controlled by fallback.enabled and fallback.maxRetries.`;
+        options?.onWarning?.({
+          path: configPath,
+          kind: 'deprecated-key',
+          message: fallbackMsg,
+        });
+        if (!options?.silent) {
+          console.warn(`[oh-my-opencode-slim] ${fallbackMsg}`);
+        }
       }
     }
 

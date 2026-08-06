@@ -123,6 +123,32 @@ describe('readConfigInvalid', () => {
     }
   });
 
+  test('returns false for config with deprecated fallback keys (loads fine)', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    try {
+      const projectDir = path.join(tempDir, 'project');
+      const configDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          fallback: {
+            enabled: true,
+            timeoutMs: 15000,
+            runtimeOverride: true,
+          },
+          agents: { oracle: { model: 'valid/model' } },
+        }),
+      );
+
+      // Deprecated fallback keys are stripped with a warning; the config
+      // loads successfully so the sidebar must NOT show "Config invalid".
+      expect(readConfigInvalid(projectDir)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('uses compact sidebar by default', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
     try {

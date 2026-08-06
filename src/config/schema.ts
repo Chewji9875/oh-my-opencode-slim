@@ -191,41 +191,56 @@ export const BackgroundJobsConfigSchema = z.object({
 
 export type BackgroundJobsConfig = z.infer<typeof BackgroundJobsConfigSchema>;
 
-export const FailoverConfigSchema = z
-  .object({
-    enabled: z.boolean().default(true),
-    timeoutMs: z.number().min(0).default(15000),
-    retryDelayMs: z.number().min(0).default(500),
-    maxRetries: z
-      .number()
-      .int()
-      .min(0)
-      .default(3)
-      .describe(
-        'Number of consecutive 429/rate-limit responses tolerated on the ' +
-          'same model before aborting (or swapping to the next fallback ' +
-          'model when a chain is configured).',
-      ),
-    retry_on_empty: z
-      .boolean()
-      .default(true)
-      .describe(
-        'When true (default), empty provider responses are treated as failures, ' +
-          'triggering fallback/retry. Set to false to treat them as successes.',
-      ),
-    // DEPRECATED: accepted for backward compatibility but no longer used.
-    // Fallback is now always disabled when a user explicitly selects a model
-    // via /model, so this flag has no effect.
-    runtimeOverride: z
-      .boolean()
-      .optional()
-      .describe(
-        'DEPRECATED: no longer used. Previously controlled whether out-of-chain ' +
-          'runtime model picks triggered fallback. Fallback is now always ' +
-          'disabled when a user explicitly selects a model via /model.',
-      ),
-  })
-  .strict();
+/**
+ * Fallback config fields accepted by versions before 2.3.x but no longer
+ * meaningful. Kept only so that existing user/project configs containing
+ * them still parse: the loader emits a deprecation warning and these keys
+ * are stripped before strict validation. Without this, a stale field would
+ * make the whole config file fail and drop all the user's settings.
+ */
+export const LEGACY_FALLBACK_KEYS = [
+  'timeoutMs',
+  'retryDelayMs',
+  'retry_on_empty',
+  'runtimeOverride',
+] as const;
+
+function stripLegacyFallbackKeys(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const hasLegacy = LEGACY_FALLBACK_KEYS.some((key) => key in record);
+  if (!hasLegacy) {
+    return value;
+  }
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(record)) {
+    if (!(LEGACY_FALLBACK_KEYS as readonly string[]).includes(key)) {
+      cleaned[key] = val;
+    }
+  }
+  return cleaned;
+}
+
+export const FailoverConfigSchema = z.preprocess(
+  stripLegacyFallbackKeys,
+  z
+    .object({
+      enabled: z.boolean().default(true),
+      maxRetries: z
+        .number()
+        .int()
+        .min(0)
+        .default(3)
+        .describe(
+          'Number of consecutive 429/rate-limit responses tolerated on the ' +
+            'same model before aborting (or swapping to the next fallback ' +
+            'model when a chain is configured).',
+        ),
+    })
+    .strict(),
+);
 
 export type FailoverConfig = z.infer<typeof FailoverConfigSchema>;
 

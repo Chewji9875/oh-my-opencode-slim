@@ -297,8 +297,18 @@ function readConfigState(directory: string): {
   let configInvalid = false;
   const config = loadPluginConfig(directory, {
     silent: true,
-    onWarning: () => {
-      configInvalid = true;
+    onWarning: (warning) => {
+      // Only genuinely broken configs (parse/load/schema failures) mark the
+      // sidebar invalid. Benign deprecation notices (deprecated-key) and
+      // missing-preset do not, otherwise a config that loads fine would be
+      // shown as "Config invalid".
+      if (
+        warning.kind === 'invalid-json' ||
+        warning.kind === 'invalid-schema' ||
+        warning.kind === 'read-error'
+      ) {
+        configInvalid = true;
+      }
     },
   });
   const compactSidebar = config.compactSidebar ?? true;
