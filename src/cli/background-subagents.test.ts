@@ -217,7 +217,7 @@ describe('configureBackgroundSubagents', () => {
     },
   );
 
-  test.each([undefined, 'yes'])(
+  test.each([undefined, 'yes', 'false'])(
     'writes Exa configuration when Exa is %s',
     async (exaValue) => {
       tempDir = mkdtempSync(join(tmpdir(), 'omoo-bg-'));
