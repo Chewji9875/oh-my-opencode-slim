@@ -121,6 +121,20 @@ describe('isFailoverError', () => {
     );
   });
 
+  test('returns true for codex quota-threshold errors', () => {
+    expect(
+      isFailoverError({
+        message:
+          'AI_APICallError: [codex/gpt-5.6-sol-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError(
+        'AI_APICallError: [codex/gpt-5.6-sol-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
+      ),
+    ).toBe(true);
+  });
+
   test('returns true for "usage exceeded"', () => {
     expect(isRetryableError({ message: 'usage exceeded' })).toBe(true);
   });
@@ -502,6 +516,93 @@ describe('ForegroundFallbackManager session.error', () => {
       { parts: Array<{ text?: string }> },
     ];
     expect(call[0].parts[0]?.text).toBe('real prompt');
+  });
+
+  test('replays the last user message from v2-shaped session.messages data', async () => {
+    // OpenCode 1.18+ session.messages() returns v2 SessionMessage objects
+    // ({ type, text }) instead of the v1 { info, parts } shape. The fallback
+    // must locate and re-submit the v2 user text even when an assistant
+    // message appears after it.
+    ({ mocks } = createMockClient({
+      messagesData: [
+        { id: 'm1', type: 'user', text: 'v2 prompt' },
+        {
+          id: 'm2',
+          type: 'assistant',
+          parts: [{ type: 'text', text: 'reply' }],
+        },
+      ],
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    const call = mocks.promptAsync.mock.calls[0] as [
+      { parts: Array<{ text?: string }> },
+    ];
+    expect(call[0].parts[0]?.text).toBe('v2 prompt');
+  });
+
+  test('prefers the latest user message across mixed v1/v2 shapes', async () => {
+    ({ mocks } = createMockClient({
+      messagesData: [
+        {
+          info: { role: 'user' },
+          parts: [{ type: 'text', text: 'legacy prompt' }],
+        },
+        { id: 'm2', type: 'user', text: 'v2 prompt' },
+      ],
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    const call = mocks.promptAsync.mock.calls[0] as [
+      { parts: Array<{ text?: string }> },
+    ];
+    expect(call[0].parts[0]?.text).toBe('v2 prompt');
   });
 
   test('does nothing when error is not a rate limit', async () => {
