@@ -234,6 +234,11 @@ export class ForegroundFallbackManager {
   /** sessionID → consecutive 429 count for the current model.
    *  Reset on model swap or session deletion. */
   private readonly sessionRetries = new Map<string, number>();
+  /** sessionID → chain-exhaustion stage:
+   *   0 = not exhausted; 1 = chain exhausted once, reset to sticky fallback
+   *   (one retry chance); 2 = exhausted again, aborted — stop intervening.
+   *   Reset to 0 on successful responses or session deletion. */
+  private readonly chainExhaustion = new Map<string, number>();
 
   /** Exposed for task-session-manager: prevents idle reconciliation
    *  while a fallback abort/re-prompt is in flight for this session. */
@@ -292,6 +297,7 @@ export class ForegroundFallbackManager {
         this.lastTrigger.delete(id);
         this.lastTriggerModel.delete(id);
         this.sessionRetries.delete(id);
+        this.chainExhaustion.delete(id);
       });
     }
   }
@@ -327,14 +333,23 @@ export class ForegroundFallbackManager {
             `${info.providerID}/${info.modelID}`,
           );
         }
+        const messageTime = info.time;
+        const isCompletedSuccessfulAssistant =
+          info.role === 'assistant' &&
+          !info.error &&
+          typeof messageTime === 'object' &&
+          messageTime !== null &&
+          'completed' in messageTime &&
+          typeof messageTime.completed === 'number';
         // Failover-worthy error on an individual message
         if (info.error && isFailoverError(info.error)) {
           if (this.shouldTriggerFallback(sessionID)) {
             await this.tryFallback(sessionID);
           }
-        } else {
-          // Successful response: clear retry count so recovery is not forgotten.
+        } else if (isCompletedSuccessfulAssistant) {
+          // Only a completed, successful assistant response proves recovery.
           this.sessionRetries.delete(sessionID);
+          this.chainExhaustion.delete(sessionID);
         }
         break;
       }
@@ -404,17 +419,13 @@ export class ForegroundFallbackManager {
           break;
         }
 
-        if (this.isRecoveredStatus(props.status?.type)) {
-          // Recovered/terminal status: clear retry count.
-          this.sessionRetries.delete(sessionID);
-        }
         // Note: do NOT clear sessionRetries here on non-rate-limit statuses.
         // Abort events triggered by our own fallback carry non-rate-limit
         // messages and would reset the counter, creating an infinite loop:
         // abort → fallback → set retries to 1 → abort event clears retries
         // → next retry sees tried=0 → abort+fallback again → repeat.
-        // Retries are only cleared on successful response (message.updated
-        // without error) or session deletion.
+        // Retries are only cleared on a completed successful assistant
+        // response or session deletion.
         break;
       }
 
@@ -473,16 +484,6 @@ export class ForegroundFallbackManager {
     const tried = this.sessionRetries.get(sessionID) ?? 0;
     if (tried === 0) return true;
     return this.consumeRetryBudget(sessionID);
-  }
-
-  private isRecoveredStatus(statusType: string | undefined): boolean {
-    return (
-      statusType === 'idle' ||
-      statusType === 'complete' ||
-      statusType === 'completed' ||
-      statusType === 'success' ||
-      statusType === 'terminal'
-    );
   }
 
   // ---------------------------------------------------------------------------
@@ -555,6 +556,10 @@ export class ForegroundFallbackManager {
 
   private async execFallback(sessionID: string): Promise<void> {
     try {
+      // After the chain has been exhausted twice (reset retry failed and we
+      // aborted), do not intervene again for this session: re-entering would
+      // keep aborting in a loop. Surface errors to the user instead.
+      if (this.chainExhaustion.get(sessionID) === 2) return;
       let currentModel = this.sessionModel.get(sessionID);
       const agentName = this.sessionAgent.get(sessionID);
       const chain = this.resolveChain(agentName, currentModel);
@@ -580,11 +585,29 @@ export class ForegroundFallbackManager {
       let nextModel = chain.find((m) => !tried.has(m));
       if (!nextModel) {
         if (chain.length > 1) {
-          // Chain exhausted but we have fallbacks: reset tried set and
-          // stick to the deepest fallback model so we stop re-trying the
-          // dead primary model on every subsequent message.
+          // Chain exhausted but we have fallbacks: on the first exhaustion
+          // reset the tried set and stick to the deepest fallback model so
+          // we stop re-trying the dead primary model on every subsequent
+          // message. If the sticky fallback itself fails afterwards (second
+          // exhaustion), abort once and stop intervening — otherwise the
+          // reset re-prompt would loop forever on a fully dead chain.
           const primary = chain[0];
           const stickyFallback = chain[chain.length - 1];
+          if ((this.chainExhaustion.get(sessionID) ?? 0) >= 1) {
+            this.chainExhaustion.set(sessionID, 2);
+            log(
+              '[foreground-fallback] chain exhausted after re-fallback, aborting',
+              {
+                sessionID,
+                agentName,
+                currentModel,
+                tried: [...tried],
+              },
+            );
+            await abortSessionWithTimeout(getClient(this.input), sessionID);
+            return;
+          }
+          this.chainExhaustion.set(sessionID, 1);
           log('[foreground-fallback] resetting tried set for re-fallback', {
             sessionID,
             agentName,
@@ -598,6 +621,7 @@ export class ForegroundFallbackManager {
           this.sessionTried.set(sessionID, tried);
           nextModel = stickyFallback;
         } else {
+          this.chainExhaustion.set(sessionID, 2);
           log('[foreground-fallback] fallback chain exhausted, aborting', {
             sessionID,
             agentName,
