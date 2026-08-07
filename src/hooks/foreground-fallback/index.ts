@@ -26,7 +26,7 @@ import {
   parseModelReference,
 } from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
-import { isUserMessageWithParts } from '../types';
+import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 
 // ---------------------------------------------------------------------------
 // Retryable error detection
@@ -37,6 +37,7 @@ const RETRYABLE_ERROR_PATTERNS = [
   /rate.?limit/i,
   /too many requests/i,
   /quota.?exceeded/i,
+  /quota.?threshold/i,
   /usage.?exceeded/i,
   /ExceededBudget/i,
   /over.?budget/i,
@@ -624,12 +625,17 @@ export class ForegroundFallbackManager {
         sessionID,
       });
       // result.data may contain partial/streaming messages whose `info` is
-      // undefined at runtime (OpenCode violates its own declared type), so
-      // guard each entry instead of dereferencing `info` directly.
+      // undefined at runtime (OpenCode violates its own declared type), and
+      // v2 messages carry `type`/`text` instead of `info`/`parts`, so guard
+      // each entry instead of dereferencing a fixed shape.
       const messages = (result.data ?? []) as unknown[];
-      const lastUser = [...messages].reverse().find(isUserMessageWithParts);
+      const lastUser = [...messages].reverse().find(isReplayableUserMessage);
       if (!lastUser) {
-        log('[foreground-fallback] no user message found', { sessionID });
+        log('[foreground-fallback] no user message found', {
+          sessionID,
+          messageCount: messages.length,
+          requestError: result.error ?? undefined,
+        });
         return;
       }
 
@@ -641,12 +647,18 @@ export class ForegroundFallbackManager {
         return;
       }
 
+      const replayParts = partsFromReplayMessage(lastUser) as Array<{
+        type: 'text';
+        text: string;
+      }>;
+
       const promptBody = {
-        // ponytail: lastUser.parts are MessagePart[] from API, but v2
-        // promptAsync expects TextPartInput[] — runtime-compatible, TS
-        // doesn't know the `type` field is already 'text'.
+        // ponytail: replayed parts are MessagePart[] from the transform API
+        // or a synthesized v2 text part, but promptAsync expects
+        // TextPartInput[] — runtime-compatible, TS doesn't know the `type`
+        // field is already 'text'.
         parts: [
-          ...(lastUser.parts as Array<{ type: 'text'; text: string }>),
+          ...replayParts,
           createInternalAgentTextPart('Foreground fallback replay.'),
         ],
         model: ref,
