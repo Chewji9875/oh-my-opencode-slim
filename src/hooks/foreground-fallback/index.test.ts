@@ -1315,6 +1315,179 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
     expect(mocks2.abort).toHaveBeenCalledTimes(1);
     expect(mocks2.promptAsync).not.toHaveBeenCalled();
   });
+
+  test('aborts after one re-fallback instead of looping when the whole chain keeps failing', async () => {
+    // Regression for issue #966: two-model chain [gpt-b, gpt-c], both dead.
+    // The reporter's log showed "from glm to glm" every ~10s: the reset path
+    // re-prompted the sticky model forever. It must be allowed once (sticky
+    // gets one retry), then abort and stop intervening. Failures are spaced
+    // beyond the dedup window (as in the real 10s-interval report).
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+      true,
+      { directory: '/test' } as any,
+    );
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-loop',
+          providerID: 'openai',
+          modelID: 'gpt-b',
+          role: 'assistant',
+        },
+      },
+    });
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async () => {
+        fakeNow += 6_000; // skip the 5s dedup window
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID: 'sess-loop',
+            error: { message: 'Rate limit exceeded' },
+          },
+        });
+      };
+
+      // Fail 1: gpt-b → gpt-c.
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+
+      // Fail 2: gpt-c fails → first chain exhaustion → reset, re-prompt gpt-c once.
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+
+      // Fail 3: gpt-c fails again → second exhaustion → abort, no re-prompt.
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+
+      // Fail 4/5: exhaustion state is terminal → no further intervention.
+      await fail();
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('clears exhaustion state on a successful response (sticky fallback recovered)', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-recover',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async () => {
+        fakeNow += 6_000;
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID: 'sess-recover',
+            error: { message: 'Rate limit exceeded' },
+          },
+        });
+      };
+
+      // Walk the chain to the first exhaustion reset (stage 1).
+      await fail();
+      await fail();
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+
+      // Successful response clears the exhaustion stage.
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            sessionID: 'sess-recover',
+            providerID: 'google',
+            modelID: 'gemini-2.5-pro',
+            role: 'assistant',
+          },
+        },
+      });
+
+      // Next failure gets a fresh reset chance instead of aborting immediately.
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(4);
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('does not abort repeatedly for single-model chains after exhaustion', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-solo',
+          providerID: 'openai',
+          modelID: 'gpt-b',
+        },
+      },
+    });
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async () => {
+        fakeNow += 6_000;
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID: 'sess-solo',
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      await fail();
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+
+      // Second error must not abort again (no abort loop).
+      await fail();
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
