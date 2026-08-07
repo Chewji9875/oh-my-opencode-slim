@@ -1429,6 +1429,7 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
             providerID: 'google',
             modelID: 'gemini-2.5-pro',
             role: 'assistant',
+            time: { created: 1, completed: 2 },
           },
         },
       });
@@ -1437,6 +1438,69 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
       await fail();
       expect(mocks.promptAsync).toHaveBeenCalledTimes(4);
       expect(mocks.abort).toHaveBeenCalledTimes(0);
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('does not recover from an incomplete assistant message', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+      true,
+      { directory: '/test' } as any,
+    );
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-incomplete-recovery',
+          providerID: 'openai',
+          modelID: 'gpt-b',
+          role: 'assistant',
+        },
+      },
+    });
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async () => {
+        fakeNow += 6_000;
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID: 'sess-incomplete-recovery',
+            error: { message: 'Rate limit exceeded' },
+          },
+        });
+      };
+
+      // Reach stage 1: gpt-b → gpt-c, then the sticky gpt-c retry.
+      await fail();
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+
+      // A streaming assistant update is not proof of recovery.
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            sessionID: 'sess-incomplete-recovery',
+            providerID: 'openai',
+            modelID: 'gpt-c',
+            role: 'assistant',
+            time: { created: 1 },
+          },
+        },
+      });
+
+      // Stage 1 remains terminal on the next exhaustion: abort, no third prompt.
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
     } finally {
       Date.now = realNowFn;
     }

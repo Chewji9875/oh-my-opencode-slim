@@ -332,13 +332,21 @@ export class ForegroundFallbackManager {
             `${info.providerID}/${info.modelID}`,
           );
         }
+        const messageTime = info.time;
+        const isCompletedSuccessfulAssistant =
+          info.role === 'assistant' &&
+          !info.error &&
+          typeof messageTime === 'object' &&
+          messageTime !== null &&
+          'completed' in messageTime &&
+          typeof messageTime.completed === 'number';
         // Failover-worthy error on an individual message
         if (info.error && isFailoverError(info.error)) {
           if (this.shouldTriggerFallback(sessionID)) {
             await this.tryFallback(sessionID);
           }
-        } else {
-          // Successful response: clear retry count so recovery is not forgotten.
+        } else if (isCompletedSuccessfulAssistant) {
+          // Only a completed, successful assistant response proves recovery.
           this.sessionRetries.delete(sessionID);
           this.chainExhaustion.delete(sessionID);
         }
@@ -410,18 +418,13 @@ export class ForegroundFallbackManager {
           break;
         }
 
-        if (this.isRecoveredStatus(props.status?.type)) {
-          // Recovered/terminal status: clear retry count.
-          this.sessionRetries.delete(sessionID);
-          this.chainExhaustion.delete(sessionID);
-        }
         // Note: do NOT clear sessionRetries here on non-rate-limit statuses.
         // Abort events triggered by our own fallback carry non-rate-limit
         // messages and would reset the counter, creating an infinite loop:
         // abort → fallback → set retries to 1 → abort event clears retries
         // → next retry sees tried=0 → abort+fallback again → repeat.
-        // Retries are only cleared on successful response (message.updated
-        // without error) or session deletion.
+        // Retries are only cleared on a completed successful assistant
+        // response or session deletion.
         break;
       }
 
@@ -480,16 +483,6 @@ export class ForegroundFallbackManager {
     const tried = this.sessionRetries.get(sessionID) ?? 0;
     if (tried === 0) return true;
     return this.consumeRetryBudget(sessionID);
-  }
-
-  private isRecoveredStatus(statusType: string | undefined): boolean {
-    return (
-      statusType === 'idle' ||
-      statusType === 'complete' ||
-      statusType === 'completed' ||
-      statusType === 'success' ||
-      statusType === 'terminal'
-    );
   }
 
   // ---------------------------------------------------------------------------
