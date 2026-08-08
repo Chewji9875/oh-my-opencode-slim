@@ -228,7 +228,7 @@ async function abortAndVerifySession(
 ): Promise<void> {
   log('[cancel-task] abort attempt starting', { taskID });
   try {
-    // ponytail: abortSessionWithTimeout now takes v2 OpencodeClient
+    // abortSessionWithTimeout uses the in-process runtime client
     await abortSessionWithTimeout(
       getClient(options.input),
       taskID,
@@ -253,7 +253,7 @@ async function deleteAndVerifySession(
   taskID: string,
   reason: string,
 ): Promise<void> {
-  const v2 = getClient(options.input);
+  const client = getClient(options.input);
 
   log('[cancel-task] deleting session after abort attempt', {
     taskID,
@@ -261,9 +261,9 @@ async function deleteAndVerifySession(
   });
   try {
     await withTimeout(
-      v2.session.delete({
-        sessionID: taskID,
-        directory: options.input.directory,
+      client.session.delete({
+        path: { id: taskID },
+        query: { directory: options.input.directory },
       }),
       options.deleteTimeoutMs ?? 10_000,
       `Session delete timed out after ${options.deleteTimeoutMs ?? 10_000}ms`,
@@ -335,7 +335,7 @@ async function getSessionStatus(
 }> {
   try {
     const result = await getClient(input).session.status({
-      directory: input.directory,
+      query: { directory: input.directory },
     });
     const data = result.data;
     if (!isObjectRecord(data)) {
@@ -377,8 +377,8 @@ async function getSessionParentID(
 ): Promise<string | undefined> {
   try {
     const response = await getClient(input).session.get({
-      sessionID: taskID,
-      directory: input.directory,
+      path: { id: taskID },
+      query: { directory: input.directory },
     });
     const session = response.data;
     if (!session) return undefined;

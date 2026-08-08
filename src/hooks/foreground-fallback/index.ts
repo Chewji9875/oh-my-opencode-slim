@@ -526,8 +526,7 @@ export class ForegroundFallbackManager {
 
     this.inProgress.add(sessionID);
     try {
-      const session = ((this.input as any).client?.session ??
-        getClient(this.input).session) as PluginInput['client']['session'];
+      const session = getClient(this.input).session;
       await session.abort({ path: { id: sessionID } });
       await this.execFallback(sessionID);
     } finally {
@@ -554,8 +553,7 @@ export class ForegroundFallbackManager {
   }
 
   private async execFallback(sessionID: string): Promise<void> {
-    const session = ((this.input as any).client?.session ??
-      getClient(this.input).session) as PluginInput['client']['session'];
+    const session = getClient(this.input).session;
     try {
       // After the chain has been exhausted twice (reset retry failed and we
       // aborted), do not intervene again for this session: re-entering would
