@@ -264,13 +264,17 @@ async function runSecondaryModel(
       (toolIDs || []).map((id: string) => [id, false]),
     );
 
-    const modelOnly = model;
+    const { variant, ...modelOnly } = model;
     const result = await Promise.race([
       client.session.prompt({
         path: { id: sessionId },
         query: { directory },
         body: {
           model: modelOnly,
+          // The v1 runtime reads the variant from the body top level and
+          // strips unknown keys from `model`; the SDK type omits it, so
+          // spread it through the body shape directly.
+          ...(variant ? { variant } : {}),
           system:
             'Answer only from the supplied content. Do not use tools or outside knowledge.',
           tools: disabledTools,

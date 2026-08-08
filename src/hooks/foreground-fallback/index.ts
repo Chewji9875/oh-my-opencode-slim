@@ -21,7 +21,10 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
-import { parseModelReference } from '../../utils/session';
+import {
+  abortSessionWithTimeout,
+  parseModelReference,
+} from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 
@@ -60,9 +63,10 @@ const RETRYABLE_ERROR_PATTERNS = [
   /auth_unavailable/i,
   // 401 upstream auth/provider errors — the provider rejected the request,
   // so the next model should be tried instead of retrying the dead one.
+  // Match the status code only, not the generic "upstream request failed" /
+  // "provider returned error" wording, which wraps any provider 4xx (e.g. a
+  // genuine 400 the next model would reproduce) and must stay a hard error.
   /\b401\b/,
-  /upstream request failed/i,
-  /provider returned error/i,
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
@@ -210,7 +214,19 @@ const INLINE_STATUS_CODES = new Set([401, 410]);
  * Other failover errors (429 rate-limit, outage, etc.) get a toast instead.
  */
 export function isInlineFailoverError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
+  if (!error) return false;
+  // The AI SDK surfaces 401/410 as bare strings ("Gone",
+  // "AI_APICallError: Gone"); match those directly so they stay inline too.
+  if (typeof error === 'string') {
+    return (
+      /(?:^|\s)Gone(?:$|\s)/i.test(error) ||
+      /\b401\b/i.test(error) ||
+      /\b410\b/i.test(error) ||
+      /\bend of life\b/i.test(error) ||
+      /\bno longer available\b/i.test(error)
+    );
+  }
+  if (typeof error !== 'object') return false;
   const err = error as {
     statusCode?: unknown;
     data?: { statusCode?: unknown; responseBody?: string; message?: string };
@@ -579,8 +595,7 @@ export class ForegroundFallbackManager {
 
     this.inProgress.add(sessionID);
     try {
-      const session = getClient(this.input).session;
-      await session.abort({ path: { id: sessionID } });
+      await abortSessionWithTimeout(getClient(this.input), sessionID);
       await this.execFallback(sessionID, error);
     } finally {
       this.inProgress.delete(sessionID);
@@ -659,7 +674,7 @@ export class ForegroundFallbackManager {
                 tried: [...tried],
               },
             );
-            await session.abort({ path: { id: sessionID } });
+            await abortSessionWithTimeout(getClient(this.input), sessionID);
             return;
           }
           this.chainExhaustion.set(sessionID, 1);
@@ -682,7 +697,7 @@ export class ForegroundFallbackManager {
             agentName,
             tried: [...tried],
           });
-          await session.abort({ path: { id: sessionID } });
+          await abortSessionWithTimeout(getClient(this.input), sessionID);
           return;
         }
       }
@@ -749,7 +764,7 @@ export class ForegroundFallbackManager {
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
         });
-        await session.abort({ path: { id: sessionID } });
+        await abortSessionWithTimeout(getClient(this.input), sessionID);
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
         await sessionClient.promptAsync(promptBody);
       }

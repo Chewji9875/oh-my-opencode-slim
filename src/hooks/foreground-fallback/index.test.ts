@@ -782,6 +782,38 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
     expect(showToast).not.toHaveBeenCalled();
   });
+
+  test('does not toast when the inline 410 error arrives as a bare string', async () => {
+    const { mocks } = createMockClient();
+    const showToast = mock(async () => ({}));
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+      client: { tui: { showToast } },
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: 'AI_APICallError: Gone',
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
