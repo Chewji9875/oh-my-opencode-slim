@@ -3,12 +3,7 @@ import { createAgents, getAgentConfigs, isSubagent } from './agents';
 import { buildOrchestratorPrompt } from './agents/orchestrator';
 import { CompanionManager } from './companion/manager';
 import { ensureCompanionVersion } from './companion/updater';
-import {
-  type AgentOverrideConfig,
-  deepMerge,
-  loadPluginConfig,
-  type MultiplexerConfig,
-} from './config';
+import { deepMerge, loadPluginConfig, type MultiplexerConfig } from './config';
 import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
@@ -16,11 +11,6 @@ import {
   TOAST_DURATION_MS,
 } from './config/constants';
 import { RuntimeConfig } from './config/runtime';
-import {
-  getActiveRuntimePreset,
-  getPreviousRuntimePreset,
-  setActiveRuntimePreset,
-} from './config/runtime-preset';
 import { applyOrchestratorModelConfig } from './config/strip-orchestrator-model';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
@@ -115,7 +105,7 @@ async function probeJSDOM(): Promise<string | null> {
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
 // re-runs, it checks this variable and applies the runtime preset instead
-// of the config file's preset. State lives in config/runtime-preset.ts.
+// of the config file's preset. State lives in RuntimeConfig.
 
 const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
@@ -193,7 +183,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // factory-local state, while module-level runtime preset state may persist.
     // Reapply that persisted preset so each fresh generation creates agents
     // with the correct models.
-    const runtimePreset = getActiveRuntimePreset();
+    const runtimePreset = RuntimeConfig.get(ctx.directory).getRuntimePreset();
     if (runtimePreset && config.presets?.[runtimePreset]) {
       config.preset = runtimePreset;
       // Re-merge runtime preset into config.agents (loadPluginConfig
@@ -203,7 +193,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       config.agents = deepMerge(config.agents, presetAgents);
     } else if (runtimePreset) {
       // Preset was deleted from config since last switch - clear stale state
-      setActiveRuntimePreset(null);
+      RuntimeConfig.get(ctx.directory).setRuntimePreset(null);
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
@@ -671,7 +661,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // factory and its factory-local state, while module-level runtime
       // preset data may persist. Apply that persisted selection after normal
       // model resolution for the current generation.
-      const runtimePresetName = getActiveRuntimePreset();
+      const runtimePresetName = runtime.getRuntimePreset();
       if (runtimePresetName && config.presets?.[runtimePresetName]) {
         const runtimePreset = config.presets[runtimePresetName];
         for (const [agentName, override] of Object.entries(runtimePreset)) {
@@ -723,62 +713,6 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
             agent: agentName,
             model: entry.model as string,
           });
-        }
-
-        // Reset agents from the previous preset that aren't in the new one.
-        // The stale model resolution above overwrites the reset values sent
-        // by preset-manager, so we re-apply them here from config-file
-        // baseline.
-        const prevPresetName = getPreviousRuntimePreset();
-        if (prevPresetName && config.presets?.[prevPresetName]) {
-          const prevPreset = config.presets[prevPresetName];
-          // Build resolved key set from new preset for correct comparison
-          // (handles alias keys like "explore" → "explorer")
-          const newPresetResolved = new Set(
-            Object.keys(runtimePreset).map((k) => AGENT_ALIASES[k] ?? k),
-          );
-          for (const agentName of Object.keys(prevPreset)) {
-            const resolvedName = AGENT_ALIASES[agentName] ?? agentName;
-            if (newPresetResolved.has(resolvedName)) continue; // new preset handles it
-            const entry = configAgent[resolvedName] as
-              | Record<string, unknown>
-              | undefined;
-            if (!entry) continue;
-            // Reset to config-file baseline. Use the previous preset's
-            // override to identify which fields to clear even when the
-            // baseline doesn't define them.
-            const baseline = config.agents?.[resolvedName];
-            const prevOverride = prevPreset[agentName] as
-              | AgentOverrideConfig
-              | undefined;
-            if (typeof baseline?.model === 'string') {
-              entry.model = baseline.model;
-            }
-            if (typeof baseline?.variant === 'string') {
-              entry.variant = baseline.variant;
-            } else if (prevOverride && 'variant' in prevOverride) {
-              delete entry.variant;
-            }
-            if (typeof baseline?.temperature === 'number') {
-              entry.temperature = baseline.temperature;
-            } else if (prevOverride && 'temperature' in prevOverride) {
-              delete entry.temperature;
-            }
-            if (
-              baseline?.options &&
-              typeof baseline.options === 'object' &&
-              !Array.isArray(baseline.options)
-            ) {
-              entry.options = baseline.options;
-            } else if (prevOverride && 'options' in prevOverride) {
-              delete entry.options;
-            }
-            log('[plugin] runtime preset reset from previous', {
-              previousPreset: prevPresetName,
-              agent: resolvedName,
-              model: entry.model as string,
-            });
-          }
         }
       }
 
