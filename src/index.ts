@@ -336,8 +336,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     // Initialize auto-update checker hook
     autoUpdateChecker = createAutoUpdateCheckerHook(ctx, {
-      autoUpdate: config.autoUpdate ?? true,
-      companion: config.companion,
+      autoUpdate: runtime.autoUpdate,
+      companion: runtime.companion,
     });
 
     chatHeadersHook = createChatHeadersHook(ctx);
@@ -346,10 +346,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Agents without a chain (e.g. councillor, owned by CouncilManager) are
     // left alone — FG only aborts/re-prompts when it has a model to switch to.
     foregroundFallback = new ForegroundFallbackManager(
-      runtimeChains,
-      config.fallback?.enabled !== false,
+      runtime.runtimeChains,
+      runtime.fallback.enabled !== false,
       ctx,
-      config.fallback?.maxRetries ?? 3,
+      runtime.fallback.maxRetries,
       sessionLifecycle,
     );
 
@@ -437,7 +437,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     companionManager = new CompanionManager(
       `proc_${process.pid}`,
       ctx.directory,
-      config.companion,
+      runtime.companion,
     );
     cancelTaskTools = createCancelTaskTool({
       input: ctx,
@@ -456,7 +456,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         taskSessionManagerHook.beginUserWait(sessionID),
     });
 
-    const shouldRegisterWebfetch = config.webfetch?.enabled !== false;
+    const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
     tools = {
       ...cancelTaskTools,
       ...waitForUserTools,
@@ -465,11 +465,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ast_grep_search,
       ast_grep_replace,
     };
-    if (
-      Array.isArray(config.disabled_tools) &&
-      config.disabled_tools.length > 0
-    ) {
-      const disabledTools = new Set(config.disabled_tools);
+    if (runtime.disabledTools.length > 0) {
+      const disabledTools = new Set(runtime.disabledTools);
       tools = Object.fromEntries(
         Object.entries(tools).filter(([name]) => !disabledTools.has(name)),
       );
@@ -493,12 +490,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const mcpCount = Object.keys(mcps).length;
   // Skip MCP threshold when user explicitly disabled all built-in MCPs
   const mcpThreshold =
-    Array.isArray(config.disabled_mcps) && config.disabled_mcps.length > 0
-      ? 0
-      : HEALTH_CHECK.minMcps;
+    runtime.disabledMcps.length > 0 ? 0 : HEALTH_CHECK.minMcps;
   const toolThreshold = minimumExpectedToolCount(
-    config.disabled_tools,
-    config.webfetch?.enabled !== false,
+    runtime.disabledTools,
+    runtime.webfetch.enabled !== false,
   );
   if (
     agentCount < HEALTH_CHECK.minAgents ||
@@ -535,10 +530,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   });
 
-  if (config.companion?.enabled === true) {
+  if (runtime.companion?.enabled === true) {
     try {
       const companionResult = await ensureCompanionVersion({
-        config: config.companion,
+        config: runtime.companion,
         downloadTimeoutMs: 3_000,
         lockTimeoutMs: 500,
       });
