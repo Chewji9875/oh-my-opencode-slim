@@ -67,6 +67,7 @@ import {
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
+import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
 import { recordTuiAgentModel, recordTuiAgentModels } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -273,7 +274,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       Object.keys(config.acpAgents ?? {}).length > 0
         ? { acp_run: createAcpRunTool(config.acpAgents) }
         : {};
-    const webfetchModel = config.webfetch?.model;
+    const webfetchModel = runtime.webfetch?.model;
     const webfetchModels = (() => {
       if (!webfetchModel) return undefined;
       const entries = Array.isArray(webfetchModel)
@@ -296,6 +297,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     webfetch = createWebfetchTool(ctx, {
       binaryDir: undefined,
       webfetchModels,
+      explorerModel: pickAgentModelRef(runtime.agent('explorer')?.model),
+      librarianModel: pickAgentModelRef(runtime.agent('librarian')?.model),
+      smallModelRef: () => runtime.smallModel(),
     });
     backgroundJobBoard = new BackgroundJobBoard({
       maxReusablePerAgent:
@@ -434,7 +438,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       shouldInject: shouldInjectOrchestratorReminder,
     });
 
-    filterAvailableSkills = createFilterAvailableSkillsHook(ctx, config);
+    filterAvailableSkills = createFilterAvailableSkillsHook(ctx, runtime);
 
     postFileToolNudge = createPostFileToolNudgeHook({
       shouldInject: shouldInjectOrchestratorReminder,
