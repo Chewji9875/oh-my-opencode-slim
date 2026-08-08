@@ -271,6 +271,57 @@ describe('ZellijMultiplexer', () => {
         false,
       );
     });
+
+    test('a second availability check awaits the in-flight probe instead of returning false early', async () => {
+      const { ZellijMultiplexer } = await importFreshZellij();
+      const zellij = new ZellijMultiplexer('main-vertical', 60, 'current-tab');
+
+      let releaseWhich!: () => void;
+      const whichGate = new Promise<void>((resolve) => {
+        releaseWhich = resolve;
+      });
+
+      crossSpawnMock.mockImplementation((command: string[]) => {
+        if (command[0] === 'which' || command[0] === 'where') {
+          return {
+            ...createSpawnResult(0, '/usr/bin/zellij\n'),
+            exited: whichGate.then(() => 0),
+          };
+        }
+        if (command.includes('--version')) {
+          return createSpawnResult(0, 'zellij 0.44.1\n');
+        }
+        return createSpawnResult();
+      });
+
+      const first = zellij.isAvailable();
+      // Second call while the binary probe is still pending: it must join the
+      // in-flight probe rather than short-circuit to an early false.
+      const second = zellij.isAvailable();
+
+      let secondSettled = false;
+      void second.then(() => {
+        secondSettled = true;
+      });
+
+      // Flush microtasks deterministically; the probe is gated on `which`, so
+      // the second call must not settle before the probe completes.
+      for (let i = 0; i < 32; i++) {
+        await Promise.resolve();
+      }
+      expect(secondSettled).toBe(false);
+
+      releaseWhich();
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(secondSettled).toBe(true);
+
+      // Only one probe ran: both calls shared the same in-flight promise.
+      const discoveryCalls = commands().filter(
+        (c) => c[0] === 'which' || c[0] === 'where',
+      );
+      expect(discoveryCalls).toHaveLength(1);
+    });
   });
 
   test('current-tab mode spawns a pane in the parent OpenCode tab', async () => {

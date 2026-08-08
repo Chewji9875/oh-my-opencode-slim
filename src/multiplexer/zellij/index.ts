@@ -51,7 +51,7 @@ export class ZellijMultiplexer implements Multiplexer {
   readonly type = 'zellij' as const;
 
   private binaryPath: string | null = null;
-  private hasChecked = false;
+  private availabilityPromise: Promise<boolean> | null = null;
   private agentTabId: string | null = null;
   private firstPaneId: string | null = null;
   private firstPaneUsed = false;
@@ -79,10 +79,23 @@ export class ZellijMultiplexer implements Multiplexer {
   }
 
   async isAvailable(): Promise<boolean> {
-    if (this.hasChecked) {
-      return this.binaryPath !== null;
+    // Cache the in-flight probe itself, not just the result: if availability
+    // is checked while the first probe is still running (e.g. an early
+    // sub-agent event racing the plugin's own startup check), the caller
+    // awaits the same promise instead of seeing hasChecked=true with
+    // binaryPath still null and wrongly concluding the backend is absent.
+    if (this.availabilityPromise) {
+      return this.availabilityPromise;
     }
-    this.hasChecked = true;
+    this.availabilityPromise = this.probeAvailability();
+    return this.availabilityPromise;
+  }
+
+  /**
+   * Resolve the zellij binary and gate on its version. Runs at most once per
+   * adapter instance (the promise is cached by isAvailable).
+   */
+  private async probeAvailability(): Promise<boolean> {
     const binaryPath = await findBinary('zellij');
     if (binaryPath && (await this.hasSupportedVersion(binaryPath))) {
       this.binaryPath = binaryPath;
