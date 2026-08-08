@@ -1259,6 +1259,39 @@ describe('ForegroundFallbackManager session.status', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
   });
 
+  test('does not toast when 410 signal arrives via status.message with no error property', async () => {
+    const { mocks } = createMockClient();
+    const showToast = mock(async () => ({}));
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+      client: { tui: { showToast } },
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-status-message-410',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+        },
+      },
+    });
+
+    // The AI SDK surfaces HTTP 410 as a bare retry status message with no
+    // separate error property. The runtime renders it inline — no toast.
+    await mgr.handleEvent({
+      type: 'session.status',
+      properties: {
+        sessionID: 'sess-status-message-410',
+        status: { type: 'retry', attempt: 1, message: 'AI_APICallError: Gone' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
   test('non-rate-limit retry does not trigger fallback but rate-limit does', async () => {
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(

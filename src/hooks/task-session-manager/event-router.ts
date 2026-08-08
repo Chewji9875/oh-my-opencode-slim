@@ -9,7 +9,10 @@ import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
 import { log } from '../../utils/logger';
-import { isFailoverError } from '../foreground-fallback/index';
+import {
+  isFailoverError,
+  isInlineFailoverError,
+} from '../foreground-fallback/index';
 import type {
   InjectedTerminalJobs,
   RetainedBoardSnapshotState,
@@ -222,7 +225,19 @@ export async function handleEvent(
       // job state here would make the orchestrator lose track of
       // completed background tasks and unable to dispatch follow-ups.
       const props = input.event.properties as { error?: unknown } | undefined;
-      if (!props?.error || !isFailoverError(props.error)) {
+      // Only clear injected terminal jobs for fatal errors.
+      // Rate-limit errors are recovered by ForegroundFallbackManager
+      // (abort + reprompt with fallback model); clearing the injected
+      // job state here would make the orchestrator lose track of
+      // completed background tasks and unable to dispatch follow-ups.
+      // Persistent 401/410 (auth, model gone) are NOT recovered once the
+      // chain is exhausted, so they must still surface as errors on the
+      // board instead of a false completion via idle-reconciliation.
+      if (
+        !props?.error ||
+        !isFailoverError(props.error) ||
+        isInlineFailoverError(props.error)
+      ) {
         deps.terminalJobsInjectedByParent.delete(sessionId);
         deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the

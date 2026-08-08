@@ -477,7 +477,14 @@ export class ForegroundFallbackManager {
           // Otherwise (attempt === 1, or model didn't change, or outside
           // dedup window): process as genuine retry for current model.
           if (this.shouldTriggerFallback(sessionID)) {
-            await this.tryFallbackWithAbort(sessionID, props.error);
+            // Failover may have been detected from status.message (e.g.
+            // 'AI_APICallError: Gone') with no separate error property;
+            // forward that message so 401/410 inline errors suppress the
+            // toast on this path too, matching session.error behavior.
+            await this.tryFallbackWithAbort(
+              sessionID,
+              props.error ?? { message: props.status?.message ?? '' },
+            );
           }
           break;
         }

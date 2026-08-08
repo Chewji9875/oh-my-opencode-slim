@@ -3517,6 +3517,35 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('LLM proxy connection refused');
   });
 
+  test('persistent 401 session.error on managed session records board error', async () => {
+    // 401/410 are persistent (not recovered once the fallback chain is
+    // exhausted) and must surface as an error, not a false completion.
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    const job = board.get('parent-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('Unauthorized');
+  });
+
   test('session.idle does not overwrite error state with completed', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
