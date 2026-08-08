@@ -26,6 +26,7 @@ import {
   resolveImageRouting,
   TOAST_DURATION_MS,
 } from './config/constants';
+import { RuntimeConfig } from './config/runtime';
 import {
   getActiveRuntimePreset,
   getPreviousRuntimePreset,
@@ -195,6 +196,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   try {
     config = loadPluginConfig(ctx.directory);
+    // Seed the per-directory runtime registry with the raw plugin file
+    // config. The runtime preset reapplication below mutates `config` for
+    // legacy consumers; RuntimeConfig keeps the pre-mutation snapshot and
+    // derives preset/runtime state through its own getters.
+    RuntimeConfig.init(ctx.directory, config);
 
     // Safety net: instance disposal reruns the plugin factory and rebuilds
     // factory-local state, while module-level runtime preset state may persist.
@@ -607,6 +613,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     mcp: mcps,
 
     config: async (opencodeConfig: Record<string, unknown>) => {
+      // Capture the host opencode config BEFORE any mutation so runtime
+      // consumers can distinguish host-provided values from plugin-applied
+      // ones (host override > runtime override > plugin file).
+      RuntimeConfig.get(ctx.directory).captureHostConfig(opencodeConfig);
+
       // Force default_agent to 'orchestrator' when unset, and also when the
       // user pointed it at an omos subagent name (opencode rejects subagent
       // names as default_agent with "default agent must be a primary agent").
