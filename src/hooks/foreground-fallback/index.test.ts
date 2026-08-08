@@ -202,6 +202,17 @@ describe('isFailoverError', () => {
     expect(isRetryableError({ data: { statusCode: 401 } })).toBe(true);
   });
 
+  test('returns true for 410 Gone (model end-of-life)', () => {
+    expect(isRetryableError({ statusCode: 410 })).toBe(true);
+    expect(isRetryableError({ data: { statusCode: 410 } })).toBe(true);
+    expect(
+      isRetryableError({
+        message:
+          "The model 'mistralai/mistral-small-4-119b-2603' has reached its end of life on 2026-07-27T00:00:00Z and is no longer available.",
+      }),
+    ).toBe(true);
+  });
+
   test('returns true for 401 upstream provider error message', () => {
     expect(
       isRetryableError(
@@ -697,6 +708,44 @@ describe('ForegroundFallbackManager session.error', () => {
     // First promptAsync attempt failed → abort called, then promptAsync retried
     expect(mocks.abort).toHaveBeenCalledTimes(1);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+  });
+
+  test('shows a toast when fallback switches models', async () => {
+    const { mocks } = createMockClient();
+    const showToast = mock(async () => ({}));
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+      client: { tui: { showToast } },
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { statusCode: 401, message: 'Provider returned error' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const toastCall = showToast.mock.calls[0]?.[0] as {
+      body?: { title?: string; message?: string; variant?: string };
+    };
+    expect(toastCall?.body?.title).toBe('Model fallback');
+    expect(toastCall?.body?.variant).toBe('warning');
+    expect(toastCall?.body?.message).toContain('openai');
   });
 });
 

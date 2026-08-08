@@ -99,6 +99,11 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bmodel is not available\b/i,
   /\bunsupported model\b/i,
   /\bunknown model\b/i,
+  // Model retired/end-of-life (HTTP 410 Gone) — the model no longer exists,
+  // so the next model must be tried instead of retrying the dead one.
+  /\bend of life\b/i,
+  /\bno longer available\b/i,
+  /\breached its end of life\b/i,
 ];
 
 function extractStatusCode(error: {
@@ -143,6 +148,7 @@ export function isFailoverError(error: unknown): boolean {
     statusCode === 429 ||
     statusCode === 401 ||
     statusCode === 403 ||
+    statusCode === 410 ||
     (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode))
   ) {
     return true;
@@ -711,12 +717,31 @@ export class ForegroundFallbackManager {
         from: currentModel,
         to: nextModel,
       });
+      this.showFallbackToast(agentName, nextModel);
     } catch (err) {
       log('[foreground-fallback] fallback attempt failed', {
         sessionID,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Surface a TUI toast when the fallback switches models, so the user isn't
+   * surprised by a different model responding (e.g. after a 401/rate-limit
+   * on the primary). Fire-and-forget; a failed toast is never fatal.
+   */
+  private showFallbackToast(agentName: string | undefined, nextModel: string): void {
+    this.input.client?.tui
+      ?.showToast({
+        body: {
+          title: 'Model fallback',
+          message: `${agentName ? `@${agentName} ` : ''}switched to ${nextModel}`,
+          variant: 'warning',
+          duration: 6_000,
+        },
+      })
+      .catch(() => {});
   }
 
   // ---------------------------------------------------------------------------
