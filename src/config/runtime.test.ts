@@ -114,6 +114,9 @@ describe('RuntimeConfig', () => {
     expect(runtime.disabledAgents).toEqual(new Set(['observer']));
     expect(runtime.disabledTools).toEqual([]);
     expect(runtime.disabledMcps).toEqual([]);
+    expect(runtime.disabledSkills).toEqual([]);
+    expect(runtime.customAgentNames).toEqual([]);
+    expect(runtime.modelArrays).toEqual({});
     expect(runtime.imageRouting).toBe('direct'); // observer disabled
     expect(runtime.multiplexer).toEqual({
       type: 'none',
@@ -153,6 +156,7 @@ describe('RuntimeConfig', () => {
       disabled_agents: ['observer', 'orchestrator'],
       disabled_tools: ['webfetch'],
       disabled_mcps: ['context7'],
+      disabled_skills: ['clonedeps'],
       fallback: { enabled: false, maxRetries: 5 },
       webfetch: { enabled: false },
       acpAgents: { myAcp: { command: 'echo' } },
@@ -168,6 +172,7 @@ describe('RuntimeConfig', () => {
     expect(runtime.disabledAgents).toEqual(new Set(['observer']));
     expect(runtime.disabledTools).toEqual(['webfetch']);
     expect(runtime.disabledMcps).toEqual(['context7']);
+    expect(runtime.disabledSkills).toEqual(['clonedeps']);
     expect(runtime.fallback.enabled).toBe(false);
     expect(runtime.fallback.maxRetries).toBe(5);
     expect(runtime.webfetch.enabled).toBe(false);
@@ -283,5 +288,102 @@ describe('RuntimeConfig', () => {
       agents: { explore: { model: 'alias-model' } },
     });
     expect(runtime.agent('explorer')?.model).toBe('alias-model');
+  });
+
+  test('customAgentNames lists unknown agents keys only', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        explorer: { model: 'builtin' },
+        myCustom: { model: 'custom/model' },
+      },
+    });
+    expect(runtime.customAgentNames).toEqual(['myCustom']);
+  });
+
+  test('modelArrays preserves variants, alias-aware, excludes disabled', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      disabled_agents: ['fixer'],
+      agents: {
+        // legacy alias key resolves to explorer
+        explore: {
+          model: [{ id: 'provider/a', variant: 'high' }, 'provider/b'],
+        },
+        fixer: { model: ['provider/f1', 'provider/f2'] },
+        custom: { model: ['provider/c1', { id: 'provider/c2', variant: 'v' }] },
+      },
+    });
+    expect(runtime.modelArrays).toEqual({
+      explorer: [{ id: 'provider/a', variant: 'high' }, { id: 'provider/b' }],
+      custom: [{ id: 'provider/c1' }, { id: 'provider/c2', variant: 'v' }],
+    });
+    // disabled agent chain is excluded
+    expect(runtime.modelArrays.fixer).toBeUndefined();
+  });
+
+  test('modelArrays includes multi-model councillor chains from council config', () => {
+    resetRegistry();
+    // Parsed council shape: the schema transform adds `models` (normalized
+    // chain with the shared variant applied) plus `model` (primary).
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      council: {
+        default_preset: 'default',
+        presets: {
+          default: {
+            alpha: {
+              model: 'provider/a1',
+              variant: 'fast',
+              prompt: undefined,
+              models: [
+                { id: 'provider/a1', variant: 'fast' },
+                { id: 'provider/a2', variant: 'fast' },
+              ],
+            },
+            beta: {
+              model: 'provider/b1',
+              variant: undefined,
+              prompt: undefined,
+              models: [{ id: 'provider/b1', variant: undefined }],
+            },
+          },
+        },
+      },
+    });
+    expect(runtime.modelArrays['councillor-alpha']).toEqual([
+      { id: 'provider/a1', variant: 'fast' },
+      { id: 'provider/a2', variant: 'fast' },
+    ]);
+    // single-model councillor has no chain
+    expect(runtime.modelArrays['councillor-beta']).toBeUndefined();
+    // chains derive from modelArrays (councillor chains included)
+    expect(runtime.runtimeChains['councillor-alpha']).toEqual([
+      'provider/a1',
+      'provider/a2',
+    ]);
+  });
+
+  test('modelArrays excludes disabled councillor seats', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      disabled_agents: ['councillor-alpha'],
+      council: {
+        default_preset: 'default',
+        presets: {
+          default: {
+            alpha: {
+              model: 'provider/a1',
+              variant: undefined,
+              prompt: undefined,
+              models: [
+                { id: 'provider/a1', variant: undefined },
+                { id: 'provider/a2', variant: undefined },
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(runtime.modelArrays['councillor-alpha']).toBeUndefined();
   });
 });

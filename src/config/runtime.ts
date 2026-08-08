@@ -264,6 +264,15 @@ export class RuntimeConfig {
     return this.pluginConfig?.disabled_tools ?? [];
   }
 
+  get disabledSkills(): readonly string[] {
+    return this.pluginConfig?.disabled_skills ?? [];
+  }
+
+  /** Custom agent names declared in config.agents (was getCustomAgentNames). */
+  get customAgentNames(): string[] {
+    return getCustomAgentNames(this.pluginConfig);
+  }
+
   get disabledMcps(): readonly string[] {
     return this.pluginConfig?.disabled_mcps ?? [];
   }
@@ -321,24 +330,62 @@ export class RuntimeConfig {
   }
 
   /**
-   * Agent name → model chain, derived once from array-configured models.
-   * Was modelArrayMap/runtimeChains in src/index.ts (alias-aware).
+   * Agent name → model array (id + optional variant), derived once from
+   * array-configured models. Was modelArrayMap in src/index.ts (built from
+   * created agentDefs: disabled agents excluded, alias-aware, variants
+   * preserved, plus multi-model councillor chains from council config).
    */
-  get runtimeChains(): Record<string, string[]> {
-    const chains: Record<string, string[]> = {};
+  get modelArrays(): Record<string, Array<{ id: string; variant?: string }>> {
+    const arrays: Record<string, Array<{ id: string; variant?: string }>> = {};
+    const disabled = this.disabledAgents;
     const agents = this.agents();
     const names = new Set<string>([
       ...ALL_AGENT_NAMES,
       ...getCustomAgentNames(this.pluginConfig),
     ]);
     for (const name of names) {
+      if (disabled.has(name)) {
+        continue;
+      }
       const override = this.aliasAwareOverride(agents, name);
       if (!Array.isArray(override?.model) || override.model.length === 0) {
         continue;
       }
-      chains[name] = override.model.map((entry) =>
-        typeof entry === 'string' ? entry : entry.id,
+      arrays[name] = override.model.map((entry) =>
+        typeof entry === 'string' ? { id: entry } : entry,
       );
+    }
+
+    // Multi-model councillors attach _modelArray in buildCouncillorAgents
+    // (src/agents/council-agents.ts), which is outside the agents() record.
+    // Mirror that derivation so the config hook's model-resolution pass
+    // covers councillor chains exactly as the original agentDefs loop did.
+    const presetName = this.council?.default_preset ?? 'default';
+    const preset = this.council?.presets?.[presetName];
+    if (preset) {
+      for (const [seat, cfg] of Object.entries(preset)) {
+        if (seat === 'master') {
+          continue;
+        }
+        const agentName = `councillor-${seat}`;
+        if (disabled.has(agentName) || cfg.models.length <= 1) {
+          continue;
+        }
+        arrays[agentName] = cfg.models;
+      }
+    }
+    return arrays;
+  }
+
+  /**
+   * Agent name → model chain (ids only), derived from modelArrays.
+   * Was runtimeChains in src/index.ts (alias-aware, disabled excluded,
+   * councillor chains included).
+   */
+  get runtimeChains(): Record<string, string[]> {
+    const chains: Record<string, string[]> = {};
+    for (const [name, models] of Object.entries(this.modelArrays)) {
+      chains[name] = models.map((entry) => entry.id);
     }
     return chains;
   }
