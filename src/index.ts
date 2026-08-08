@@ -143,6 +143,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Declare variables that must survive the try/catch for the return
   // closure. These are set inside the try block.
   let config: ReturnType<typeof loadPluginConfig>;
+  let runtime: RuntimeConfig;
   let disabledAgents: Set<string>;
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigs>;
@@ -219,9 +220,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       setActiveRuntimePreset(null);
     }
 
-    const runtime = RuntimeConfig.get(ctx.directory);
+    runtime = RuntimeConfig.get(ctx.directory);
     disabledAgents = getDisabledAgents(config);
-    rewriteDisplayNameMentions = createDisplayNameMentionRewriter(config);
+    rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     agentDefs = createAgents(runtime, { projectDirectory: ctx.directory });
     agents = getAgentConfigs(runtime, { projectDirectory: ctx.directory });
 
@@ -468,7 +469,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
-      resolveAgentName: (agent) => resolveRuntimeAgentName(config, agent),
+      resolveAgentName: (agent) => resolveRuntimeAgentName(runtime, agent),
       registerSessionAsOrchestrator: (sessionID) => {
         sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
@@ -1005,7 +1006,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
               ? info.model.modelID
               : undefined;
         if (typeof info?.agent === 'string' && providerID && modelID) {
-          const agentName = resolveRuntimeAgentName(config, info.agent);
+          const agentName = resolveRuntimeAgentName(runtime, info.agent);
           const model = `${providerID}/${modelID}`;
           const variant = resolveTuiVariantForModel(agentName, model);
           recordTuiAgentModel(
@@ -1179,7 +1180,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ) => {
       const rawAgent = input.agent ?? output?.message?.agent;
       const agent = rawAgent
-        ? resolveRuntimeAgentName(config, rawAgent)
+        ? resolveRuntimeAgentName(runtime, rawAgent)
         : undefined;
 
       if (

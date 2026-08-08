@@ -12,6 +12,7 @@ import {
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
   resolveImageRouting,
 } from '../config/constants';
+import { RuntimeConfig } from '../config/runtime';
 import { BackgroundJobBoard, createInternalAgentTextPart } from '../utils';
 import { createDisplayNameMentionRewriter } from '../utils/agent-variant';
 import { isTaggedPart } from './cache-safe-injection';
@@ -56,8 +57,9 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
   const lifecycle = new SessionLifecycle(() => {});
   const noopLog = () => {};
 
-  const rewriteDisplayNameMentions =
-    createDisplayNameMentionRewriter(undefined);
+  const rewriteDisplayNameMentions = createDisplayNameMentionRewriter(
+    RuntimeConfig.get('/tmp/cache-safety-fixture'),
+  );
 
   const shouldInjectOrchestratorReminder = (sessionID: string) =>
     sessionAgentMap.get(sessionID) === 'orchestrator';
