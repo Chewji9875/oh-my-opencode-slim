@@ -211,6 +211,9 @@ describe('isFailoverError', () => {
           "The model 'mistralai/mistral-small-4-119b-2603' has reached its end of life on 2026-07-27T00:00:00Z and is no longer available.",
       }),
     ).toBe(true);
+    // The AI SDK surfaces HTTP 410 as the bare title "Gone" in the message.
+    expect(isRetryableError({ message: 'AI_APICallError: Gone' })).toBe(true);
+    expect(isRetryableError('Gone')).toBe(true);
   });
 
   test('returns true for 401 upstream provider error message', () => {

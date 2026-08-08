@@ -104,6 +104,11 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bend of life\b/i,
   /\bno longer available\b/i,
   /\breached its end of life\b/i,
+  // The AI SDK surfaces HTTP 410 as the bare title "Gone" in the message,
+  // with the detail in responseBody. Match the bare title and explicit 410.
+  /(?:^|\s)Gone(?:$|\s)/i,
+  /\bHTTP 410\b/i,
+  /\bstatus.?410\b/i,
 ];
 
 function extractStatusCode(error: {
