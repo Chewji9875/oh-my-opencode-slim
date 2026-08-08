@@ -7,7 +7,6 @@
  * cache-payload.snapshot.test.ts.
  */
 
-import type { PluginConfig } from '../config';
 import {
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
   resolveImageRouting,
@@ -99,7 +98,7 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
 
   const filterAvailableSkills = createFilterAvailableSkillsHook(
     {} as never,
-    {} as PluginConfig,
+    RuntimeConfig.get('/tmp/cache-safety-fixture'),
   );
 
   const run = async (output: TransformOutput): Promise<void> => {
