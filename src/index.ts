@@ -1,10 +1,5 @@
 import type { Plugin, ToolDefinition } from '@opencode-ai/plugin';
-import {
-  createAgents,
-  getAgentConfigs,
-  getDisabledAgents,
-  isSubagent,
-} from './agents';
+import { createAgents, getAgentConfigs, isSubagent } from './agents';
 import { buildOrchestratorPrompt } from './agents/orchestrator';
 import { CompanionManager } from './companion/manager';
 import { ensureCompanionVersion } from './companion/updater';
@@ -18,7 +13,6 @@ import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
-  resolveImageRouting,
   TOAST_DURATION_MS,
 } from './config/constants';
 import { RuntimeConfig } from './config/runtime';
@@ -140,13 +134,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // closure. These are set inside the try block.
   let config: ReturnType<typeof loadPluginConfig>;
   let runtime: RuntimeConfig;
-  let disabledAgents: Set<string>;
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigs>;
   let mcps: ReturnType<typeof createBuiltinMcps>;
-  let modelArrayMap: Record<string, Array<{ id: string; variant?: string }>>;
-  let everModelSwitched: Set<string>;
-  let runtimeChains: Record<string, string[]>;
   let multiplexerConfig: MultiplexerConfig;
   let multiplexerEnabled: boolean;
   let multiplexerSessionManager: MultiplexerSessionManager;
@@ -217,26 +207,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
-    disabledAgents = getDisabledAgents(config);
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     agentDefs = createAgents(runtime, { projectDirectory: ctx.directory });
     agents = getAgentConfigs(runtime, { projectDirectory: ctx.directory });
-
-    // Build model array map and runtime fallback chains from _modelArray
-    // entries (when the user configures model as an array in
-    // agents.<name>.model). A single pass populates both data structures.
-    modelArrayMap = {} as Record<
-      string,
-      Array<{ id: string; variant?: string }>
-    >;
-    everModelSwitched = new Set<string>();
-    runtimeChains = {} as Record<string, string[]>;
-    for (const agentDef of agentDefs) {
-      if (agentDef._modelArray?.length) {
-        modelArrayMap[agentDef.name] = agentDef._modelArray;
-        runtimeChains[agentDef.name] = agentDef._modelArray.map((m) => m.id);
-      }
-    }
 
     // Parse multiplexer config with defaults
     multiplexerConfig = runtime.multiplexer;
@@ -261,8 +234,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     mcps = createBuiltinMcps(runtime.disabledMcps);
     acpRunTools =
-      Object.keys(config.acpAgents ?? {}).length > 0
-        ? { acp_run: createAcpRunTool(config.acpAgents) }
+      Object.keys(runtime.acpAgents ?? {}).length > 0
+        ? { acp_run: createAcpRunTool(runtime.acpAgents) }
         : {};
     const webfetchModel = runtime.webfetch?.model;
     const webfetchModels = (() => {
@@ -553,12 +526,12 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     agentName: string,
     model: string,
   ): string | undefined {
-    const configEntry = config.agents?.[agentName];
+    const configEntry = runtime.agents()[agentName];
     const defaultVariant =
       typeof configEntry?.variant === 'string'
         ? configEntry.variant
         : undefined;
-    const chainMatches = modelArrayMap[agentName]?.filter(
+    const chainMatches = runtime.modelArrays[agentName]?.filter(
       (entry) => entry.id === model,
     );
     if (chainMatches) {
@@ -601,7 +574,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // primary agent) are respected. This guards against promptAsync calls
       // that omit the `agent` field from falling back to 'build' when the
       // orchestrator agent is temporarily unresolved.
-      if (config.setDefaultAgent !== false) {
+      if (runtime.setDefaultAgent) {
         const existing = (opencodeConfig as { default_agent?: string })
           .default_agent;
         if (!existing || isSubagent(existing)) {
@@ -623,11 +596,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
           // Only marks the agent if the model differs from the chain primary.
           // Once marked, stays disabled even if user switches back to chain[0].
           if (existing && typeof existing.model === 'string') {
-            const primary = modelArrayMap[name]?.[0]?.id;
+            const primary = runtime.modelArrays[name]?.[0]?.id;
             if (primary && existing.model !== primary) {
-              everModelSwitched.add(name);
+              runtime.everModelSwitched(name);
             }
-            if (everModelSwitched.has(name)) {
+            if (runtime.hasModelSwitched(name)) {
               foregroundFallback.disableChain(name);
             }
           }
@@ -652,8 +625,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // Runtime failover on API errors (e.g. rate limits
       // mid-conversation) is handled separately by
       // ForegroundFallbackManager via the event hook.
-      if (Object.keys(modelArrayMap).length > 0) {
-        for (const [agentName, models] of Object.entries(modelArrayMap)) {
+      if (Object.keys(runtime.modelArrays).length > 0) {
+        for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
           if (models.length === 0) continue;
 
           // Use the first model in the model array. Not all providers
@@ -828,8 +801,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const resolvedModel =
           typeof entry?.model === 'string'
             ? entry.model
-            : runtimeChains[agentDef.name]?.[0]
-              ? runtimeChains[agentDef.name][0]
+            : runtime.runtimeChains[agentDef.name]?.[0]
+              ? runtime.runtimeChains[agentDef.name][0]
               : typeof agentDef.config.model === 'string'
                 ? agentDef.config.model
                 : undefined;
@@ -855,9 +828,9 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       applyOrchestratorModelConfig({
         agents: configAgent,
-        enabled: config.stripOrchestratorModel,
-        presets: config.presets,
-        configPreset: config.preset,
+        enabled: runtime.stripOrchestratorModel,
+        presets: runtime.plugin?.presets,
+        configPreset: runtime.preset,
         runtimePreset: runtimePresetName,
       });
 
@@ -1213,7 +1186,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const orchestratorPrompt =
             typeof orchestratorDef?.config?.prompt === 'string'
               ? orchestratorDef.config.prompt
-              : buildOrchestratorPrompt(disabledAgents);
+              : buildOrchestratorPrompt(runtime.disabledAgents);
           output.system[0] = `${output.system[0] || ''}\n\n${orchestratorPrompt}`;
         }
       }
@@ -1257,11 +1230,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const imageResult = processImageAttachments({
         messages: typedOutput.messages,
         workDir: ctx.directory,
-        imageRouting: resolveImageRouting(
-          config.image_routing,
-          !disabledAgents.has('observer'),
-        ),
-        disabledAgents,
+        imageRouting: runtime.imageRouting,
+        disabledAgents: runtime.disabledAgents,
         log,
       });
       if (imageResult) {
