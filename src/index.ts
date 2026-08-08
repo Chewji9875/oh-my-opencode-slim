@@ -219,10 +219,11 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       setActiveRuntimePreset(null);
     }
 
+    const runtime = RuntimeConfig.get(ctx.directory);
     disabledAgents = getDisabledAgents(config);
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(config);
-    agentDefs = createAgents(config, { projectDirectory: ctx.directory });
-    agents = getAgentConfigs(config, { projectDirectory: ctx.directory });
+    agentDefs = createAgents(runtime, { projectDirectory: ctx.directory });
+    agents = getAgentConfigs(runtime, { projectDirectory: ctx.directory });
 
     // Build model array map and runtime fallback chains from _modelArray
     // entries (when the user configures model as an array in

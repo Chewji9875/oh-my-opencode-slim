@@ -261,11 +261,13 @@ export class RuntimeConfig {
   }
 
   get disabledTools(): readonly string[] {
-    return this.pluginConfig?.disabled_tools ?? [];
+    const value = this.pluginConfig?.disabled_tools;
+    return Array.isArray(value) ? value : [];
   }
 
   get disabledSkills(): readonly string[] {
-    return this.pluginConfig?.disabled_skills ?? [];
+    const value = this.pluginConfig?.disabled_skills;
+    return Array.isArray(value) ? value : [];
   }
 
   /** Custom agent names declared in config.agents (was getCustomAgentNames). */
