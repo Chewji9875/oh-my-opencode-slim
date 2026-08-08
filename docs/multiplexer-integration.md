@@ -241,7 +241,7 @@ Please analyze this codebase and create a documentation structure.
 | Multiplexer | Status | Notes |
 |-------------|--------|-------|
 | **Tmux** | ✅ Supported | Full layout control with `main-vertical`, `main-horizontal`, `tiled`, and more |
-| **Zellij** | ✅ Supported | Creates a dedicated `opencode-agents` tab by default; can open panes in the parent OpenCode tab with `zellij_pane_mode: "current-tab"`; maps `main-*` layouts to pane directions |
+| **Zellij** | ✅ Supported | Requires Zellij **0.44.1 or newer** (the adapter gates on `zellij --version` and skips itself on older releases; 0.44.0 lacks `new-pane --tab-id`). Creates a dedicated `opencode-agents` tab by default; can open panes in the parent OpenCode tab with `zellij_pane_mode: "current-tab"`; maps `main-*` layouts to pane directions |
 | **Herdr** | ✅ Supported | Splits panes in the current Herdr workspace; maps `main-vertical`/`even-horizontal`/`tiled` layouts to right splits and `main-horizontal`/`even-vertical` to down splits; no layout rebalancing (like Zellij) |
 | **cmux** | ✅ Supported | Requires cmux 0.64.14+ (0.64.17+ recommended); creates the agent column to the right and stacks subsequent agents downward without moving focus |
 | **Kitty** | ✅ Supported | Uses `kitten @ launch` to open new windows; requires `allow_remote_control` **and** `listen_on` in kitty.conf (OpenCode must run inside a kitty window; kitty exports `KITTY_LISTEN_ON` which the plugin passes through to reach kitty from detached subagent processes). No layout rebalancing (like Zellij/Herdr) |
@@ -304,9 +304,47 @@ configurable cmux column width.
 ```
 
 In `current-tab` mode, panes are targeted to the tab that contains the parent
-OpenCode pane, even if another Zellij tab is focused when a subagent starts.
-If the parent pane cannot be resolved, it falls back to the currently focused
-tab.
+OpenCode pane (resolved from the parent pane's `ZELLIJ_PANE_ID` via
+`list-panes`), even if another Zellij tab is focused when a subagent starts.
+If the parent pane cannot be resolved, the tab target is omitted and Zellij
+places the pane in whatever tab it has focused — no tab id is guessed.
+
+### Zellij details
+
+The Zellij adapter requires **Zellij 0.44.1 or newer**. Older releases are
+rejected at availability check time: `isAvailable()` parses `zellij
+--version` and returns `false` for anything below 0.44.1, so the Zellij
+backend is silently skipped rather than failing at pane-creation time.
+Version 0.44.0 in particular lacks `new-pane --tab-id`, which the
+`current-tab` mode needs to target the parent OpenCode tab directly.
+
+All pane mutations use **direct pane-id targeting** (no `focus-pane`, which is
+not a valid Zellij CLI action, and no `current-tab-info`, which is
+client-bound and fails from pane child processes):
+
+- `rename-pane <name> -p <paneId>` — best-effort pane title; a rename failure
+  never masks a failing attach write
+- `write-chars <chars> -p <paneId>` — writes the `opencode attach` command and
+  a trailing newline directly into the target pane; if either write fails the
+  pane reuse is reported as a failure
+- `list-panes --json --tab --all` — stable `tab_id` per pane, used to map the
+  parent `ZELLIJ_PANE_ID` to its tab
+- `new-pane --tab-id <id> --direction <dir>` — creates a pane in a specific
+  tab; if Zellij silently drops a `--direction` split (a crowded tab — up to
+  ~4 stacked panes — returns exit 0 but no pane id), the create is retried
+  once without the direction hint, letting Zellij place the pane in the
+  largest free space
+
+In `agent-tab` mode the parent tab (from `ZELLIJ_PANE_ID`) is restored after a
+pane is created in the `opencode-agents` tab, and also immediately after the
+tab is first created (`new-tab` moves client focus to the new tab). If the
+parent tab cannot be located, focus stays in the agent tab rather than
+guessing a tab id.
+
+Pane creation sequences are serialized per session: concurrent sub-agent
+starts are queued so tab/focus-mutating actions (new-tab, go-to-tab-by-id,
+new-pane) never interleave — a cross-tab create cannot race another create's
+focus restore.
 
 ### Legacy tmux config
 
