@@ -765,7 +765,6 @@ export class ForegroundFallbackManager {
         to: nextModel,
       });
       this.showFallbackToast(agentName, nextModel, error);
-      await this.persistFallbackModel(sessionID, nextModel);
     } catch (err) {
       log('[foreground-fallback] fallback attempt failed', {
         sessionID,
@@ -798,46 +797,6 @@ export class ForegroundFallbackManager {
         },
       })
       .catch(() => {});
-  }
-
-  /**
-   * Persist the fallback model as the session's active model so the TUI
-   * status bar reflects the switch. The v1 root client has no model setter
-   * (session.update is title-only), but the runtime exposes
-   * POST /api/session/{id}/model, which also broadcasts
-   * session.next.model.switched for the TUI. Fire-and-forget; a failed
-   * persist leaves the fallback working, just the status bar stale.
-   */
-  private async persistFallbackModel(
-    sessionID: string,
-    nextModel: string,
-  ): Promise<void> {
-    const ref = parseModelReference(nextModel);
-    if (!ref) return;
-    try {
-      const url = new URL(
-        `/api/session/${encodeURIComponent(sessionID)}/model`,
-        this.input.serverUrl,
-      );
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: { id: ref.modelID, providerID: ref.providerID } }),
-      });
-      if (!res.ok) {
-        log('[foreground-fallback] model persist failed', {
-          sessionID,
-          model: nextModel,
-          status: res.status,
-        });
-      }
-    } catch (err) {
-      // Non-fatal — the fallback already switched; only the status bar suffers.
-      log('[foreground-fallback] model persist error', {
-        sessionID,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
   }
 
   // ---------------------------------------------------------------------------
