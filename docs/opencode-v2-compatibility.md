@@ -79,6 +79,7 @@ the rest.
 | Foreground model fallback (rate-limit failover) | ✅ | ❌ | v2 locks the model at session creation; the plugin API has no per-prompt model override, session model-setter, or `/model` command, so mid-flight switching is impossible |
 | Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ | v1-TUI-pane integration; v2 renders subagents natively instead |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
+| Default agent on new session | ✅ orchestrator | ⚠️ TUI shows `build` | v1 sets `default_agent`; v2's TUI ignores that field and defaults to the first agent in its list (`build`). `run`/API still default to orchestrator. See [limitations](#limitations) |
 
 ## Installing on v2
 
@@ -164,6 +165,18 @@ plugin without v2 adding the corresponding capability:
   Declare MCPs in `opencode.json` (snippet above).
 - **Multiplexer panes.** tmux/zellij/herdr integration is a v1-TUI feature; v2
   renders subagents natively, so this is intentionally not ported.
+- **TUI default agent is `build`, not `orchestrator`.** v1 sets
+  `default_agent = "orchestrator"` in its config hook and the v1 TUI honors it.
+  The v2 adapter does call `ctx.agent.transform(draft => draft.default("orchestrator"))`,
+  which makes `run`/API default to the orchestrator — but the v2 TUI ignores the
+  `default_agent` config field entirely and instead defaults to the **first agent
+  in its list** (`list()[0]`, insertion order), which is v2's built-in `build`.
+  The plugin API offers no list-reorder, and `AgentDraft` has no "move to front".
+  Effect: `opencode2 run` and programmatic sessions use the orchestrator; opening
+  the v2 TUI / starting a new session there defaults to `build` (switch once; the
+  choice is persisted per-session via `saved.session[id].agent`, but each brand-new
+  session resets to `build`). Requires an upstream v2 change (TUI honoring
+  `default_agent`, or a list-order/default API for plugins) to fix.
 
 These are adapter/environment caveats that can be worked around:
 
