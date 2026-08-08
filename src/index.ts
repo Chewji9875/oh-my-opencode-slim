@@ -17,12 +17,7 @@ import {
 import { parseList } from './config/agent-mcps';
 import {
   AGENT_ALIASES,
-  DEFAULT_MAX_CONTEXT_LINES,
-  DEFAULT_MAX_RETAINED_SNAPSHOTS,
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
-  DEFAULT_MAX_SESSIONS_PER_AGENT,
-  DEFAULT_READ_CONTEXT_MAX_FILES,
-  DEFAULT_READ_CONTEXT_MIN_LINES,
   resolveImageRouting,
   TOAST_DURATION_MS,
 } from './config/constants';
@@ -244,12 +239,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
 
     // Parse multiplexer config with defaults
-    multiplexerConfig = {
-      type: config.multiplexer?.type ?? 'none',
-      layout: config.multiplexer?.layout ?? 'main-vertical',
-      main_pane_size: config.multiplexer?.main_pane_size ?? 60,
-      zellij_pane_mode: config.multiplexer?.zellij_pane_mode ?? 'agent-tab',
-    };
+    multiplexerConfig = runtime.multiplexer;
 
     // Get multiplexer instance for capability checks
     const multiplexer = getMultiplexer(multiplexerConfig);
@@ -269,7 +259,7 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       startAvailabilityCheck(multiplexerConfig);
     }
 
-    mcps = createBuiltinMcps(config.disabled_mcps);
+    mcps = createBuiltinMcps(runtime.disabledMcps);
     acpRunTools =
       Object.keys(config.acpAgents ?? {}).length > 0
         ? { acp_run: createAcpRunTool(config.acpAgents) }
@@ -302,17 +292,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       smallModelRef: () => runtime.smallModel(),
     });
     backgroundJobBoard = new BackgroundJobBoard({
-      maxReusablePerAgent:
-        config.backgroundJobs?.maxSessionsPerAgent ??
-        DEFAULT_MAX_SESSIONS_PER_AGENT,
-      maxContextLines:
-        config.backgroundJobs?.maxContextLines ?? DEFAULT_MAX_CONTEXT_LINES,
-      readContextMinLines:
-        config.backgroundJobs?.readContextMinLines ??
-        DEFAULT_READ_CONTEXT_MIN_LINES,
-      readContextMaxFiles:
-        config.backgroundJobs?.readContextMaxFiles ??
-        DEFAULT_READ_CONTEXT_MAX_FILES,
+      maxReusablePerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
+      maxContextLines: runtime.backgroundJobs.maxContextLines,
+      readContextMinLines: runtime.backgroundJobs.readContextMinLines,
+      readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
     });
 
     // Initialize coordinator as the sole writer to the board
@@ -321,8 +304,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     );
     backgroundJobSupervisor = new BackgroundJobSupervisor({
       backgroundJobStore: backgroundJobCoordinator,
-      wallClockTimeoutMs: config.backgroundJobs?.wallClockTimeoutMs ?? 0,
-      abortGraceMs: config.backgroundJobs?.abortGraceMs ?? 10_000,
+      wallClockTimeoutMs: runtime.backgroundJobs.wallClockTimeoutMs,
+      abortGraceMs: runtime.backgroundJobs.abortGraceMs,
       abort: (taskID) =>
         ctx.client.session.abort({
           path: { id: taskID },
@@ -374,20 +357,12 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
     reflectCommandHook = createReflectCommandHook();
     loopCommandHook = createLoopCommandHook();
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
-      strategy: config.backgroundJobs?.strategy ?? 'latest',
-      maxSessionsPerAgent:
-        config.backgroundJobs?.maxSessionsPerAgent ??
-        DEFAULT_MAX_SESSIONS_PER_AGENT,
-      maxRetainedSnapshots:
-        config.backgroundJobs?.maxRetainedSnapshots ??
-        DEFAULT_MAX_RETAINED_SNAPSHOTS,
-      readContextMinLines:
-        config.backgroundJobs?.readContextMinLines ??
-        DEFAULT_READ_CONTEXT_MIN_LINES,
-      readContextMaxFiles:
-        config.backgroundJobs?.readContextMaxFiles ??
-        DEFAULT_READ_CONTEXT_MAX_FILES,
-      continueOnIdle: config.backgroundJobs?.continueOnIdle === true,
+      strategy: runtime.backgroundJobs.strategy,
+      maxSessionsPerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
+      maxRetainedSnapshots: runtime.backgroundJobs.maxRetainedSnapshots,
+      readContextMinLines: runtime.backgroundJobs.readContextMinLines,
+      readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
+      continueOnIdle: runtime.backgroundJobs.continueOnIdle === true,
       backgroundJobBoard: backgroundJobCoordinator,
       backgroundJobSupervisor,
       shouldManageSession: (sessionID) =>
