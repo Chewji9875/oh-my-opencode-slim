@@ -197,6 +197,28 @@ describe('isFailoverError', () => {
     expect(isRetryableError({ data: { statusCode: 403 } })).toBe(true);
   });
 
+  test('returns true for 401 status code', () => {
+    expect(isRetryableError({ statusCode: 401 })).toBe(true);
+    expect(isRetryableError({ data: { statusCode: 401 } })).toBe(true);
+  });
+
+  test('returns true for 401 upstream provider error message', () => {
+    expect(
+      isRetryableError(
+        'AI_APICallError: Upstream request failed: [401] Provider returned error',
+      ),
+    ).toBe(true);
+    expect(
+      isRetryableError({
+        message:
+          'AI_APICallError: Upstream request failed: [401] Provider returned error',
+      }),
+    ).toBe(true);
+    expect(
+      isRetryableError({ data: { message: 'Upstream request failed [401]' } }),
+    ).toBe(true);
+  });
+
   test('returns true for "Forbidden" in message', () => {
     expect(isRetryableError({ message: '403 Forbidden' })).toBe(true);
   });

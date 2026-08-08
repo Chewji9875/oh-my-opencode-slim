@@ -58,6 +58,11 @@ const RETRYABLE_ERROR_PATTERNS = [
   // tried instead of retrying the same dead model.
   /no auth available/i,
   /auth_unavailable/i,
+  // 401 upstream auth/provider errors — the provider rejected the request,
+  // so the next model should be tried instead of retrying the dead one.
+  /\b401\b/,
+  /upstream request failed/i,
+  /provider returned error/i,
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
@@ -136,6 +141,7 @@ export function isFailoverError(error: unknown): boolean {
   const statusCode = extractStatusCode(err);
   if (
     statusCode === 429 ||
+    statusCode === 401 ||
     statusCode === 403 ||
     (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode))
   ) {
