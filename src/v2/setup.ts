@@ -15,6 +15,7 @@ import { buildPluginInput } from './client-shim';
 import type {
   V2Cleanup,
   V2Context,
+  V2SessionContextEvent,
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
 } from './types';
@@ -233,18 +234,24 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             }
           }
           // Messages transform: v2 Message.content -> v1 {info, parts} -> back.
+          // Pass the full v2 message as `info` (preserves id/metadata identity;
+          // isMessageWithParts only needs info.role + parts) with content as
+          // `parts` (shared ref so in-place part edits propagate). The transform
+          // can splice/reorder/replace the array (background-job-board
+          // injection does), so rebuild event.messages from the transformed
+          // v1messages rather than index-based content copy-back.
           if (messagesTransform && Array.isArray(event.messages)) {
             try {
               const v1messages = event.messages.map((m) => ({
-                info: { role: m.role },
+                info: m,
                 parts: m.content,
               }));
               await messagesTransform({}, { messages: v1messages });
-              event.messages.forEach((m, i) => {
-                m.content = (v1messages[i]?.parts ?? []) as Array<
-                  Record<string, unknown>
-                >;
-              });
+              event.messages = v1messages.map((m) => {
+                const info = m.info as { content?: unknown };
+                info.content = m.parts;
+                return m.info;
+              }) as V2SessionContextEvent['messages'];
             } catch (err) {
               log('[v2] messages transform bridge failed', String(err));
             }
@@ -272,10 +279,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         const reg = await ctx.tool.hook('execute.before', async (event) => {
           const e = event as V2ToolBeforeEvent;
           try {
+            const out = { args: e.input };
             await before(
               { tool: e.tool, sessionID: e.sessionID, callID: e.id },
-              { args: e.input },
+              out,
             );
+            // Hooks like apply-patch replace output.args with recovered/
+            // normalized arguments; write back so v2 executes the repaired
+            // input instead of the original.
+            e.input = out.args;
           } catch (err) {
             log('[v2] tool.execute.before bridge failed', String(err));
           }
