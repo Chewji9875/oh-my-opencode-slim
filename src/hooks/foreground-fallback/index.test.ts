@@ -778,9 +778,53 @@ describe('ForegroundFallbackManager session.error', () => {
         error: { statusCode: 410, message: 'AI_APICallError: Gone' },
       },
     });
-
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
     expect(showToast).not.toHaveBeenCalled();
+  });
+
+  test('persists the fallback model to the runtime so the TUI status bar updates', async () => {
+    const fetchMock = mock(async () => ({ ok: true, status: 200 }));
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+      serverUrl: new URL('http://localhost:4096'),
+    } as any);
+    const originalFetch = globalThis.fetch;
+    // @ts-expect-error tests inject a fetch stub
+    globalThis.fetch = fetchMock;
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { statusCode: 429, message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, {
+      method?: string;
+      body?: string;
+    }];
+    expect(url.toString()).toBe(
+      'http://localhost:4096/api/session/sess-1/model',
+    );
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body ?? '{}')).toEqual({
+      model: { id: 'gpt-4o', providerID: 'openai' },
+    });
+    globalThis.fetch = originalFetch;
   });
 });
 
