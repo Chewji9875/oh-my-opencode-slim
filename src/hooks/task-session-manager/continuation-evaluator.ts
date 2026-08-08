@@ -276,9 +276,7 @@ export async function evaluateContinuation(
       body: {
         agent: 'orchestrator',
         ...(modelSelection ? { model: modelSelection.model } : {}),
-        ...(modelSelection?.variant
-          ? { variant: modelSelection.variant }
-          : {}),
+        ...(modelSelection?.variant ? { variant: modelSelection.variant } : {}),
         parts: [createInternalAgentTextPart(CONTINUATION_NUDGE)],
       },
       throwOnError: true,

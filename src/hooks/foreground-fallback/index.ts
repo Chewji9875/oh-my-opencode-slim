@@ -537,10 +537,7 @@ export class ForegroundFallbackManager {
   // Core fallback logic
   // ---------------------------------------------------------------------------
 
-  private async tryFallback(
-    sessionID: string,
-    error?: unknown,
-  ): Promise<void> {
+  private async tryFallback(sessionID: string, error?: unknown): Promise<void> {
     if (!sessionID) return;
     if (this.inProgress.has(sessionID)) return;
     // No chain → no fallback. Skip before dedup so we don't stamp lastTrigger
