@@ -5203,7 +5203,9 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        parts: [expect.objectContaining({ synthetic: true })],
+        body: expect.objectContaining({
+          parts: [expect.objectContaining({ synthetic: true })],
+        }),
       }),
     );
   });
@@ -5229,9 +5231,11 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-        parts: [expect.objectContaining({ synthetic: true })],
+        path: { id: 'parent-1' },
+        body: expect.objectContaining({
+          agent: 'orchestrator',
+          parts: [expect.objectContaining({ synthetic: true })],
+        }),
       }),
     );
   });
@@ -5260,17 +5264,19 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     expect(get).toHaveBeenCalledWith({
-      sessionID: 'parent-1',
+      path: { id: 'parent-1' },
       throwOnError: true,
     });
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
       }),
     );
   });
@@ -5308,11 +5314,13 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
       }),
     );
   });
@@ -5346,14 +5354,16 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
+      body?: {
+        model?: Record<string, unknown>;
+        variant?: string;
+      };
     };
-    expect(request.model).toEqual({
+    expect(request?.body?.model).toEqual({
       providerID: 'current-provider',
       modelID: 'current-model',
     });
-    expect(request).not.toHaveProperty('variant');
+    expect(request?.body).not.toHaveProperty('variant');
   });
 
   test('only external messages replace the model fallback and clear its variant', async () => {
@@ -5404,14 +5414,16 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
+      body?: {
+        model?: Record<string, unknown>;
+        variant?: string;
+      };
     };
-    expect(request.model).toEqual({
+    expect(request?.body?.model).toEqual({
       providerID: 'new-provider',
       modelID: 'new-model',
     });
-    expect(request).not.toHaveProperty('variant');
+    expect(request?.body).not.toHaveProperty('variant');
   });
 
   test('a user message invalidates continuation while current model lookup is pending', async () => {

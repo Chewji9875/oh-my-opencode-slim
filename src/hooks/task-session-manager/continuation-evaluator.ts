@@ -242,7 +242,7 @@ export async function evaluateContinuation(
     if (deps.sessionSdk.get) {
       try {
         const sessionResponse = await deps.sessionSdk.get({
-          sessionID: parentSessionID,
+          path: { id: parentSessionID },
           throwOnError: true,
         });
         const session = isObjectRecord(sessionResponse?.data)
@@ -272,11 +272,15 @@ export async function evaluateContinuation(
     }
     committed = true;
     await deps.sessionSdk.promptAsync({
-      sessionID: parentSessionID,
-      agent: 'orchestrator',
-      ...(modelSelection ? { model: modelSelection.model } : {}),
-      ...(modelSelection?.variant ? { variant: modelSelection.variant } : {}),
-      parts: [createInternalAgentTextPart(CONTINUATION_NUDGE)],
+      path: { id: parentSessionID },
+      body: {
+        agent: 'orchestrator',
+        ...(modelSelection ? { model: modelSelection.model } : {}),
+        ...(modelSelection?.variant
+          ? { variant: modelSelection.variant }
+          : {}),
+        parts: [createInternalAgentTextPart(CONTINUATION_NUDGE)],
+      },
       throwOnError: true,
     });
   } catch (error) {
