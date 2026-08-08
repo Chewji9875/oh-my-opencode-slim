@@ -713,7 +713,7 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
   });
 
-  test('shows a toast when fallback switches models', async () => {
+  test('shows a toast when fallback switches models on a transient error', async () => {
     const { mocks } = createMockClient();
     const showToast = mock(async () => ({}));
     const mgr = new ForegroundFallbackManager(makeChains(), true, {
@@ -737,7 +737,7 @@ describe('ForegroundFallbackManager session.error', () => {
       type: 'session.error',
       properties: {
         sessionID: 'sess-1',
-        error: { statusCode: 401, message: 'Provider returned error' },
+        error: { statusCode: 429, message: 'Rate limit exceeded' },
       },
     });
 
@@ -749,6 +749,38 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(toastCall?.body?.title).toBe('Model fallback');
     expect(toastCall?.body?.variant).toBe('warning');
     expect(toastCall?.body?.message).toContain('openai');
+  });
+
+  test('does not toast when fallback is triggered by an inline 410/401 error', async () => {
+    const { mocks } = createMockClient();
+    const showToast = mock(async () => ({}));
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+      client: { tui: { showToast } },
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { statusCode: 410, message: 'AI_APICallError: Gone' },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(showToast).not.toHaveBeenCalled();
   });
 });
 

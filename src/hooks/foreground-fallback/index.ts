@@ -201,6 +201,39 @@ export function isRetryableError(error: unknown): boolean {
   return isFailoverError(error);
 }
 
+const INLINE_STATUS_CODES = new Set([401, 410]);
+
+/**
+ * True when the error is the kind the runtime surfaces inline (401 auth,
+ * 410 model gone) — persistent, user-visible, already in the conversation.
+ * These should NOT get a toast; the runtime's inline rendering is enough.
+ * Other failover errors (429 rate-limit, outage, etc.) get a toast instead.
+ */
+export function isInlineFailoverError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as {
+    statusCode?: unknown;
+    data?: { statusCode?: unknown; responseBody?: string; message?: string };
+    message?: string;
+  };
+  const statusCode = extractStatusCode(err);
+  if (statusCode !== undefined && INLINE_STATUS_CODES.has(statusCode)) {
+    return true;
+  }
+  const text = [
+    err.message ?? '',
+    err.data?.message ?? '',
+    err.data?.responseBody ?? '',
+  ].join(' ');
+  return (
+    /(?:^|\s)Gone(?:$|\s)/i.test(text) ||
+    /\b401\b/i.test(text) ||
+    /\b410\b/i.test(text) ||
+    /\bend of life\b/i.test(text) ||
+    /\bno longer available\b/i.test(text)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -358,7 +391,7 @@ export class ForegroundFallbackManager {
         // Failover-worthy error on an individual message
         if (info.error && isFailoverError(info.error)) {
           if (this.shouldTriggerFallback(sessionID)) {
-            await this.tryFallback(sessionID);
+            await this.tryFallback(sessionID, info.error);
           }
         } else if (isCompletedSuccessfulAssistant) {
           // Only a completed, successful assistant response proves recovery.
@@ -380,7 +413,7 @@ export class ForegroundFallbackManager {
           isFailoverError(props.error) &&
           this.shouldTriggerFallback(sessionID)
         ) {
-          await this.tryFallback(sessionID);
+          await this.tryFallback(sessionID, props.error);
         }
         break;
       }
@@ -428,7 +461,7 @@ export class ForegroundFallbackManager {
           // Otherwise (attempt === 1, or model didn't change, or outside
           // dedup window): process as genuine retry for current model.
           if (this.shouldTriggerFallback(sessionID)) {
-            await this.tryFallbackWithAbort(sessionID);
+            await this.tryFallbackWithAbort(sessionID, props.error);
           }
           break;
         }
@@ -504,7 +537,10 @@ export class ForegroundFallbackManager {
   // Core fallback logic
   // ---------------------------------------------------------------------------
 
-  private async tryFallback(sessionID: string): Promise<void> {
+  private async tryFallback(
+    sessionID: string,
+    error?: unknown,
+  ): Promise<void> {
     if (!sessionID) return;
     if (this.inProgress.has(sessionID)) return;
     // No chain → no fallback. Skip before dedup so we don't stamp lastTrigger
@@ -518,7 +554,7 @@ export class ForegroundFallbackManager {
 
     this.inProgress.add(sessionID);
     try {
-      await this.execFallback(sessionID);
+      await this.execFallback(sessionID, error);
     } finally {
       this.inProgress.delete(sessionID);
     }
@@ -535,7 +571,10 @@ export class ForegroundFallbackManager {
    * without a replacement model only races owners that manage their own
    * lifecycle (e.g. CouncilManager for councillor) and produces noise.
    */
-  private async tryFallbackWithAbort(sessionID: string): Promise<void> {
+  private async tryFallbackWithAbort(
+    sessionID: string,
+    error?: unknown,
+  ): Promise<void> {
     if (!sessionID) return;
     if (this.inProgress.has(sessionID)) return;
     if (!this.hasFallbackChain(sessionID)) return;
@@ -545,7 +584,7 @@ export class ForegroundFallbackManager {
     try {
       const session = getClient(this.input).session;
       await session.abort({ path: { id: sessionID } });
-      await this.execFallback(sessionID);
+      await this.execFallback(sessionID, error);
     } finally {
       this.inProgress.delete(sessionID);
     }
@@ -569,7 +608,10 @@ export class ForegroundFallbackManager {
     return false;
   }
 
-  private async execFallback(sessionID: string): Promise<void> {
+  private async execFallback(
+    sessionID: string,
+    error?: unknown,
+  ): Promise<void> {
     const session = getClient(this.input).session;
     try {
       // After the chain has been exhausted twice (reset retry failed and we
@@ -722,7 +764,7 @@ export class ForegroundFallbackManager {
         from: currentModel,
         to: nextModel,
       });
-      this.showFallbackToast(agentName, nextModel);
+      this.showFallbackToast(agentName, nextModel, error);
     } catch (err) {
       log('[foreground-fallback] fallback attempt failed', {
         sessionID,
@@ -733,10 +775,18 @@ export class ForegroundFallbackManager {
 
   /**
    * Surface a TUI toast when the fallback switches models, so the user isn't
-   * surprised by a different model responding (e.g. after a 401/rate-limit
-   * on the primary). Fire-and-forget; a failed toast is never fatal.
+   * surprised by a different model responding (e.g. after a rate-limit on the
+   * primary). 401/410 errors (auth, model gone) are already rendered inline by
+   * the runtime, so those get no toast — the inline rendering is the notice.
+   * Fire-and-forget; a failed toast is never fatal.
    */
-  private showFallbackToast(agentName: string | undefined, nextModel: string): void {
+  private showFallbackToast(
+    agentName: string | undefined,
+    nextModel: string,
+    error?: unknown,
+  ): void {
+    // 401/410 surface inline in the conversation; don't toast on top of them.
+    if (isInlineFailoverError(error)) return;
     this.input.client?.tui
       ?.showToast({
         body: {
