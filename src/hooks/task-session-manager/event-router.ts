@@ -59,6 +59,8 @@ export async function handleEvent(
       shouldManageSession: (sessionID: string) => boolean;
       registerSessionAsOrchestrator?: (sessionID: string) => void;
       isFallbackInProgress?: (sessionID: string) => boolean;
+      /** True when foreground fallback could still recover the session. */
+      willAttemptFallback?: (sessionID: string) => boolean;
     };
     idleReconciler: {
       scheduleIdleReconciliation(sessionID: string): void;
@@ -219,24 +221,24 @@ export async function handleEvent(
       deps.continuationTokens.invalidateContinuation(sessionId);
     }
     if (sessionId && deps.options.shouldManageSession(sessionId)) {
-      // Only clear injected terminal jobs for fatal errors.
-      // Rate-limit errors are recovered by ForegroundFallbackManager
-      // (abort + reprompt with fallback model); clearing the injected
-      // job state here would make the orchestrator lose track of
-      // completed background tasks and unable to dispatch follow-ups.
       const props = input.event.properties as { error?: unknown } | undefined;
       // Only clear injected terminal jobs for fatal errors.
       // Rate-limit errors are recovered by ForegroundFallbackManager
       // (abort + reprompt with fallback model); clearing the injected
       // job state here would make the orchestrator lose track of
       // completed background tasks and unable to dispatch follow-ups.
-      // Persistent 401/410 (auth, model gone) are NOT recovered once the
-      // chain is exhausted, so they must still surface as errors on the
-      // board instead of a false completion via idle-reconciliation.
+      // Persistent 401/410 (auth, model gone) may ALSO be recovered by a
+      // fallback reprompt, so defer while recovery is still possible:
+      // if the reprompt fails, the session errors again and the error is
+      // recorded then. Only when no chain exists, fallback is disabled,
+      // or the chain is exhausted is the error final — record it now so
+      // the board shows a failure instead of a false completion via
+      // idle-reconciliation.
       if (
         !props?.error ||
         !isFailoverError(props.error) ||
-        isInlineFailoverError(props.error)
+        (isInlineFailoverError(props.error) &&
+          !deps.options.willAttemptFallback?.(sessionId))
       ) {
         deps.terminalJobsInjectedByParent.delete(sessionId);
         deps.pendingInjectedTerminalJobsByParent.delete(sessionId);

@@ -93,6 +93,7 @@ type HookOptions = {
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
+  willAttemptFallback?: (sessionID: string) => boolean;
   coordinator?: SessionLifecycle;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
 };
@@ -122,6 +123,7 @@ function createHook(options?: HookOptions) {
       shouldManageSession: options?.shouldManageSession ?? (() => true),
       registerSessionAsOrchestrator: options?.registerSessionAsOrchestrator,
       isFallbackInProgress: options?.isFallbackInProgress,
+      willAttemptFallback: options?.willAttemptFallback,
       coordinator: options?.coordinator,
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
     },
@@ -3517,11 +3519,15 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('LLM proxy connection refused');
   });
 
-  test('persistent 401 session.error on managed session records board error', async () => {
+  test('persistent 401 session.error on managed session records board error when fallback cannot recover', async () => {
     // 401/410 are persistent (not recovered once the fallback chain is
     // exhausted) and must surface as an error, not a false completion.
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      // No chain / chain exhausted / fallback disabled → error is final.
+      willAttemptFallback: () => false,
+    });
 
     board.registerLaunch({
       taskID: 'parent-1',
@@ -3544,6 +3550,39 @@ describe('task-session-manager hook', () => {
     const job = board.get('parent-1');
     expect(job?.state).toBe('error');
     expect(job?.resultSummary).toBe('Unauthorized');
+  });
+
+  test('defers board error for 401 while foreground fallback can recover', async () => {
+    // A 401/410 with a fallback model still available is reprompted by
+    // ForegroundFallbackManager; terminalizing the job at session.error
+    // time would leave a recovered job permanently failed (the board
+    // refuses terminal → running transitions).
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    // Job stays running; the fallback reprompt decides the outcome.
+    expect(board.get('parent-1')?.state).toBe('running');
   });
 
   test('session.idle does not overwrite error state with completed', async () => {

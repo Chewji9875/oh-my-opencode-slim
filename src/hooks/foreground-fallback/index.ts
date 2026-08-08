@@ -310,6 +310,22 @@ export class ForegroundFallbackManager {
   }
 
   /**
+   * True when this manager could still recover the session via fallback:
+   * fallback is enabled, the session has a chain, and the chain is not
+   * exhausted (stage < 2). Consumers (task-session-manager event router)
+   * defer terminal bookkeeping for persistent 401/410 errors until
+   * recovery is actually impossible.
+   */
+  willAttemptFallback(sessionID: string): boolean {
+    if (!this.enabled) return false;
+    if (this.inProgress.has(sessionID)) return true;
+    return (
+      this.hasFallbackChain(sessionID) &&
+      (this.chainExhaustion.get(sessionID) ?? 0) < 2
+    );
+  }
+
+  /**
    * Disable the fallback chain for a specific agent.
    * After calling this, rate-limit errors for that agent surface instead of
    * silently falling back through the chain.

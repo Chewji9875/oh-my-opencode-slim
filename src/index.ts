@@ -385,6 +385,8 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       },
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
+      willAttemptFallback: (sessionID) =>
+        foregroundFallback.willAttemptFallback(sessionID),
       coordinator: sessionLifecycle,
     });
 

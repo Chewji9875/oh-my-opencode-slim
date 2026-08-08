@@ -2114,6 +2114,55 @@ describe('ForegroundFallbackManager session.deleted', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ForegroundFallbackManager - willAttemptFallback
+// ---------------------------------------------------------------------------
+
+describe('ForegroundFallbackManager willAttemptFallback', () => {
+  test('returns true when the session has a chain and it is not exhausted', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'orchestrator');
+    expect(mgr.willAttemptFallback('sess-1')).toBe(true);
+  });
+
+  test('returns false when fallback is disabled', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), false, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'orchestrator');
+    expect(mgr.willAttemptFallback('sess-1')).toBe(false);
+  });
+
+  test('returns false for a known agent without a configured chain', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    // oracle has no chain in makeChains(); resolveChain must not bleed
+    // into another agent's chain, so no fallback is possible.
+    mgr.registerSessionAgent('sess-oracle', 'oracle');
+    expect(mgr.willAttemptFallback('sess-oracle')).toBe(false);
+  });
+
+  test('returns false when the chain is exhausted (stage 2)', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'orchestrator');
+    (mgr as any).chainExhaustion.set('sess-1', 2);
+    expect(mgr.willAttemptFallback('sess-1')).toBe(false);
+  });
+
+  test('returns true while a fallback is in flight even after exhaustion', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    (mgr as any).inProgress.add('sess-1');
+    expect(mgr.willAttemptFallback('sess-1')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ForegroundFallbackManager - resolveChain correctness
 // ---------------------------------------------------------------------------
 

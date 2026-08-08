@@ -72,6 +72,11 @@ export function createTaskSessionManagerHook(
      *  active child job as completed when the session was aborted for
      *  model fallback rather than natural completion. */
     isFallbackInProgress?: (sessionID: string) => boolean;
+    /** True when foreground fallback could still recover the session
+     *  (enabled, chain exists, chain not exhausted). Lets the event
+     *  router defer terminal bookkeeping for persistent 401/410 errors
+     *  until recovery is impossible. */
+    willAttemptFallback?: (sessionID: string) => boolean;
     coordinator?: SessionLifecycle;
     /** Test seam only; production always uses the reconciliation delay. */
     idleReconcileDelayMs?: number;
