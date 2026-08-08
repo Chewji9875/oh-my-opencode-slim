@@ -21,10 +21,7 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
-import {
-  abortSessionWithTimeout,
-  parseModelReference,
-} from '../../utils/session';
+import { parseModelReference } from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 
@@ -529,7 +526,9 @@ export class ForegroundFallbackManager {
 
     this.inProgress.add(sessionID);
     try {
-      await abortSessionWithTimeout(getClient(this.input), sessionID);
+      const session = ((this.input as any).client?.session ??
+        getClient(this.input).session) as PluginInput['client']['session'];
+      await session.abort({ path: { id: sessionID } });
       await this.execFallback(sessionID);
     } finally {
       this.inProgress.delete(sessionID);
@@ -555,6 +554,8 @@ export class ForegroundFallbackManager {
   }
 
   private async execFallback(sessionID: string): Promise<void> {
+    const session = ((this.input as any).client?.session ??
+      getClient(this.input).session) as PluginInput['client']['session'];
     try {
       // After the chain has been exhausted twice (reset retry failed and we
       // aborted), do not intervene again for this session: re-entering would
@@ -604,7 +605,7 @@ export class ForegroundFallbackManager {
                 tried: [...tried],
               },
             );
-            await abortSessionWithTimeout(getClient(this.input), sessionID);
+            await session.abort({ path: { id: sessionID } });
             return;
           }
           this.chainExhaustion.set(sessionID, 1);
@@ -627,7 +628,7 @@ export class ForegroundFallbackManager {
             agentName,
             tried: [...tried],
           });
-          await abortSessionWithTimeout(getClient(this.input), sessionID);
+          await session.abort({ path: { id: sessionID } });
           return;
         }
       }
@@ -645,8 +646,8 @@ export class ForegroundFallbackManager {
       }
 
       // Retrieve the last user message to re-submit with the fallback model.
-      const result = await getClient(this.input).session.messages({
-        sessionID,
+      const result = await session.messages({
+        path: { id: sessionID },
       });
       // result.data may contain partial/streaming messages whose `info` is
       // undefined at runtime (OpenCode violates its own declared type), and
@@ -665,7 +666,7 @@ export class ForegroundFallbackManager {
 
       // promptAsync queues the prompt and returns immediately - this avoids
       // blocking the event handler while waiting for a full LLM response.
-      const sessionClient = getClient(this.input).session;
+      const sessionClient = session;
       if (typeof sessionClient.promptAsync !== 'function') {
         log('[foreground-fallback] promptAsync unavailable', { sessionID });
         return;
@@ -677,31 +678,26 @@ export class ForegroundFallbackManager {
       }>;
 
       const promptBody = {
-        // ponytail: replayed parts are MessagePart[] from the transform API
-        // or a synthesized v2 text part, but promptAsync expects
-        // TextPartInput[] — runtime-compatible, TS doesn't know the `type`
-        // field is already 'text'.
-        parts: [
-          ...replayParts,
-          createInternalAgentTextPart('Foreground fallback replay.'),
-        ],
-        model: ref,
-        ...(agentName ? { agent: agentName } : {}),
+        path: { id: sessionID },
+        body: {
+          parts: [
+            ...replayParts,
+            createInternalAgentTextPart('Foreground fallback replay.'),
+          ],
+          model: ref,
+          ...(agentName ? { agent: agentName } : {}),
+        },
       };
 
-      // Try queuing the fallback prompt without aborting first. If OpenCode
-      // accepts it (204), the fallback model replaces the retry loop
-      // transparently — no dialog, no session error shown to the user.
-      // If promptAsync throws (e.g. session busy), fall back to abort+retry.
       try {
-        await sessionClient.promptAsync({ sessionID, ...promptBody });
+        await sessionClient.promptAsync(promptBody);
       } catch (_promptErr) {
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
         });
-        await abortSessionWithTimeout(getClient(this.input), sessionID);
+        await session.abort({ path: { id: sessionID } });
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
-        await sessionClient.promptAsync({ sessionID, ...promptBody });
+        await sessionClient.promptAsync(promptBody);
       }
 
       this.sessionModel.set(sessionID, nextModel);

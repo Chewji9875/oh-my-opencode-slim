@@ -334,10 +334,10 @@ describe('ForegroundFallbackManager session.error', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].sessionID).toBe('sess-1');
+    expect(call[0].path.id).toBe('sess-1');
     // Should have picked the next model after anthropic/claude-opus-4-5
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('triggers fallback on unavailable provider channel session.error', async () => {
@@ -372,8 +372,8 @@ describe('ForegroundFallbackManager session.error', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('triggers fallback on CliProxyAPI auth-unavailable session.error', async () => {
@@ -408,8 +408,8 @@ describe('ForegroundFallbackManager session.error', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('triggers fallback on cannot-connect session.error', async () => {
@@ -443,8 +443,8 @@ describe('ForegroundFallbackManager session.error', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('marks the replayed user prompt as an internal initiator', async () => {
@@ -469,7 +469,7 @@ describe('ForegroundFallbackManager session.error', () => {
     });
 
     const call = mocks.promptAsync.mock.calls[0] as [{ parts: unknown[] }];
-    expect(call[0].parts.some(isInternalInitiatorPart)).toBe(true);
+    expect(call[0].body.parts.some(isInternalInitiatorPart)).toBe(true);
   });
 
   test('skips malformed messages without info when locating the last user message', async () => {
@@ -515,7 +515,7 @@ describe('ForegroundFallbackManager session.error', () => {
     const call = mocks.promptAsync.mock.calls[0] as [
       { parts: Array<{ text?: string }> },
     ];
-    expect(call[0].parts[0]?.text).toBe('real prompt');
+    expect(call[0].body.parts[0]?.text).toBe('real prompt');
   });
 
   test('replays the last user message from v2-shaped session.messages data', async () => {
@@ -561,7 +561,7 @@ describe('ForegroundFallbackManager session.error', () => {
     const call = mocks.promptAsync.mock.calls[0] as [
       { parts: Array<{ text?: string }> },
     ];
-    expect(call[0].parts[0]?.text).toBe('v2 prompt');
+    expect(call[0].body.parts[0]?.text).toBe('v2 prompt');
   });
 
   test('prefers the latest user message across mixed v1/v2 shapes', async () => {
@@ -602,7 +602,7 @@ describe('ForegroundFallbackManager session.error', () => {
     const call = mocks.promptAsync.mock.calls[0] as [
       { parts: Array<{ text?: string }> },
     ];
-    expect(call[0].parts[0]?.text).toBe('v2 prompt');
+    expect(call[0].body.parts[0]?.text).toBe('v2 prompt');
   });
 
   test('does nothing when error is not a rate limit', async () => {
@@ -707,8 +707,8 @@ describe('ForegroundFallbackManager message.updated', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('uses agent name from message.updated to select correct chain', async () => {
@@ -739,8 +739,8 @@ describe('ForegroundFallbackManager message.updated', () => {
     ];
     // explorer chain: ['openai/gpt-4o-mini', 'anthropic/claude-haiku']
     // current=gpt-4o-mini is tried → next = claude-haiku
-    expect(call[0].model.providerID).toBe('anthropic');
-    expect(call[0].model.modelID).toBe('claude-haiku');
+    expect(call[0].body.model.providerID).toBe('anthropic');
+    expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
 });
 
@@ -831,7 +831,7 @@ describe('ForegroundFallbackManager session.status', () => {
     const call = mocks.promptAsync.mock.calls[0] as [
       { model: { providerID: string; modelID: string } },
     ];
-    expect(call[0].model).toEqual({ providerID: 'openai', modelID: 'o3' });
+    expect(call[0].body.model).toEqual({ providerID: 'openai', modelID: 'o3' });
   });
 
   test('includes the sticky child agent in fallback promptAsync body', async () => {
@@ -872,8 +872,8 @@ describe('ForegroundFallbackManager session.status', () => {
         model: { providerID: string; modelID: string };
       },
     ];
-    expect(call[0].agent).toBe('oracle');
-    expect(call[0].model).toEqual({ providerID: 'openai', modelID: 'o3' });
+    expect(call[0].body.agent).toBe('oracle');
+    expect(call[0].body.model).toEqual({ providerID: 'openai', modelID: 'o3' });
   });
 
   test('triggers fallback on retry status with rate limit message', async () => {
@@ -1218,7 +1218,7 @@ describe('ForegroundFallbackManager session.status', () => {
     const firstCall = mocks.promptAsync.mock.calls[0] as [
       { model: { providerID: string; modelID: string } },
     ];
-    expect(firstCall[0].model).toEqual({
+    expect(firstCall[0].body.model).toEqual({
       providerID: 'openai',
       modelID: 'gpt-4o',
     });
@@ -1294,7 +1294,7 @@ describe('ForegroundFallbackManager session.status', () => {
     const firstCall = mocks.promptAsync.mock.calls[0] as [
       { model: { providerID: string; modelID: string } },
     ];
-    expect(firstCall[0].model).toEqual({
+    expect(firstCall[0].body.model).toEqual({
       providerID: 'openai',
       modelID: 'gpt-4o',
     });
@@ -1320,7 +1320,7 @@ describe('ForegroundFallbackManager session.status', () => {
     const secondCall = mocks.promptAsync.mock.calls[1] as [
       { model: { providerID: string; modelID: string } },
     ];
-    expect(secondCall[0].model).toEqual({
+    expect(secondCall[0].body.model).toEqual({
       providerID: 'google',
       modelID: 'gemini-2.5-pro',
     });
@@ -1728,7 +1728,9 @@ describe('ForegroundFallbackManager deduplication', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
     expect(mocks.promptAsync.mock.calls[0][0]).toEqual(
       expect.objectContaining({
-        model: { providerID: 'openai', modelID: 'gpt-4o' },
+        body: expect.objectContaining({
+          model: { providerID: 'openai', modelID: 'gpt-4o' },
+        }),
       }),
     );
 
@@ -1748,7 +1750,9 @@ describe('ForegroundFallbackManager deduplication', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
     expect(mocks.promptAsync.mock.calls[1][0]).toEqual(
       expect.objectContaining({
-        model: { providerID: 'google', modelID: 'gemini-2.5-pro' },
+        body: expect.objectContaining({
+          model: { providerID: 'google', modelID: 'gemini-2.5-pro' },
+        }),
       }),
     );
   });
@@ -1786,8 +1790,8 @@ describe('ForegroundFallbackManager subagent.session.created', () => {
     // explorer chain: ['openai/gpt-4o-mini', 'anthropic/claude-haiku']
     // agentName known → currentModel inferred as chain[0] (primary)
     // primary is tried → fallback picks claude-haiku
-    expect(call[0].model.providerID).toBe('anthropic');
-    expect(call[0].model.modelID).toBe('claude-haiku');
+    expect(call[0].body.model.providerID).toBe('anthropic');
+    expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
 });
 
@@ -1841,8 +1845,8 @@ describe('ForegroundFallbackManager session.deleted', () => {
     ];
     // orchestrator chain: ['anthropic/claude-opus-4-5', 'openai/gpt-4o', 'google/gemini-2.5-pro']
     // no current model → first untried = anthropic/claude-opus-4-5
-    expect(call[0].model.providerID).toBe('anthropic');
-    expect(call[0].model.modelID).toBe('claude-opus-4-5');
+    expect(call[0].body.model.providerID).toBe('anthropic');
+    expect(call[0].body.model.modelID).toBe('claude-opus-4-5');
   });
 
   test('ignores session.deleted with no sessionID', async () => {
@@ -1998,8 +2002,8 @@ describe('ForegroundFallbackManager resolveChain cross-agent isolation', () => {
     const call = mocks.promptAsync.mock.calls[0] as [
       { model: { providerID: string; modelID: string } },
     ];
-    expect(call[0].model.providerID).toBe('openai');
-    expect(call[0].model.modelID).toBe('gpt-4o');
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
   test('does NOT bleed into other agent chains for non-omos agents without a chain', async () => {
@@ -2205,7 +2209,7 @@ describe('ForegroundFallbackManager disableChain', () => {
     ];
     // explorer chain: ['openai/gpt-4o-mini', 'anthropic/claude-haiku']
     // current = gpt-4o-mini is tried → next = claude-haiku
-    expect(call[0].model.providerID).toBe('anthropic');
-    expect(call[0].model.modelID).toBe('claude-haiku');
+    expect(call[0].body.model.providerID).toBe('anthropic');
+    expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
 });
