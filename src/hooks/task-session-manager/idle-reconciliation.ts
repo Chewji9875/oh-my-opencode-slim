@@ -111,40 +111,56 @@ export function createIdleReconciler(options: {
     idleObservedAt: number,
   ): void {
     if (errorTerminalizeTimers.has(sessionID)) return;
-    if (options.isFallbackInProgress?.(sessionID)) return;
+    // If a fallback attempt is still in flight, defer to the timer
+    // callback: the fallback may recover the session (busy cancels us)
+    // or fail silently (execFallback catch only logs).  Rescheduling
+    // here rather than bailing ensures we keep watching until the
+    // fallback completes and the outcome is known.
+    const schedule = (): void => {
+      const timer = setTimeout(() => {
+        errorTerminalizeTimers.delete(sessionID);
+        if (options.isFallbackInProgress?.(sessionID)) {
+          // Fallback still in flight — reschedule and keep watching.
+          schedule();
+          return;
+        }
 
-    const timer = setTimeout(() => {
-      errorTerminalizeTimers.delete(sessionID);
-      if (options.isFallbackInProgress?.(sessionID)) return;
+        const job = options.backgroundJobBoard.get(sessionID);
+        if (job?.state !== 'running') return;
 
-      const job = options.backgroundJobBoard.get(sessionID);
-      if (job?.state !== 'running') return;
+        // Busy after the idle means the session recovered (e.g. FG re-prompt).
+        if (
+          job.lastLiveBusyAt !== undefined &&
+          job.lastLiveBusyAt > idleObservedAt
+        ) {
+          return;
+        }
 
-      // Busy after the idle means the session recovered (e.g. FG re-prompt).
-      if (
-        job.lastLiveBusyAt !== undefined &&
-        job.lastLiveBusyAt > idleObservedAt
-      ) {
-        return;
-      }
+        log(
+          '[task-session-manager] terminalized job from idle after deferred error',
+          {
+            sessionID,
+            alias: job.alias,
+            parentSessionID: job.parentSessionID,
+          },
+        );
+        options.backgroundJobBoard.updateStatus({
+          taskID: sessionID,
+          state: 'error',
+          resultSummary:
+            'Session error after failed model fallback (auth/model unavailable)',
+        });
+        options.onErrorTerminalize?.(sessionID);
+      }, options.idleReconcileDelayMs).unref?.();
+      errorTerminalizeTimers.set(sessionID, timer);
+    };
 
-      log(
-        '[task-session-manager] terminalized job from idle after deferred error',
-        {
-          sessionID,
-          alias: job.alias,
-          parentSessionID: job.parentSessionID,
-        },
-      );
-      options.backgroundJobBoard.updateStatus({
-        taskID: sessionID,
-        state: 'error',
-        resultSummary:
-          'Session error after failed model fallback (auth/model unavailable)',
-      });
-      options.onErrorTerminalize?.(sessionID);
-    }, options.idleReconcileDelayMs).unref?.();
-    errorTerminalizeTimers.set(sessionID, timer);
+    if (options.isFallbackInProgress?.(sessionID)) {
+      // Fallback in flight when we first schedule — start watching anyway.
+      schedule();
+      return;
+    }
+    schedule();
   }
 
   function clearIdleTimers(sessionID: string): void {
