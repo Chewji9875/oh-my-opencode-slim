@@ -34,9 +34,9 @@ describe('providers', () => {
     const agents = (config.presets as any).openai;
     expect(agents).toBeDefined();
     expect(agents.orchestrator.model).toBe('openai/gpt-5.6-terra');
-    expect(agents.orchestrator.variant).toBe('xhigh');
+    expect(agents.orchestrator.variant).toBe('high');
     expect(agents.fixer.model).toBe('openai/gpt-5.6-luna');
-    expect(agents.fixer.variant).toBe('xhigh');
+    expect(agents.fixer.variant).toBe('high');
   });
 
   test('preserves exact OpenAI model and variant mappings', () => {
@@ -48,12 +48,12 @@ describe('providers', () => {
 
     const agents = (config.presets as any).openai;
     const expected = {
-      orchestrator: { model: 'openai/gpt-5.6-terra', variant: 'xhigh' },
-      oracle: { model: 'openai/gpt-5.6-sol', variant: 'xhigh' },
+      orchestrator: { model: 'openai/gpt-5.6-terra', variant: 'high' },
+      oracle: { model: 'openai/gpt-5.6-sol', variant: 'high' },
       librarian: { model: 'openai/gpt-5.6-luna', variant: 'low' },
       explorer: { model: 'openai/gpt-5.6-luna', variant: 'low' },
       designer: { model: 'openai/gpt-5.6-luna', variant: 'medium' },
-      fixer: { model: 'openai/gpt-5.6-luna', variant: 'xhigh' },
+      fixer: { model: 'openai/gpt-5.6-luna', variant: 'high' },
     } as const;
 
     expect(MODEL_MAPPINGS.openai).toEqual(expected);
