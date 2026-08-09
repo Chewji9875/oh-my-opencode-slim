@@ -178,7 +178,9 @@ function verifyFreshInstall(tarballPath: string) {
 
     const smokeScript = [
       "import pkg from 'oh-my-opencode-slim';",
-      "if (typeof pkg !== 'function') throw new Error('default export is not a function');",
+      "if (pkg?.id !== 'oh-my-opencode-slim') throw new Error('default export has an unexpected plugin id');",
+      "if (typeof pkg.server !== 'function') throw new Error('default export is missing a server plugin factory');",
+      "if (typeof pkg.setup !== 'function') throw new Error('default export is missing a v2 setup factory');",
       "console.log('package loads');",
       'process.exit(0);',
     ].join('\n');
