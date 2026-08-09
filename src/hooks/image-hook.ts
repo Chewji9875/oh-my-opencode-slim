@@ -254,7 +254,12 @@ export function processImageAttachments(args: {
   const gitignorePath = join(workDir, '.opencode', '.gitignore');
   try {
     mkdirSync(saveDir, { recursive: true });
-    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, '*\n');
+    // Only the images directory is ignored. Ignoring everything ('*\n')
+    // would also ignore the plugin's own project config
+    // (.opencode/oh-my-opencode-slim.json) and prompt overrides, and in
+    // gitignore semantics a bare '*' does not match files in subdirectories,
+    // so saved images would still be tracked.
+    if (!existsSync(gitignorePath)) writeFileSync(gitignorePath, 'images/\n');
   } catch (e) {
     log(`[image-hook] failed to create image directory: ${e}`);
   }

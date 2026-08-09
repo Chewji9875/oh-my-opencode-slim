@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import {
   chmodSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -114,6 +115,19 @@ describe('processImageAttachments image routing', () => {
     const textParts = message.parts.filter((part) => part.type === 'text');
     expect(textParts).toHaveLength(1);
     expect(textParts[0]?.text).toContain('@observer');
+  });
+
+  it('writes a .gitignore covering only the images directory', () => {
+    const { workDir } = makeTestDir('gitignore-scope');
+    processImageAttachments({
+      messages: [makeUserMsg([IMG])],
+      workDir,
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+    const gitignorePath = path.join(workDir, '.opencode', '.gitignore');
+    expect(readFileSync(gitignorePath, 'utf8')).toBe('images/\n');
   });
 
   it('resolves omitted image routing to auto and intercepts for Observer', () => {
