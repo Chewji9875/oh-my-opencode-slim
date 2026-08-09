@@ -1,4 +1,5 @@
 import { Readability } from '@mozilla/readability';
+import { JSDOM, VirtualConsole } from 'jsdom';
 import TurndownService from 'turndown';
 import { escapeHtml } from '../../utils/escape-html';
 import { parseFrontmatter } from '../../utils/frontmatter';
@@ -27,12 +28,21 @@ export function withCssTreeWarningsSuppressed<T>(fn: () => T): T {
   }
 }
 
-let jsdomPromise: Promise<typeof import('jsdom')> | undefined;
-
-async function getJSDOM() {
-  jsdomPromise ??= import('jsdom');
-  const { JSDOM } = await jsdomPromise;
-  return JSDOM;
+/**
+ * Suppresses jsdom "css-parsing" errors ("Could not parse CSS stylesheet")
+ * that jsdom would otherwise forward to console.error when no custom
+ * virtualConsole is supplied, leaking parser noise into the TUI. Other
+ * jsdomErrors pass through to console.error untouched.
+ */
+export function withJsdomCssParsingErrorsSuppressed<T>(
+  fn: (vc: VirtualConsole) => T,
+): T {
+  const vc = new VirtualConsole();
+  vc.on('jsdomError', (error) => {
+    const type = (error as Error & { type?: string }).type;
+    if (type !== 'css-parsing') console.error(error.message);
+  });
+  return fn(vc);
 }
 
 export function wordCount(text: string): number {
@@ -304,9 +314,10 @@ export async function extractFromHtml(
   finalUrl: string,
   extractMain: boolean,
 ): Promise<ExtractedContent> {
-  const JSDOM = await getJSDOM();
-  const dom = withCssTreeWarningsSuppressed(
-    () => new JSDOM(html, { url: finalUrl }),
+  const dom = withCssTreeWarningsSuppressed(() =>
+    withJsdomCssParsingErrorsSuppressed(
+      (vc) => new JSDOM(html, { url: finalUrl, virtualConsole: vc }),
+    ),
   );
   const document = dom.window.document;
   const title = document.title || undefined;
@@ -329,8 +340,10 @@ export async function extractFromHtml(
     .slice(0, 12);
 
   if (extractMain) {
-    const readerDom = withCssTreeWarningsSuppressed(
-      () => new JSDOM(html, { url: finalUrl }),
+    const readerDom = withCssTreeWarningsSuppressed(() =>
+      withJsdomCssParsingErrorsSuppressed(
+        (vc) => new JSDOM(html, { url: finalUrl, virtualConsole: vc }),
+      ),
     );
     const article = new Readability(readerDom.window.document).parse();
     if (article?.content?.trim()) {
