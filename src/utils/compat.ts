@@ -85,5 +85,13 @@ export async function crossWrite(
   path: string,
   data: ArrayBuffer | Buffer | string,
 ): Promise<void> {
-  await fsWriteFile(path, Buffer.from(data as ArrayBuffer));
+  if (typeof data === 'string') {
+    await fsWriteFile(path, Buffer.from(data));
+    return;
+  }
+  if (data instanceof ArrayBuffer) {
+    await fsWriteFile(path, Buffer.from(data));
+    return;
+  }
+  await fsWriteFile(path, data);
 }
