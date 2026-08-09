@@ -150,7 +150,10 @@ describe('smartfetch/utils', () => {
         });
       });
 
-      expect(errorCalls).toEqual([['Failed to load resource']]);
+      expect(errorCalls).toHaveLength(1);
+      expect((errorCalls[0][0] as Error).message).toBe(
+        'Failed to load resource',
+      );
     } finally {
       console.error = originalError;
     }
@@ -172,7 +175,10 @@ describe('smartfetch/utils', () => {
         });
       });
 
-      expect(errorCalls).toEqual([['Failed to load resource']]);
+      expect(errorCalls).toHaveLength(1);
+      expect((errorCalls[0][0] as Error).message).toBe(
+        'Failed to load resource',
+      );
     } finally {
       console.error = originalError;
     }

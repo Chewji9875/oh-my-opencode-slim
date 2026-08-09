@@ -32,7 +32,8 @@ export function withCssTreeWarningsSuppressed<T>(fn: () => T): T {
  * Suppresses jsdom "css-parsing" errors ("Could not parse CSS stylesheet")
  * that jsdom would otherwise forward to console.error when no custom
  * virtualConsole is supplied, leaking parser noise into the TUI. Other
- * jsdomErrors pass through to console.error untouched.
+ * jsdomErrors pass through to console.error as full error objects,
+ * preserving stack, cause, and URL metadata.
  */
 export function withJsdomCssParsingErrorsSuppressed<T>(
   fn: (vc: VirtualConsole) => T,
@@ -40,7 +41,7 @@ export function withJsdomCssParsingErrorsSuppressed<T>(
   const vc = new VirtualConsole();
   vc.on('jsdomError', (error) => {
     const type = (error as Error & { type?: string }).type;
-    if (type !== 'css-parsing') console.error(error.message);
+    if (type !== 'css-parsing') console.error(error);
   });
   return fn(vc);
 }
