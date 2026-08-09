@@ -3552,15 +3552,18 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('Unauthorized');
   });
 
-  test('defers board error for 401 while foreground fallback can recover', async () => {
-    // A 401/410 with a fallback model still available is reprompted by
-    // ForegroundFallbackManager; terminalizing the job at session.error
-    // time would leave a recovered job permanently failed (the board
-    // refuses terminal → running transitions).
+  test('terminalizes deferred 401 as error when the session idles unrecovered', async () => {
+    // A 401/410 with a fallback model available is reprompted by
+    // ForegroundFallbackManager; terminalizing at session.error time
+    // would leave a recovered job permanently failed. But if the session
+    // ends (idle) without recovery — e.g. execFallback failed silently —
+    // the deferred error must terminalize as 'error', not the false
+    // 'completed' the child-idle path would record.
     const board = new BackgroundJobBoard();
     const { hook } = createHook({
       backgroundJobBoard: board,
       willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
     });
 
     board.registerLaunch({
@@ -3581,8 +3584,67 @@ describe('task-session-manager hook', () => {
       },
     });
 
-    // Job stays running; the fallback reprompt decides the outcome.
+    // Deferred: job still running while the fallback may recover.
     expect(board.get('parent-1')?.state).toBe('running');
+
+    // The fallback never recovered the session; it went idle instead.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')).toMatchObject({
+      state: 'error',
+      resultSummary:
+        'Session error after failed model fallback (auth/model unavailable)',
+    });
+  });
+
+  test('clears deferred 401 when live busy shows the session recovered', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+    expect(board.get('parent-1')?.state).toBe('running');
+
+    // Fallback re-prompt landed: live busy cancels the deferred error.
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: {
+          sessionID: 'parent-1',
+          status: { type: 'busy' },
+        },
+      },
+    });
+
+    // Idle after recovery completes the job normally — not as an error.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')?.state).not.toBe('error');
   });
 
   test('session.idle does not overwrite error state with completed', async () => {

@@ -8,6 +8,8 @@ export function createIdleReconciler(options: {
     sessionToken: symbol,
   ) => Promise<void>;
   reconcileInjectedTerminalJobs: (parentSessionID: string) => void;
+  /** Called when a deferred inline error is terminalized at idle. */
+  onErrorTerminalize?: (sessionID: string) => void;
   idleReconcileDelayMs: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
   hasInputWait: (sessionID: string) => boolean;
@@ -25,6 +27,10 @@ export function createIdleReconciler(options: {
 }) {
   const idleReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const childIdleReconcileTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  const errorTerminalizeTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
@@ -92,6 +98,55 @@ export function createIdleReconciler(options: {
     childIdleReconcileTimers.set(sessionID, timer);
   }
 
+  /**
+   * Terminalize a managed job as 'error' after it idled with a deferred
+   * inline 401/410 error that the foreground fallback could not (or did
+   * not) recover. Mirrors scheduleChildIdleReconciliation: delayed so a
+   * fallback re-prompt can claim the session first, and cancelled by
+   * live-busy recovery. Without this, a silent fallback failure leaves
+   * the job 'running' and idle reconciliation would mark it 'completed'.
+   */
+  function scheduleErrorTerminalize(
+    sessionID: string,
+    idleObservedAt: number,
+  ): void {
+    if (errorTerminalizeTimers.has(sessionID)) return;
+    if (options.isFallbackInProgress?.(sessionID)) return;
+
+    const timer = setTimeout(() => {
+      errorTerminalizeTimers.delete(sessionID);
+      if (options.isFallbackInProgress?.(sessionID)) return;
+
+      const job = options.backgroundJobBoard.get(sessionID);
+      if (job?.state !== 'running') return;
+
+      // Busy after the idle means the session recovered (e.g. FG re-prompt).
+      if (
+        job.lastLiveBusyAt !== undefined &&
+        job.lastLiveBusyAt > idleObservedAt
+      ) {
+        return;
+      }
+
+      log(
+        '[task-session-manager] terminalized job from idle after deferred error',
+        {
+          sessionID,
+          alias: job.alias,
+          parentSessionID: job.parentSessionID,
+        },
+      );
+      options.backgroundJobBoard.updateStatus({
+        taskID: sessionID,
+        state: 'error',
+        resultSummary:
+          'Session error after failed model fallback (auth/model unavailable)',
+      });
+      options.onErrorTerminalize?.(sessionID);
+    }, options.idleReconcileDelayMs).unref?.();
+    errorTerminalizeTimers.set(sessionID, timer);
+  }
+
   function clearIdleTimers(sessionID: string): void {
     const pendingChildIdle = childIdleReconcileTimers.get(sessionID);
     if (pendingChildIdle) {
@@ -102,6 +157,11 @@ export function createIdleReconciler(options: {
     if (pendingIdle) {
       clearTimeout(pendingIdle);
       idleReconcileTimers.delete(sessionID);
+    }
+    const pendingErrorTerminalize = errorTerminalizeTimers.get(sessionID);
+    if (pendingErrorTerminalize) {
+      clearTimeout(pendingErrorTerminalize);
+      errorTerminalizeTimers.delete(sessionID);
     }
   }
 
@@ -115,6 +175,11 @@ export function createIdleReconciler(options: {
     }
     childIdleReconcileTimers.clear();
 
+    for (const timer of errorTerminalizeTimers.values()) {
+      clearTimeout(timer);
+    }
+    errorTerminalizeTimers.clear();
+
     const idleSessionIds = [...idleReconcileTimers.keys()];
     for (const timer of idleReconcileTimers.values()) {
       clearTimeout(timer);
@@ -127,6 +192,7 @@ export function createIdleReconciler(options: {
   return {
     scheduleIdleReconciliation,
     scheduleChildIdleReconciliation,
+    scheduleErrorTerminalize,
     clearIdleTimers,
     clearAllTimers,
     /** Callback for continuation-token-manager's onInvalidateContinuation. */

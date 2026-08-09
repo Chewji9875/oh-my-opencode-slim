@@ -68,9 +68,12 @@ export async function handleEvent(
         sessionID: string,
         idleObservedAt: number,
       ): void;
+      scheduleErrorTerminalize(sessionID: string, idleObservedAt: number): void;
       clearIdleTimers(sessionID: string): void;
       clearAllTimers(): string[];
     };
+    /** Sessions with a deferred inline 401/410 awaiting fallback outcome. */
+    deferredInlineErrors: Set<string>;
     backgroundJobBoard: BackgroundJobStore;
     pendingCallTracker: {
       peekByParentAndAgent(
@@ -206,10 +209,17 @@ export async function handleEvent(
     // session being idle is itself the completion signal.
     // Delayed so FG can claim the session before we mark completed.
     if (job && sessionId && job.state === 'running') {
-      deps.idleReconciler.scheduleChildIdleReconciliation(
-        sessionId,
-        Date.now(),
-      );
+      if (deps.deferredInlineErrors.has(sessionId)) {
+        // A persistent 401/410 was deferred for fallback recovery but the
+        // session ended without one: terminalize as error instead of the
+        // false completion the child-idle path would record.
+        deps.idleReconciler.scheduleErrorTerminalize(sessionId, Date.now());
+      } else {
+        deps.idleReconciler.scheduleChildIdleReconciliation(
+          sessionId,
+          Date.now(),
+        );
+      }
     }
     return;
   }
@@ -229,17 +239,17 @@ export async function handleEvent(
       // completed background tasks and unable to dispatch follow-ups.
       // Persistent 401/410 (auth, model gone) may ALSO be recovered by a
       // fallback reprompt, so defer while recovery is still possible:
-      // if the reprompt fails, the session errors again and the error is
-      // recorded then. Only when no chain exists, fallback is disabled,
-      // or the chain is exhausted is the error final — record it now so
-      // the board shows a failure instead of a false completion via
-      // idle-reconciliation.
+      // record the deferred error in the set so an idle with no recovery
+      // terminalizes the job as 'error' instead of a false completion.
+      // When no chain exists, fallback is disabled, or the chain is
+      // exhausted the error is final — record it now.
       if (
         !props?.error ||
         !isFailoverError(props.error) ||
         (isInlineFailoverError(props.error) &&
           !deps.options.willAttemptFallback?.(sessionId))
       ) {
+        deps.deferredInlineErrors.delete(sessionId);
         deps.terminalJobsInjectedByParent.delete(sessionId);
         deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
@@ -254,6 +264,10 @@ export async function handleEvent(
               'Session error',
           });
         }
+      } else if (isInlineFailoverError(props.error)) {
+        // Recovery possible: defer. The idle backstop terminalizes this
+        // if the fallback fails silently; busy/deleted clears it.
+        deps.deferredInlineErrors.add(sessionId);
       }
     } else if (sessionId) {
       // Child subagent sessions are not orchestrators, so the block
@@ -295,6 +309,9 @@ export async function handleEvent(
     // idle-reconcile timer; clearIdleTimers handles the child timer.
     if (sessionId) {
       deps.idleReconciler.clearIdleTimers(sessionId);
+      // Live busy after a deferred 401/410 means the fallback re-prompt
+      // (or continued work) recovered the session — the error is not final.
+      deps.deferredInlineErrors.delete(sessionId);
     }
     const before = sessionId
       ? deps.backgroundJobBoard.get(sessionId)
