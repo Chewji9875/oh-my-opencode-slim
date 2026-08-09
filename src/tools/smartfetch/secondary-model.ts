@@ -197,12 +197,12 @@ async function deleteSessionSafely(
   input: PluginInput,
   sessionId: string,
 ): Promise<void> {
-  const v2 = getClient(input);
+  const client = getClient(input);
   for (let attempt = 1; attempt <= SESSION_DELETE_RETRIES; attempt++) {
     try {
-      await v2.session.delete({
-        sessionID: sessionId,
-        directory: input.directory,
+      await client.session.delete({
+        path: { id: sessionId },
+        query: { directory: input.directory },
       });
       return;
     } catch (error) {
@@ -227,16 +227,14 @@ async function runSecondaryModel(
   prompt: string,
   content: string,
 ) {
-  const v2 = getClient(input);
+  const client = getClient(input);
   const directory = input.directory;
 
-  const sessionResponse = await v2.session.create(
-    {
-      directory,
-      title: 'smartfetch-secondary',
-    },
-    { throwOnError: true },
-  );
+  const sessionResponse = await client.session.create({
+    query: { directory },
+    body: { title: 'smartfetch-secondary' },
+    throwOnError: true,
+  });
 
   const session = sessionResponse.data;
   const sessionId = session?.id;
@@ -258,7 +256,9 @@ async function runSecondaryModel(
     ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
     : prompt;
   try {
-    const toolIDsResponse = await v2.tool.ids({ directory });
+    const toolIDsResponse = await client.tool.ids({
+      query: { directory },
+    });
     const toolIDs = toolIDsResponse.data ?? [];
     const disabledTools = Object.fromEntries(
       (toolIDs || []).map((id: string) => [id, false]),
@@ -266,20 +266,25 @@ async function runSecondaryModel(
 
     const { variant, ...modelOnly } = model;
     const result = await Promise.race([
-      v2.session.prompt({
-        sessionID: sessionId,
-        directory,
-        model: modelOnly,
-        ...(variant ? { variant } : {}),
-        system:
-          'Answer only from the supplied content. Do not use tools or outside knowledge.',
-        tools: disabledTools,
-        parts: [
-          {
-            type: 'text',
-            text: buildPrompt(truncatedContent, effectivePrompt),
-          },
-        ],
+      client.session.prompt({
+        path: { id: sessionId },
+        query: { directory },
+        body: {
+          model: modelOnly,
+          // The v1 runtime reads the variant from the body top level and
+          // strips unknown keys from `model`; the SDK type omits it, so
+          // spread it through the body shape directly.
+          ...(variant ? { variant } : {}),
+          system:
+            'Answer only from the supplied content. Do not use tools or outside knowledge.',
+          tools: disabledTools,
+          parts: [
+            {
+              type: 'text',
+              text: buildPrompt(truncatedContent, effectivePrompt),
+            },
+          ],
+        },
       }),
       new Promise<never>((_, reject) =>
         setTimeout(

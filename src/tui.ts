@@ -58,7 +58,7 @@ function element(
     insert(node, child);
   }
 
-  return node as JSX.Element;
+  return node as unknown as JSX.Element;
 }
 
 function text(props: Record<string, unknown>, children: Child[]) {
@@ -372,6 +372,13 @@ const plugin: TuiPluginModule & { id: string } = {
         // Ignore render errors; this is best-effort live status.
       }
     }, 1000);
+
+    // The composer's model selector (bottom bar) only re-renders on user
+    // interaction. Force a re-render when the session model changes (e.g. a
+    // foreground fallback switched it) so the displayed model stays current.
+    api.event.on('session.next.model.switched', () => {
+      api.renderer.requestRender();
+    });
 
     api.lifecycle.onDispose(() => {
       clearInterval(renderTimer);

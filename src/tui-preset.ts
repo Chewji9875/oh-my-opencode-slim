@@ -45,7 +45,7 @@ import type { TuiSnapshot } from './tui-state';
 function desc(text: string): JSX.Element {
   const node = createElement('text');
   insert(node, text);
-  return node as JSX.Element;
+  return node as unknown as JSX.Element;
 }
 
 /** Sentinel option values used to embed actions in `DialogSelect` lists. */

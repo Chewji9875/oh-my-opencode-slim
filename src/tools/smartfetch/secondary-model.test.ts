@@ -172,9 +172,10 @@ describe('smartfetch/secondary-model', () => {
   test('falls back to next model when prompt times out', async () => {
     mockV2Session = {
       create: mock(async () => ({ data: { id: 'session-timeout' } })),
-      prompt: mock(async (opts: any) => {
-        const model = opts.model;
-        if (model.modelID === 'small') {
+      prompt: mock(async (opts: unknown) => {
+        const model = (opts as { body?: { model?: { modelID?: string } } })
+          ?.body?.model;
+        if (model?.modelID === 'small') {
           throw new Error('Secondary model timed out');
         }
         return {

@@ -72,7 +72,7 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_1' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
     expect(String(output)).toContain('state: cancelled');
     expect(String(output)).toContain('cancelled: obsolete');
     expect(parseTaskStatusOutput(String(output))).toMatchObject({
@@ -93,7 +93,7 @@ describe('cancel_task tool', () => {
 
     await cancelTask.execute({ task_id: 'ora-1' }, context);
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_1' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
   });
 
   test('does not abort raw session IDs tracked by a different parent', async () => {
@@ -130,7 +130,7 @@ describe('cancel_task tool', () => {
 
     const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_1' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({ state: 'cancelled' });
   });
@@ -143,7 +143,7 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_lost' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_lost' } });
     expect(String(output)).toContain('state: cancelled');
     expect(String(output)).toContain('cancelled: stop ghost worker');
   });
@@ -185,7 +185,7 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_1' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
     expect(String(output)).toContain('state: cancelled');
   });
 
@@ -204,7 +204,7 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_1' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
     expect(String(output)).toContain('state: cancelled');
   });
 
@@ -251,8 +251,8 @@ describe('cancel_task tool', () => {
 
     expect(abort).toHaveBeenCalled();
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({ state: 'cancelled' });
@@ -274,8 +274,8 @@ describe('cancel_task tool', () => {
     const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
 
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({ state: 'cancelled' });
@@ -297,8 +297,8 @@ describe('cancel_task tool', () => {
     const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
 
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: running');
     expect(board.get('ses_1')).toMatchObject({
@@ -358,8 +358,8 @@ describe('cancel_task tool', () => {
 
     expect(abort).toHaveBeenCalled();
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({
@@ -393,8 +393,8 @@ describe('cancel_task tool', () => {
 
     expect(abort).toHaveBeenCalled();
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({
@@ -428,8 +428,8 @@ describe('cancel_task tool', () => {
     const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
 
     expect(deleteSession).toHaveBeenCalledWith({
-      sessionID: 'ses_1',
-      directory: '/test/project',
+      path: { id: 'ses_1' },
+      query: { directory: '/test/project' },
     });
     expect(String(output)).toContain('state: cancelled');
     expect(board.get('ses_1')).toMatchObject({
@@ -484,7 +484,7 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ sessionID: 'ses_running' });
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_running' } });
     // cancelSessionByID must return state: error for non-SessionStillRunningError,
     // NOT state: running (which would happen if || isRunning() were present).
     expect(String(output)).toContain('state: error');

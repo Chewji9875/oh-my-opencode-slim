@@ -93,6 +93,7 @@ type HookOptions = {
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
+  willAttemptFallback?: (sessionID: string) => boolean;
   coordinator?: SessionLifecycle;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
 };
@@ -122,6 +123,7 @@ function createHook(options?: HookOptions) {
       shouldManageSession: options?.shouldManageSession ?? (() => true),
       registerSessionAsOrchestrator: options?.registerSessionAsOrchestrator,
       isFallbackInProgress: options?.isFallbackInProgress,
+      willAttemptFallback: options?.willAttemptFallback,
       coordinator: options?.coordinator,
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
     },
@@ -3517,6 +3519,134 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('LLM proxy connection refused');
   });
 
+  test('persistent 401 session.error on managed session records board error when fallback cannot recover', async () => {
+    // 401/410 are persistent (not recovered once the fallback chain is
+    // exhausted) and must surface as an error, not a false completion.
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      // No chain / chain exhausted / fallback disabled → error is final.
+      willAttemptFallback: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    const job = board.get('parent-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('Unauthorized');
+  });
+
+  test('terminalizes deferred 401 as error when the session idles unrecovered', async () => {
+    // A 401/410 with a fallback model available is reprompted by
+    // ForegroundFallbackManager; terminalizing at session.error time
+    // would leave a recovered job permanently failed. But if the session
+    // ends (idle) without recovery — e.g. execFallback failed silently —
+    // the deferred error must terminalize as 'error', not the false
+    // 'completed' the child-idle path would record.
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    // Deferred: job still running while the fallback may recover.
+    expect(board.get('parent-1')?.state).toBe('running');
+
+    // The fallback never recovered the session; it went idle instead.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')).toMatchObject({
+      state: 'error',
+      resultSummary:
+        'Session error after failed model fallback (auth/model unavailable)',
+    });
+  });
+
+  test('clears deferred 401 when live busy shows the session recovered', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+    expect(board.get('parent-1')?.state).toBe('running');
+
+    // Fallback re-prompt landed: live busy cancels the deferred error.
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: {
+          sessionID: 'parent-1',
+          status: { type: 'busy' },
+        },
+      },
+    });
+
+    // Idle after recovery completes the job normally — not as an error.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')?.state).not.toBe('error');
+  });
+
   test('session.idle does not overwrite error state with completed', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -5203,7 +5333,9 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        parts: [expect.objectContaining({ synthetic: true })],
+        body: expect.objectContaining({
+          parts: [expect.objectContaining({ synthetic: true })],
+        }),
       }),
     );
   });
@@ -5229,9 +5361,11 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-        parts: [expect.objectContaining({ synthetic: true })],
+        path: { id: 'parent-1' },
+        body: expect.objectContaining({
+          agent: 'orchestrator',
+          parts: [expect.objectContaining({ synthetic: true })],
+        }),
       }),
     );
   });
@@ -5260,17 +5394,19 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     expect(get).toHaveBeenCalledWith({
-      sessionID: 'parent-1',
+      path: { id: 'parent-1' },
       throwOnError: true,
     });
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
       }),
     );
   });
@@ -5308,11 +5444,13 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
+        body: expect.objectContaining({
+          model: {
+            providerID: 'runtime-provider',
+            modelID: 'selected-model',
+          },
+          variant: 'selected-variant',
+        }),
       }),
     );
   });
@@ -5346,14 +5484,16 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
+      body?: {
+        model?: Record<string, unknown>;
+        variant?: string;
+      };
     };
-    expect(request.model).toEqual({
+    expect(request?.body?.model).toEqual({
       providerID: 'current-provider',
       modelID: 'current-model',
     });
-    expect(request).not.toHaveProperty('variant');
+    expect(request?.body).not.toHaveProperty('variant');
   });
 
   test('only external messages replace the model fallback and clear its variant', async () => {
@@ -5404,14 +5544,16 @@ describe('task-session-manager hook', () => {
     await flushContinuation();
 
     const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
+      body?: {
+        model?: Record<string, unknown>;
+        variant?: string;
+      };
     };
-    expect(request.model).toEqual({
+    expect(request?.body?.model).toEqual({
       providerID: 'new-provider',
       modelID: 'new-model',
     });
-    expect(request).not.toHaveProperty('variant');
+    expect(request?.body).not.toHaveProperty('variant');
   });
 
   test('a user message invalidates continuation while current model lookup is pending', async () => {
