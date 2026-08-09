@@ -373,13 +373,6 @@ const plugin: TuiPluginModule & { id: string } = {
       }
     }, 1000);
 
-    // The composer's model selector (bottom bar) only re-renders on user
-    // interaction. Force a re-render when the session model changes (e.g. a
-    // foreground fallback switched it) so the displayed model stays current.
-    api.event.on('session.next.model.switched', () => {
-      api.renderer.requestRender();
-    });
-
     api.lifecycle.onDispose(() => {
       clearInterval(renderTimer);
     });
