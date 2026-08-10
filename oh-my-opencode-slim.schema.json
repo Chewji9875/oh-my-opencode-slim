@@ -981,6 +981,38 @@
         }
       }
     },
+    "interview": {
+      "type": "object",
+      "properties": {
+        "maxQuestions": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "outputFolder": {
+          "default": "interview",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+        },
+        "autoOpenBrowser": {
+          "default": true,
+          "description": "Automatically open the interview UI in your default browser during interactive runs. Disabled automatically in tests and CI.",
+          "type": "boolean"
+        },
+        "port": {
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "dashboard": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
     "backgroundJobs": {
       "type": "object",
       "properties": {

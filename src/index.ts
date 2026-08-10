@@ -33,6 +33,7 @@ import {
 import { processImageAttachments } from './hooks/image-hook';
 import { isMessageWithParts, type MessageWithParts } from './hooks/types';
 import { handleTaskSessionEvent } from './index-event';
+import { createInterviewManager } from './interview';
 import { createBuiltinMcps } from './mcp';
 import {
   getMultiplexer,
@@ -163,6 +164,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
   let backgroundJobSupervisor: BackgroundJobSupervisor;
+  let interviewManager: ReturnType<typeof createInterviewManager>;
   let companionManager: CompanionManager;
   let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
@@ -414,6 +416,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskSessionManagerAfter = wrapPostToolHook('task-session-manager', (i, o) =>
       taskSessionManagerHook['tool.execute.after'](i as never, o as never),
     );
+    interviewManager = createInterviewManager(ctx, config);
     companionManager = new CompanionManager(
       `proc_${process.pid}`,
       ctx.directory,
@@ -841,6 +844,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         agentConfigEntry.permission = agentPermission;
       }
 
+      interviewManager.registerCommand(opencodeConfig);
       deepworkCommandHook.registerCommand(opencodeConfig);
       reflectCommandHook.registerCommand(opencodeConfig);
       loopCommandHook.registerCommand(opencodeConfig);
@@ -972,6 +976,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // Handle auto-update checking
       await autoUpdateChecker.event(input);
 
+      await interviewManager.handleEvent(
+        input as {
+          event: { type: string; properties?: Record<string, unknown> };
+        },
+      );
+
       if (
         event.type === 'permission.asked' ||
         event.type === 'question.asked'
@@ -1022,6 +1032,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       await orchestratorWakeScheduler.event({
         event: { type: 'server.instance.disposed' },
       });
+      await interviewManager.dispose();
       await multiplexerSessionManager.cleanupOnInstanceDisposed();
     },
 
@@ -1034,6 +1045,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'command.execute.before': async (input, output) => {
+      await interviewManager.handleCommandExecuteBefore(
+        input as {
+          command: string;
+          sessionID: string;
+          arguments: string;
+        },
+        output as { parts: Array<{ type: string; text?: string }> },
+      );
+
       await deepworkCommandHook.handleCommandExecuteBefore(
         input as {
           command: string;

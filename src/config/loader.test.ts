@@ -93,6 +93,40 @@ describe('loadPluginConfig', () => {
     });
   });
 
+  test('retains user interview settings when project partially overrides them', () => {
+    const userConfigPath = path.join(userConfigDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        interview: {
+          maxQuestions: 7,
+          outputFolder: 'user-interviews',
+          autoOpenBrowser: false,
+          port: 1234,
+          dashboard: true,
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ interview: { outputFolder: 'project-interviews' } }),
+    );
+
+    const config = loadPluginConfig(projectDir, { silent: true });
+
+    expect(config.interview).toEqual({
+      maxQuestions: 7,
+      outputFolder: 'project-interviews',
+      autoOpenBrowser: false,
+      port: 1234,
+      dashboard: true,
+    });
+  });
+
   test('does not let a defaulted project webfetch enabled override user false', () => {
     const userConfigPath = path.join(userConfigDir, 'opencode');
     const projectDir = path.join(tempDir, 'project');

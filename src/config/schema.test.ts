@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { PluginConfigSchema } from './schema';
+import { InterviewConfigSchema, PluginConfigSchema } from './schema';
 
 describe('PluginConfigSchema image_routing', () => {
   it('accepts image_routing: direct with observer disabled', () => {
@@ -61,6 +61,75 @@ describe('PluginConfigSchema webfetch', () => {
     });
 
     expect(result.success).toBe(true);
+  });
+});
+
+describe('InterviewConfigSchema outputFolder', () => {
+  it('accepts relative output folders', () => {
+    expect(
+      InterviewConfigSchema.safeParse({ outputFolder: 'interviews/specs' })
+        .success,
+    ).toBe(true);
+    expect(
+      InterviewConfigSchema.safeParse({
+        outputFolder: String.raw`interviews\specs`,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects absolute and parent-directory output folders', () => {
+    const invalidOutputFolders = [
+      '/tmp/interviews',
+      String.raw`\tmp\interviews`,
+      'C:/tmp/interviews',
+      String.raw`C:\tmp\interviews`,
+      '..',
+      '../interviews',
+      String.raw`..\interviews`,
+      'interviews/../outside',
+      String.raw`interviews\..\outside`,
+    ];
+
+    for (const outputFolder of invalidOutputFolders) {
+      expect(InterviewConfigSchema.safeParse({ outputFolder }).success).toBe(
+        false,
+      );
+      expect(
+        PluginConfigSchema.safeParse({ interview: { outputFolder } }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects whitespace-wrapped parent-directory output folders', () => {
+    const invalidOutputFolders = [' ../outside ', String.raw` ..\outside `];
+
+    for (const outputFolder of invalidOutputFolders) {
+      expect(InterviewConfigSchema.safeParse({ outputFolder }).success).toBe(
+        false,
+      );
+      expect(
+        PluginConfigSchema.safeParse({ interview: { outputFolder } }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('stores the trimmed output folder', () => {
+    const outputFolder = '  interviews/specs  ';
+    const interviewResult = InterviewConfigSchema.safeParse({ outputFolder });
+    const pluginResult = PluginConfigSchema.safeParse({
+      interview: { outputFolder },
+    });
+
+    expect(interviewResult.success).toBe(true);
+    expect(pluginResult.success).toBe(true);
+    if (interviewResult.success) {
+      expect(interviewResult.data.outputFolder).toBe('interviews/specs');
+    }
+    if (pluginResult.success) {
+      expect(pluginResult.data.interview?.outputFolder).toBe(
+        'interviews/specs',
+      );
+    }
   });
 });
 

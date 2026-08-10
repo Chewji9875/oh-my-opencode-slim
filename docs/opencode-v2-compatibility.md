@@ -148,6 +148,15 @@ GitHub-wide code search; without them it still works via `webfetch`.
 
 ## Limitations
 
+### Interview
+
+`/interview` is supported on v2 through a marker command and a trailing-message
+context bridge. The bridge keeps an in-memory transcript projection from v2
+context and streamed text events, and uses the v2 session methods for prompts,
+notifications, and renames. The markdown document remains the durable source
+of truth; completion responses without `<interview_state>` rewrite the current
+spec while retaining frontmatter and Q&A history.
+
 These are **v2 API constraints**, not adapter gaps — they cannot be fixed in the
 plugin without v2 adding the corresponding capability:
 

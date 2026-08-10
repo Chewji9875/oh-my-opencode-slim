@@ -12,6 +12,11 @@
  * the peer modules. See `codemap.md`.
  */
 
+export type { V2InterviewBridge } from './interview-bridge';
+export {
+  createV2InterviewBridge,
+  INTERVIEW_COMMAND_MARKER,
+} from './interview-bridge';
 export { createV2Setup } from './setup';
 export type {
   ModelRef,
