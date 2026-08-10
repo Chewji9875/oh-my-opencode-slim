@@ -1,5 +1,6 @@
 import type { PluginInput } from '@opencode-ai/plugin';
 import { getClient } from '../../utils/opencode-client';
+import { abortSessionWithTimeout } from '../../utils/session';
 import { MAX_MODEL_CONTENT_CHARS } from './constants';
 import type { CachedFetch, SecondaryModel } from './types';
 
@@ -272,6 +273,16 @@ async function runSecondaryModel(
       inputChars,
       sourceChars,
     };
+  } catch (error) {
+    if (promptTimedOut) {
+      try {
+        await abortSessionWithTimeout(client, sessionId);
+      } catch {
+        // Keep the original timeout error. Cleanup remains gated on the
+        // prompt settling so a failed abort cannot recreate the FK race.
+      }
+    }
+    throw error;
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     if (promptTimedOut && promptPromise) {

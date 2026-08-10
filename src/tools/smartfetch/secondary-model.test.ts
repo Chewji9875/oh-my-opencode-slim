@@ -11,6 +11,7 @@ type PromptStep = {
 // The variable is reassigned per-test to control behavior.
 let mockV2Client: Record<string, unknown>;
 let mockV2Session: {
+  abort: ReturnType<typeof mock>;
   create: ReturnType<typeof mock>;
   prompt: ReturnType<typeof mock>;
   delete: ReturnType<typeof mock>;
@@ -35,6 +36,7 @@ function createV2ClientMock(
   const failTimes = deleteBehavior?.failTimes ?? 0;
 
   mockV2Session = {
+    abort: mock(async () => ({ data: true })),
     create: mock(async () => ({ data: { id: `session-${createCount++}` } })),
     prompt: mock(async () => {
       const step = steps[promptCount++] ?? {};
@@ -171,6 +173,7 @@ describe('smartfetch/secondary-model', () => {
 
   test('falls back to next model when prompt times out', async () => {
     mockV2Session = {
+      abort: mock(async () => ({ data: true })),
       create: mock(async () => ({ data: { id: 'session-timeout' } })),
       prompt: mock(async (opts: unknown) => {
         const model = (opts as { body?: { model?: { modelID?: string } } })
@@ -223,6 +226,7 @@ describe('smartfetch/secondary-model', () => {
     });
 
     mockV2Session = {
+      abort: mock(async () => ({ data: true })),
       create: mock(async () => ({ data: { id: 'session-timeout' } })),
       prompt: mock(() => promptResult),
       delete: mock(async () => {
@@ -251,6 +255,7 @@ describe('smartfetch/secondary-model', () => {
         ),
       ).rejects.toThrow('Secondary model timed out');
 
+      expect(mockV2Session.abort).toHaveBeenCalledTimes(1);
       expect(mockV2Session.delete).toHaveBeenCalledTimes(0);
 
       resolvePrompt(settledResult);
