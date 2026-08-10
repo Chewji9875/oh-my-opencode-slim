@@ -21,6 +21,8 @@ const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 /** Exact bytes previously written by this plugin for `.opencode/.gitignore`. */
 const LEGACY_OPENCODE_GITIGNORE_BYTES = Buffer.from('*\n');
+const LEGACY_OPENCODE_GITIGNORE_BACKUP =
+  '.gitignore.oh-my-opencode-slim-legacy';
 /** Correct scoped rule: ignore only the images directory under `.opencode/`. */
 const IMAGES_GITIGNORE_RULE = 'images/';
 const IMAGES_GITIGNORE_BYTES = Buffer.from(`${IMAGES_GITIGNORE_RULE}\n`);
@@ -31,6 +33,28 @@ function opencodeDirPath(workDir: string): string {
 
 function opencodeGitignorePath(workDir: string): string {
   return join(opencodeDirPath(workDir), '.gitignore');
+}
+
+function legacyOpencodeGitignoreBackupPath(workDir: string): string {
+  return join(opencodeDirPath(workDir), LEGACY_OPENCODE_GITIGNORE_BACKUP);
+}
+
+function hasExactLegacyOpencodeGitignoreBackup(
+  gitignorePath: string,
+  backupPath: string,
+  raw: Buffer,
+): boolean {
+  try {
+    const source = statSync(gitignorePath);
+    const backup = lstatSync(backupPath);
+    return (
+      backup.isFile() &&
+      (backup.dev !== source.dev || backup.ino !== source.ino) &&
+      readFileSync(backupPath).equals(raw)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function pathIsSymlink(target: string): boolean {
@@ -81,6 +105,7 @@ function migrateLegacyOpencodeGitignore(
   logFn: (msg: string) => void,
 ): void {
   const gitignorePath = opencodeGitignorePath(workDir);
+  const backupPath = legacyOpencodeGitignoreBackupPath(workDir);
   try {
     if (!existsSync(gitignorePath) && !pathIsSymlink(gitignorePath)) return;
     if (isUnsafeOpencodeGitignorePath(workDir)) {
@@ -89,7 +114,39 @@ function migrateLegacyOpencodeGitignore(
     }
     const raw = readFileSync(gitignorePath);
     if (!raw.equals(LEGACY_OPENCODE_GITIGNORE_BYTES)) return;
+
+    let createdBackup = false;
+    if (!existsSync(backupPath)) {
+      try {
+        writeFileSync(backupPath, raw, { flag: 'wx' });
+        createdBackup = true;
+      } catch (e) {
+        if (
+          !(e instanceof Error) ||
+          (e as NodeJS.ErrnoException).code !== 'EEXIST'
+        ) {
+          logFn(`[image-hook] failed to back up legacy .gitignore: ${e}`);
+          return;
+        }
+      }
+    }
+
+    if (
+      !createdBackup &&
+      !hasExactLegacyOpencodeGitignoreBackup(gitignorePath, backupPath, raw)
+    ) {
+      logFn(
+        '[image-hook] refusing to migrate legacy .gitignore: backup is not an exact regular file',
+      );
+      return;
+    }
+
     writeFileSync(gitignorePath, IMAGES_GITIGNORE_BYTES);
+    logFn(
+      `[image-hook] migrated legacy .gitignore; ${
+        createdBackup ? 'backup created at' : 'using existing backup at'
+      } ${backupPath}`,
+    );
   } catch (e) {
     logFn(`[image-hook] failed to migrate .gitignore: ${e}`);
   }

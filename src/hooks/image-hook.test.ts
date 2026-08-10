@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -26,6 +27,7 @@ const IMG_HASH = createHash('sha1').update(IMG_BYTES).digest('hex').slice(0, 8);
 const IMG_CONTENT_NAME = `image-${IMG_HASH}.png`;
 const LEGACY_GITIGNORE = '*\n';
 const LEGACY_GITIGNORE_BYTES = Buffer.from(LEGACY_GITIGNORE);
+const LEGACY_GITIGNORE_BACKUP = '.gitignore.oh-my-opencode-slim-legacy';
 const IMAGES_GITIGNORE = 'images/\n';
 const IMAGES_GITIGNORE_BYTES = Buffer.from(IMAGES_GITIGNORE);
 
@@ -38,6 +40,10 @@ function makeTestDir(name: string): { workDir: string; saveDir: string } {
 
 function gitignorePath(workDir: string): string {
   return path.join(workDir, '.opencode', '.gitignore');
+}
+
+function legacyGitignoreBackupPath(workDir: string): string {
+  return path.join(workDir, '.opencode', LEGACY_GITIGNORE_BACKUP);
 }
 
 function writeOpencodeGitignore(
@@ -164,17 +170,24 @@ describe('processImageAttachments image routing', () => {
   it('migrates exact legacy * gitignore before early returns (direct/text-only)', () => {
     const workDir = path.join(TEST_DIR, 'gitignore-legacy-direct');
     writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
+    const logs: string[] = [];
 
     processImageAttachments({
       messages: [makeUserMsg([{ type: 'text', text: 'no images' }])],
       workDir,
       imageRouting: 'direct',
       disabledAgents: new Set<string>(),
-      log: () => {},
+      log: (message) => logs.push(message),
     });
 
     expect(readFileSync(gitignorePath(workDir))).toEqual(
       IMAGES_GITIGNORE_BYTES,
+    );
+    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
+      LEGACY_GITIGNORE_BYTES,
+    );
+    expect(logs.some((message) => message.includes('backup created at'))).toBe(
+      true,
     );
   });
 
@@ -195,10 +208,80 @@ describe('processImageAttachments image routing', () => {
     expect(readFileSync(gitignorePath(workDir))).toEqual(
       IMAGES_GITIGNORE_BYTES,
     );
+    const backupAfterFirst = readFileSync(legacyGitignoreBackupPath(workDir));
     run();
     expect(readFileSync(gitignorePath(workDir))).toEqual(
       IMAGES_GITIGNORE_BYTES,
     );
+    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
+      backupAfterFirst,
+    );
+  });
+
+  it('uses an exact existing legacy gitignore backup unchanged', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-existing-backup');
+    const existingBackup = LEGACY_GITIGNORE_BYTES;
+    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
+    writeFileSync(legacyGitignoreBackupPath(workDir), existingBackup);
+
+    processImageAttachments({
+      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
+      workDir,
+      imageRouting: 'direct',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+
+    expect(readFileSync(gitignorePath(workDir))).toEqual(
+      IMAGES_GITIGNORE_BYTES,
+    );
+    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
+      existingBackup,
+    );
+  });
+
+  it('keeps an invalid existing backup and legacy gitignore unchanged', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-invalid-backup');
+    const invalidBackup = Buffer.from('# unrelated backup\n');
+    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
+    writeFileSync(legacyGitignoreBackupPath(workDir), invalidBackup);
+    const logs: string[] = [];
+
+    processImageAttachments({
+      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
+      workDir,
+      imageRouting: 'direct',
+      disabledAgents: new Set<string>(),
+      log: (message) => logs.push(message),
+    });
+
+    expect(readFileSync(gitignorePath(workDir))).toEqual(
+      LEGACY_GITIGNORE_BYTES,
+    );
+    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
+      invalidBackup,
+    );
+    expect(
+      logs.some((message) => message.includes('backup is not an exact')),
+    ).toBe(true);
+  });
+
+  it('keeps a hard-linked backup and legacy gitignore unchanged', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-hardlink-backup');
+    const gitignore = writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
+    const backup = legacyGitignoreBackupPath(workDir);
+    linkSync(gitignore, backup);
+
+    processImageAttachments({
+      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
+      workDir,
+      imageRouting: 'direct',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+
+    expect(readFileSync(gitignore)).toEqual(LEGACY_GITIGNORE_BYTES);
+    expect(readFileSync(backup)).toEqual(LEGACY_GITIGNORE_BYTES);
   });
 
   it('preserves custom gitignore with wildcard/comment byte-for-byte on migration', () => {
@@ -218,6 +301,7 @@ describe('processImageAttachments image routing', () => {
     });
 
     expect(readFileSync(gitignorePath(workDir))).toEqual(custom);
+    expect(existsSync(legacyGitignoreBackupPath(workDir))).toBe(false);
   });
 
   it('appends images/ exactly once to custom gitignore when saving images', () => {
