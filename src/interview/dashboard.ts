@@ -241,10 +241,19 @@ export function createDashboardServer(config: DashboardConfig): {
     return `${interviewId}:${kind}`;
   }
 
-  function newClaim(interviewId: string, kind: PendingKind): string {
-    const claimId = `delivery-${++claimCounter}`;
-    pendingClaims.set(claimKey(interviewId, kind), { claimId, kind });
-    return claimId;
+  function getOrCreateClaim(
+    interviewId: string,
+    kind: PendingKind,
+  ): PendingClaim {
+    const key = claimKey(interviewId, kind);
+    const existing = pendingClaims.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const claim = { claimId: `delivery-${++claimCounter}`, kind };
+    pendingClaims.set(key, claim);
+    return claim;
   }
 
   function acknowledgePending(
@@ -1242,9 +1251,7 @@ export function createDashboardServer(config: DashboardConfig): {
       }
       const val = entry.pendingBlockComment
         ? {
-            claimId:
-              pendingClaims.get(claimKey(interviewId, 'block-comment'))
-                ?.claimId ?? newClaim(interviewId, 'block-comment'),
+            claimId: getOrCreateClaim(interviewId, 'block-comment').claimId,
             section: entry.pendingBlockComment.section,
             comment: entry.pendingBlockComment.comment,
           }
@@ -1330,9 +1337,7 @@ export function createDashboardServer(config: DashboardConfig): {
       }
       const val = entry.pendingChatMessage
         ? {
-            claimId:
-              pendingClaims.get(claimKey(interviewId, 'chat'))?.claimId ??
-              newClaim(interviewId, 'chat'),
+            claimId: getOrCreateClaim(interviewId, 'chat').claimId,
             message: entry.pendingChatMessage,
           }
         : null;
@@ -1364,9 +1369,7 @@ export function createDashboardServer(config: DashboardConfig): {
       }
       const claimed = entry.pendingAnswers
         ? {
-            claimId:
-              pendingClaims.get(claimKey(interviewId, 'answers'))?.claimId ??
-              newClaim(interviewId, 'answers'),
+            claimId: getOrCreateClaim(interviewId, 'answers').claimId,
             answers: entry.pendingAnswers,
           }
         : null;
@@ -1457,9 +1460,7 @@ export function createDashboardServer(config: DashboardConfig): {
       }
       const claimed = entry.nudgeAction
         ? {
-            claimId:
-              pendingClaims.get(claimKey(interviewId, 'nudge'))?.claimId ??
-              newClaim(interviewId, 'nudge'),
+            claimId: getOrCreateClaim(interviewId, 'nudge').claimId,
             action: entry.nudgeAction,
           }
         : null;
@@ -1675,34 +1676,26 @@ export function createDashboardServer(config: DashboardConfig): {
     claimPendingAnswers: (id) => {
       const entry = stateCache.get(id);
       if (!entry?.pendingAnswers) return null;
-      const key = claimKey(id, 'answers');
-      const existing = pendingClaims.get(key);
-      const claimId = existing?.claimId ?? newClaim(id, 'answers');
-      return { claimId, answers: entry.pendingAnswers };
+      const claim = getOrCreateClaim(id, 'answers');
+      return { claimId: claim.claimId, answers: entry.pendingAnswers };
     },
     claimNudgeAction: (id) => {
       const entry = stateCache.get(id);
       if (!entry?.nudgeAction) return null;
-      const key = claimKey(id, 'nudge');
-      const existing = pendingClaims.get(key);
-      const claimId = existing?.claimId ?? newClaim(id, 'nudge');
-      return { claimId, action: entry.nudgeAction };
+      const claim = getOrCreateClaim(id, 'nudge');
+      return { claimId: claim.claimId, action: entry.nudgeAction };
     },
     claimBlockComment: (id) => {
       const entry = stateCache.get(id);
       if (!entry?.pendingBlockComment) return null;
-      const key = claimKey(id, 'block-comment');
-      const existing = pendingClaims.get(key);
-      const claimId = existing?.claimId ?? newClaim(id, 'block-comment');
-      return { claimId, comment: entry.pendingBlockComment };
+      const claim = getOrCreateClaim(id, 'block-comment');
+      return { claimId: claim.claimId, comment: entry.pendingBlockComment };
     },
     claimChatMessage: (id) => {
       const entry = stateCache.get(id);
       if (!entry?.pendingChatMessage) return null;
-      const key = claimKey(id, 'chat');
-      const existing = pendingClaims.get(key);
-      const claimId = existing?.claimId ?? newClaim(id, 'chat');
-      return { claimId, message: entry.pendingChatMessage };
+      const claim = getOrCreateClaim(id, 'chat');
+      return { claimId: claim.claimId, message: entry.pendingChatMessage };
     },
     acknowledgePending,
     rollbackPending,

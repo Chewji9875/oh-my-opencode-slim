@@ -993,6 +993,72 @@ describe('dashboard server', () => {
       }
     });
 
+    test('reuses one claim across overlapping polls', async () => {
+      const { baseUrl, authToken, dashboard, cleanup } = await startDashboard();
+      try {
+        dashboard.pushState({
+          interviewId: 'overlap-test',
+          sessionID: 'session-overlap',
+          idea: 'Overlap Test',
+          mode: 'awaiting-agent',
+          summary: 'Test',
+          title: 'Overlap Test',
+          questions: [],
+          pendingAnswers: [{ questionId: 'q-1', answer: 'A' }],
+          lastUpdatedAt: Date.now(),
+          filePath: '',
+          nudgeAction: null,
+        });
+
+        const responses = await Promise.all([
+          fetch(
+            `${baseUrl}/api/interviews/overlap-test/pending?token=${authToken}`,
+          ),
+          fetch(
+            `${baseUrl}/api/interviews/overlap-test/pending?token=${authToken}`,
+          ),
+        ]);
+        const claims = await Promise.all(
+          responses.map(async (response) => {
+            expect(response.status).toBe(200);
+            return (await response.json()) as {
+              claimId: string;
+              answers: Array<{ questionId: string; answer: string }> | null;
+            };
+          }),
+        );
+
+        expect(claims[0]?.claimId).toBe(claims[1]?.claimId);
+        expect(claims[0]?.answers).toEqual([
+          { questionId: 'q-1', answer: 'A' },
+        ]);
+        expect(claims[1]?.answers).toEqual(claims[0]?.answers);
+
+        const ackResponses = await Promise.all(
+          claims.map((claim) =>
+            fetch(
+              `${baseUrl}/api/interviews/overlap-test/pending/ack?token=${authToken}`,
+              {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ claimId: claim.claimId }),
+              },
+            ),
+          ),
+        );
+        expect(ackResponses.map((response) => response.status).sort()).toEqual([
+          200, 409,
+        ]);
+
+        const afterAck = await fetch(
+          `${baseUrl}/api/interviews/overlap-test/pending?token=${authToken}`,
+        );
+        expect((await afterAck.json()).answers).toBeNull();
+      } finally {
+        cleanup();
+      }
+    });
+
     test('returns 404 for unknown interview', async () => {
       const { baseUrl, authToken, cleanup } = await startDashboard();
       try {
