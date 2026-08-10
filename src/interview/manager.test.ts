@@ -703,6 +703,128 @@ describe('interview manager - edge cases', () => {
     }
   });
 
+  test('waits for accepted delivery before disposal and replacement polling', async () => {
+    const tempDir = await fs.mkdtemp('/tmp/manager-test-');
+    const ctx = createMockContext({ directory: tempDir });
+    const freePort = await findFreePort();
+    const config = createTestConfig({ port: freePort, dashboard: true });
+    const messages: Array<{
+      info?: { role: string };
+      parts?: Array<{ type: string; text?: string }>;
+    }> = [];
+    let signalFirstDelivery!: () => void;
+    const firstDeliveryStarted = new Promise<void>((resolve) => {
+      signalFirstDelivery = resolve;
+    });
+    let releaseFirstDelivery!: () => void;
+    const firstDeliveryGate = new Promise<void>((resolve) => {
+      releaseFirstDelivery = resolve;
+    });
+    let submitAttempts = 0;
+    const runtime = {
+      messages: async () => messages,
+      notify: async () => {},
+      continue: async () => {
+        submitAttempts++;
+        signalFirstDelivery();
+        await firstDeliveryGate;
+      },
+      rename: async () => {},
+    };
+    const manager = createDashboardManager(ctx, config, freePort, 'interview', {
+      runtime,
+    });
+
+    try {
+      await manager.handleCommandExecuteBefore(
+        {
+          command: 'interview',
+          sessionID: 'session-dispose-race',
+          arguments: 'Dispose Race Test',
+        },
+        { parts: [] },
+      );
+      const interviewId = manager.service.getActiveInterviewId(
+        'session-dispose-race',
+      );
+      expect(interviewId).not.toBeNull();
+      messages.push({
+        info: { role: 'assistant' },
+        parts: [
+          {
+            type: 'text',
+            text: '<interview_state>{"summary":"Draft","questions":[{"id":"q-1","question":"What?","options":["A"]}]}</interview_state>',
+          },
+        ],
+      });
+      const auth = await readDashboardAuthFile(freePort);
+      expect(auth).not.toBeNull();
+      const queued = await fetch(
+        `http://127.0.0.1:${freePort}/api/interviews/${interviewId}/answers?token=${auth?.token}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            answers: [{ questionId: 'q-1', answer: 'A' }],
+          }),
+        },
+      );
+      expect(queued.status).toBe(202);
+
+      const idleEvent = {
+        event: {
+          type: 'session.status',
+          properties: {
+            sessionID: 'session-dispose-race',
+            status: { type: 'idle' },
+          },
+        },
+      };
+      const delivery = manager.handleEvent(idleEvent);
+      await firstDeliveryStarted;
+      let disposed = false;
+      const disposal = manager.dispose().then(() => {
+        disposed = true;
+      });
+      await Promise.resolve();
+      expect(disposed).toBe(false);
+
+      releaseFirstDelivery();
+      await delivery;
+      await disposal;
+      expect(submitAttempts).toBe(1);
+
+      const files = await fs.readdir(`${tempDir}/interview`);
+      const documentPath = `${tempDir}/interview/${files.find((file) => file.endsWith('.md'))}`;
+      const replacement = createDashboardManager(
+        ctx,
+        config,
+        freePort,
+        'interview',
+        { runtime },
+      );
+      try {
+        await replacement.handleCommandExecuteBefore(
+          {
+            command: 'interview',
+            sessionID: 'session-dispose-race',
+            arguments: documentPath,
+          },
+          { parts: [] },
+        );
+        await replacement.handleEvent(idleEvent);
+        expect(submitAttempts).toBe(1);
+        expect(await fs.readFile(documentPath, 'utf8')).toContain('A: A');
+      } finally {
+        await replacement.dispose();
+      }
+    } finally {
+      releaseFirstDelivery();
+      await manager.dispose();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('handles session.status event with idle status', async () => {
     const tempDir = await fs.mkdtemp('/tmp/manager-test-');
     const ctx = createMockContext({ directory: tempDir });

@@ -116,7 +116,8 @@
 
 - `handleCommandExecuteBefore`
   - blank input with no active interview starts ideation,
-  - matching slug/path resumes an existing interview,
+  - matching slug/path resumes an existing interview only for its durable
+    frontmatter owner session,
   - otherwise creates a new interview and injects kickoff prompt.
 
 - `handleEvent`
@@ -150,3 +151,6 @@
   browser submissions. Session polling claims each queued value and must
   acknowledge it after service delivery; rejected deliveries roll the claim
   back without clearing the answer, chat message, block comment, or nudge.
+- Markdown documents persist their owning `sessionID` in frontmatter. A
+  different session cannot resume or mutate an owned document, while the
+  original session can resume it across plugin processes.

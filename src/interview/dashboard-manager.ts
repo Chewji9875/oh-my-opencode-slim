@@ -72,6 +72,7 @@ export function createDashboardManager(
   >();
   const nonRedeliverableInProcessClaims = new Set<string>();
   const inFlightInProcessClaims = new Map<string, symbol>();
+  const activeInProcessEvents = new Set<Promise<void>>();
 
   function acquireInProcessClaim(claimId: string): symbol | null {
     if (
@@ -399,6 +400,13 @@ export function createDashboardManager(
   }
 
   let disposePromise: Promise<void> | null = null;
+
+  async function waitForActiveInProcessEvents(): Promise<void> {
+    while (activeInProcessEvents.size > 0) {
+      await Promise.all([...activeInProcessEvents]);
+    }
+  }
+
   function dispose(): Promise<void> {
     if (disposePromise) return disposePromise;
 
@@ -407,16 +415,17 @@ export function createDashboardManager(
     const sessionsToUnregister = [...registeredSessions];
     registeredSessions.clear();
     pendingAcks.clear();
-    pendingInProcessAcks.clear();
-    inFlightDeliveries.clear();
-    inFlightInProcessClaims.clear();
-    nonRedeliverableClaims.clear();
-    nonRedeliverableInProcessClaims.clear();
     service.setStatePushCallback(() => {});
     service.setOnInterviewCreated(() => {});
 
     disposePromise = (async () => {
       await initPromise;
+      await waitForActiveInProcessEvents();
+      pendingInProcessAcks.clear();
+      inFlightDeliveries.clear();
+      inFlightInProcessClaims.clear();
+      nonRedeliverableClaims.clear();
+      nonRedeliverableInProcessClaims.clear();
       stopFallbackTimer();
       if (!isDashboard && dashboardBaseUrl && authToken) {
         await Promise.all(
@@ -623,242 +632,270 @@ export function createDashboardManager(
       await service.handleCommandExecuteBefore(input, output);
     },
     handleEvent: async (input) => {
-      await ensureInitialized();
-      if (disposed) return;
-      const { event } = input;
-      const properties = event.properties ?? {};
-      const info = properties.info;
-      const sessionID =
-        typeof info === 'object' &&
-        info !== null &&
-        'id' in info &&
-        typeof info.id === 'string'
-          ? info.id
-          : typeof properties.sessionID === 'string'
-            ? properties.sessionID
-            : null;
+      let finishEvent!: () => void;
+      const eventDone = new Promise<void>((resolve) => {
+        finishEvent = resolve;
+      });
+      activeInProcessEvents.add(eventDone);
 
-      await service.handleEvent(input);
+      try {
+        await ensureInitialized();
+        if (disposed) return;
+        const { event } = input;
+        const properties = event.properties ?? {};
+        const info = properties.info;
+        const sessionID =
+          typeof info === 'object' &&
+          info !== null &&
+          'id' in info &&
+          typeof info.id === 'string'
+            ? info.id
+            : typeof properties.sessionID === 'string'
+              ? properties.sessionID
+              : null;
 
-      // Event hook: Session is idle. Check for any pending user submissions
-      // queued on the dashboard and deliver them to OpenCode.
-      if (event.type === 'session.status' || event.type === 'session.idle') {
-        const status = properties.status as { type?: string } | undefined;
-        const isIdleEvent =
-          event.type === 'session.idle' || status?.type === 'idle';
-        if (sessionID && isIdleEvent) {
-          const interviewId = service.getActiveInterviewId(sessionID);
-          if (!isDashboard && dashboardBaseUrl) {
-            // Session mode: HTTP poll the dashboard
-            await pollPendingAnswers(sessionID);
-            await pollNudgeAction(sessionID);
-            await pollBlockComment(sessionID);
-            await pollChat(sessionID);
-          } else if (interviewId && dashboard) {
-            // Dashboard mode: read directly from in-process cache
-            const pending = canClaimInProcess(interviewId, 'answers')
-              ? dashboard.claimPendingAnswers(interviewId)
-              : null;
-            const owner = pending
-              ? acquireInProcessClaim(pending.claimId)
-              : null;
-            if (pending && owner) {
-              log('[interview] delivering pending answers (in-process)', {
-                interviewId,
-                count: pending.answers.length,
-              });
-              try {
-                await service.submitAnswers(interviewId, pending.answers);
-                if (
-                  inFlightInProcessClaims.get(pending.claimId) === owner &&
-                  !dashboard.acknowledgePending(
-                    interviewId,
-                    'answers',
-                    pending.claimId,
-                  )
-                ) {
-                  rememberInProcessAck(interviewId, 'answers', pending.claimId);
-                  log('[interview] answer delivery acknowledgement failed', {
-                    interviewId,
-                  });
-                }
-              } catch (error) {
-                if (inFlightInProcessClaims.get(pending.claimId) === owner) {
-                  dashboard.rollbackPending(
-                    interviewId,
-                    'answers',
-                    pending.claimId,
-                  );
-                }
-                log('[interview] answer delivery rolled back', {
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              } finally {
-                releaseInProcessClaim(pending.claimId, owner);
-              }
-            }
-            const nudge = canClaimInProcess(interviewId, 'nudge')
-              ? dashboard.claimNudgeAction(interviewId)
-              : null;
-            const nudgeOwner = nudge
-              ? acquireInProcessClaim(nudge.claimId)
-              : null;
-            if (nudge && nudgeOwner) {
-              log('[interview] delivering nudge action (in-process)', {
-                interviewId,
-                action: nudge.action,
-              });
-              try {
-                await service.handleNudgeAction(interviewId, nudge.action);
-                if (
-                  inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner &&
-                  !dashboard.acknowledgePending(
-                    interviewId,
-                    'nudge',
-                    nudge.claimId,
-                  )
-                ) {
-                  rememberInProcessAck(interviewId, 'nudge', nudge.claimId);
-                  log('[interview] nudge delivery acknowledgement failed', {
-                    interviewId,
-                  });
-                }
-              } catch (error) {
-                if (inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner) {
-                  dashboard.rollbackPending(
-                    interviewId,
-                    'nudge',
-                    nudge.claimId,
-                  );
-                }
-                log('[interview] nudge delivery rolled back', {
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              } finally {
-                releaseInProcessClaim(nudge.claimId, nudgeOwner);
-              }
-            }
-            const comment = canClaimInProcess(interviewId, 'block-comment')
-              ? dashboard.claimBlockComment(interviewId)
-              : null;
-            const commentOwner = comment
-              ? acquireInProcessClaim(comment.claimId)
-              : null;
-            if (comment && commentOwner) {
-              log('[interview] delivering block comment (in-process)', {
-                interviewId,
-                section: comment.comment.section,
-              });
-              try {
-                await service.submitBlockComment(
+        await service.handleEvent(input);
+
+        // Event hook: Session is idle. Check for any pending user submissions
+        // queued on the dashboard and deliver them to OpenCode.
+        if (event.type === 'session.status' || event.type === 'session.idle') {
+          const status = properties.status as { type?: string } | undefined;
+          const isIdleEvent =
+            event.type === 'session.idle' || status?.type === 'idle';
+          if (sessionID && isIdleEvent) {
+            const interviewId = service.getActiveInterviewId(sessionID);
+            if (!isDashboard && dashboardBaseUrl) {
+              // Session mode: HTTP poll the dashboard
+              await pollPendingAnswers(sessionID);
+              await pollNudgeAction(sessionID);
+              await pollBlockComment(sessionID);
+              await pollChat(sessionID);
+            } else if (interviewId && dashboard) {
+              // Dashboard mode: read directly from in-process cache
+              const pending = canClaimInProcess(interviewId, 'answers')
+                ? dashboard.claimPendingAnswers(interviewId)
+                : null;
+              const owner = pending
+                ? acquireInProcessClaim(pending.claimId)
+                : null;
+              if (pending && owner) {
+                log('[interview] delivering pending answers (in-process)', {
                   interviewId,
-                  comment.comment.section,
-                  comment.comment.comment,
-                );
-                if (
-                  inFlightInProcessClaims.get(comment.claimId) ===
-                    commentOwner &&
-                  !dashboard.acknowledgePending(
-                    interviewId,
-                    'block-comment',
-                    comment.claimId,
-                  )
-                ) {
-                  rememberInProcessAck(
-                    interviewId,
-                    'block-comment',
-                    comment.claimId,
-                  );
-                  log(
-                    '[interview] block comment delivery acknowledgement failed',
-                    { interviewId },
-                  );
-                }
-              } catch (error) {
-                if (
-                  inFlightInProcessClaims.get(comment.claimId) === commentOwner
-                ) {
-                  dashboard.rollbackPending(
-                    interviewId,
-                    'block-comment',
-                    comment.claimId,
-                  );
-                }
-                log('[interview] block comment delivery rolled back', {
-                  error: error instanceof Error ? error.message : String(error),
+                  count: pending.answers.length,
                 });
-              } finally {
-                releaseInProcessClaim(comment.claimId, commentOwner);
+                try {
+                  await service.submitAnswers(interviewId, pending.answers);
+                  if (
+                    inFlightInProcessClaims.get(pending.claimId) === owner &&
+                    !dashboard.acknowledgePending(
+                      interviewId,
+                      'answers',
+                      pending.claimId,
+                    )
+                  ) {
+                    rememberInProcessAck(
+                      interviewId,
+                      'answers',
+                      pending.claimId,
+                    );
+                    log('[interview] answer delivery acknowledgement failed', {
+                      interviewId,
+                    });
+                  }
+                } catch (error) {
+                  if (inFlightInProcessClaims.get(pending.claimId) === owner) {
+                    dashboard.rollbackPending(
+                      interviewId,
+                      'answers',
+                      pending.claimId,
+                    );
+                  }
+                  log('[interview] answer delivery rolled back', {
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                } finally {
+                  releaseInProcessClaim(pending.claimId, owner);
+                }
+              }
+              const nudge = canClaimInProcess(interviewId, 'nudge')
+                ? dashboard.claimNudgeAction(interviewId)
+                : null;
+              const nudgeOwner = nudge
+                ? acquireInProcessClaim(nudge.claimId)
+                : null;
+              if (nudge && nudgeOwner) {
+                log('[interview] delivering nudge action (in-process)', {
+                  interviewId,
+                  action: nudge.action,
+                });
+                try {
+                  await service.handleNudgeAction(interviewId, nudge.action);
+                  if (
+                    inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner &&
+                    !dashboard.acknowledgePending(
+                      interviewId,
+                      'nudge',
+                      nudge.claimId,
+                    )
+                  ) {
+                    rememberInProcessAck(interviewId, 'nudge', nudge.claimId);
+                    log('[interview] nudge delivery acknowledgement failed', {
+                      interviewId,
+                    });
+                  }
+                } catch (error) {
+                  if (
+                    inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner
+                  ) {
+                    dashboard.rollbackPending(
+                      interviewId,
+                      'nudge',
+                      nudge.claimId,
+                    );
+                  }
+                  log('[interview] nudge delivery rolled back', {
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                } finally {
+                  releaseInProcessClaim(nudge.claimId, nudgeOwner);
+                }
+              }
+              const comment = canClaimInProcess(interviewId, 'block-comment')
+                ? dashboard.claimBlockComment(interviewId)
+                : null;
+              const commentOwner = comment
+                ? acquireInProcessClaim(comment.claimId)
+                : null;
+              if (comment && commentOwner) {
+                log('[interview] delivering block comment (in-process)', {
+                  interviewId,
+                  section: comment.comment.section,
+                });
+                try {
+                  await service.submitBlockComment(
+                    interviewId,
+                    comment.comment.section,
+                    comment.comment.comment,
+                  );
+                  if (
+                    inFlightInProcessClaims.get(comment.claimId) ===
+                      commentOwner &&
+                    !dashboard.acknowledgePending(
+                      interviewId,
+                      'block-comment',
+                      comment.claimId,
+                    )
+                  ) {
+                    rememberInProcessAck(
+                      interviewId,
+                      'block-comment',
+                      comment.claimId,
+                    );
+                    log(
+                      '[interview] block comment delivery acknowledgement failed',
+                      { interviewId },
+                    );
+                  }
+                } catch (error) {
+                  if (
+                    inFlightInProcessClaims.get(comment.claimId) ===
+                    commentOwner
+                  ) {
+                    dashboard.rollbackPending(
+                      interviewId,
+                      'block-comment',
+                      comment.claimId,
+                    );
+                  }
+                  log('[interview] block comment delivery rolled back', {
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                } finally {
+                  releaseInProcessClaim(comment.claimId, commentOwner);
+                }
+              }
+              const chat = canClaimInProcess(interviewId, 'chat')
+                ? dashboard.claimChatMessage(interviewId)
+                : null;
+              const chatOwner = chat
+                ? acquireInProcessClaim(chat.claimId)
+                : null;
+              if (chat && chatOwner) {
+                log('[interview] delivering chat message (in-process)', {
+                  interviewId,
+                });
+                try {
+                  await service.submitChat(interviewId, chat.message);
+                  if (
+                    inFlightInProcessClaims.get(chat.claimId) === chatOwner &&
+                    !dashboard.acknowledgePending(
+                      interviewId,
+                      'chat',
+                      chat.claimId,
+                    )
+                  ) {
+                    rememberInProcessAck(interviewId, 'chat', chat.claimId);
+                    log('[interview] chat delivery acknowledgement failed', {
+                      interviewId,
+                    });
+                  }
+                } catch (error) {
+                  if (inFlightInProcessClaims.get(chat.claimId) === chatOwner) {
+                    dashboard.rollbackPending(
+                      interviewId,
+                      'chat',
+                      chat.claimId,
+                    );
+                  }
+                  log('[interview] chat delivery rolled back', {
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                } finally {
+                  releaseInProcessClaim(chat.claimId, chatOwner);
+                }
               }
             }
-            const chat = canClaimInProcess(interviewId, 'chat')
-              ? dashboard.claimChatMessage(interviewId)
-              : null;
-            const chatOwner = chat ? acquireInProcessClaim(chat.claimId) : null;
-            if (chat && chatOwner) {
-              log('[interview] delivering chat message (in-process)', {
-                interviewId,
-              });
-              try {
-                await service.submitChat(interviewId, chat.message);
-                if (
-                  inFlightInProcessClaims.get(chat.claimId) === chatOwner &&
-                  !dashboard.acknowledgePending(
-                    interviewId,
-                    'chat',
-                    chat.claimId,
-                  )
-                ) {
-                  rememberInProcessAck(interviewId, 'chat', chat.claimId);
-                  log('[interview] chat delivery acknowledgement failed', {
-                    interviewId,
-                  });
-                }
-              } catch (error) {
-                if (inFlightInProcessClaims.get(chat.claimId) === chatOwner) {
-                  dashboard.rollbackPending(interviewId, 'chat', chat.claimId);
-                }
-                log('[interview] chat delivery rolled back', {
-                  error: error instanceof Error ? error.message : String(error),
+
+            // Refresh state: calls getInterviewState → syncInterview →
+            // onStateChange. Runs AFTER nudge/answer processing so
+            // sessionBusy is accurate.
+            if (interviewId) {
+              service.getInterviewState(interviewId).catch((err) => {
+                log('[interview] failed to refresh state', {
+                  error: err instanceof Error ? err.message : String(err),
                 });
-              } finally {
-                releaseInProcessClaim(chat.claimId, chatOwner);
-              }
+              });
             }
           }
+        }
 
-          // Refresh state: calls getInterviewState → syncInterview →
-          // onStateChange. Runs AFTER nudge/answer processing so
-          // sessionBusy is accurate.
-          if (interviewId) {
-            service.getInterviewState(interviewId).catch((err) => {
-              log('[interview] failed to refresh state', {
+        // Clean up when a session is deleted
+        if (event.type === 'session.deleted' && sessionID) {
+          registeredSessions.delete(sessionID);
+          if (!isDashboard && registeredSessions.size === 0) {
+            stopFallbackTimer();
+          }
+          if (dashboard) {
+            dashboard.removeSession(sessionID);
+          } else if (dashboardBaseUrl && authToken) {
+            unregisterSessionViaHttp(
+              dashboardBaseUrl,
+              authToken,
+              sessionID,
+            ).catch((err) => {
+              log('[interview] failed to unregister deleted session:', {
                 error: err instanceof Error ? err.message : String(err),
               });
             });
           }
         }
-      }
-
-      // Clean up when a session is deleted
-      if (event.type === 'session.deleted' && sessionID) {
-        registeredSessions.delete(sessionID);
-        if (!isDashboard && registeredSessions.size === 0) {
-          stopFallbackTimer();
-        }
-        if (dashboard) {
-          dashboard.removeSession(sessionID);
-        } else if (dashboardBaseUrl && authToken) {
-          unregisterSessionViaHttp(
-            dashboardBaseUrl,
-            authToken,
-            sessionID,
-          ).catch((err) => {
-            log('[interview] failed to unregister deleted session:', {
-              error: err instanceof Error ? err.message : String(err),
-            });
-          });
-        }
+      } finally {
+        finishEvent();
+        activeInProcessEvents.delete(eventDone);
       }
     },
     dispose,
