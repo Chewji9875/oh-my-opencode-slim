@@ -135,6 +135,23 @@ function isUsableSecondaryText(text: string) {
 const SESSION_DELETE_RETRIES = 3;
 const SESSION_DELETE_RETRY_DELAY_MS = 500;
 const SECONDARY_MODEL_TIMEOUT_MS = 30_000;
+const activeSecondaryModelClients = new WeakSet<object>();
+
+function acquireSecondaryModelLease(client: object): () => void {
+  if (activeSecondaryModelClients.has(client)) {
+    throw new Error(
+      'A secondary model session cleanup is still pending; using fetched content without starting another session',
+    );
+  }
+
+  activeSecondaryModelClients.add(client);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeSecondaryModelClients.delete(client);
+  };
+}
 
 /**
  * Exposed for tests so they can avoid real wall-clock sleeps.
@@ -190,36 +207,37 @@ async function runSecondaryModel(
 ) {
   const client = getClient(input);
   const directory = input.directory;
-
-  const sessionResponse = await client.session.create({
-    query: { directory },
-    body: { title: 'smartfetch-secondary' },
-    throwOnError: true,
-  });
-
-  const session = sessionResponse.data;
-  const sessionId = session?.id;
-  if (!sessionId) {
-    const errorDetail =
-      sessionResponse && 'error' in sessionResponse
-        ? `: ${JSON.stringify(sessionResponse.error)}`
-        : '';
-    throw new Error(
-      `Secondary model session did not return an id${errorDetail}`,
-    );
-  }
-
-  const sourceChars = content.length;
-  const truncatedContent = content.slice(0, MAX_MODEL_CONTENT_CHARS);
-  const inputChars = truncatedContent.length;
-  const inputTruncated = inputChars < sourceChars;
-  const effectivePrompt = inputTruncated
-    ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
-    : prompt;
+  const releaseLease = acquireSecondaryModelLease(client);
+  let sessionId: string | undefined;
   let promptPromise: Promise<unknown> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let promptTimedOut = false;
   try {
+    const sessionResponse = await client.session.create({
+      query: { directory },
+      body: { title: 'smartfetch-secondary' },
+      throwOnError: true,
+    });
+
+    const session = sessionResponse.data;
+    sessionId = session?.id;
+    if (!sessionId) {
+      const errorDetail =
+        sessionResponse && 'error' in sessionResponse
+          ? `: ${JSON.stringify(sessionResponse.error)}`
+          : '';
+      throw new Error(
+        `Secondary model session did not return an id${errorDetail}`,
+      );
+    }
+
+    const sourceChars = content.length;
+    const truncatedContent = content.slice(0, MAX_MODEL_CONTENT_CHARS);
+    const inputChars = truncatedContent.length;
+    const inputTruncated = inputChars < sourceChars;
+    const effectivePrompt = inputTruncated
+      ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
+      : prompt;
     const toolIDsResponse = await client.tool.ids({
       query: { directory },
     });
@@ -274,7 +292,7 @@ async function runSecondaryModel(
       sourceChars,
     };
   } catch (error) {
-    if (promptTimedOut) {
+    if (promptTimedOut && sessionId) {
       try {
         await abortSessionWithTimeout(client, sessionId);
       } catch {
@@ -285,12 +303,20 @@ async function runSecondaryModel(
     throw error;
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-    if (promptTimedOut && promptPromise) {
+    const cleanupSessionId = sessionId;
+    if (promptTimedOut && promptPromise && cleanupSessionId) {
       void promptPromise
         .catch(() => undefined)
-        .then(() => deleteSessionSafely(input, sessionId));
+        .then(() => deleteSessionSafely(input, cleanupSessionId))
+        .finally(releaseLease);
+    } else if (cleanupSessionId) {
+      try {
+        await deleteSessionSafely(input, cleanupSessionId);
+      } finally {
+        releaseLease();
+      }
     } else {
-      await deleteSessionSafely(input, sessionId);
+      releaseLease();
     }
   }
 }
