@@ -164,14 +164,14 @@ export const BackgroundJobsConfigSchema = z.object({
         .int()
         .min(60_000)
         .max(2_147_483_647)
-        .default(300_000)
+        .default(600_000)
         .describe(
-          'Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 300,000 (5 minutes). 0 is invalid.',
+          'Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 600,000 (10 minutes). 0 is invalid.',
         ),
     })
-    .default({ enabled: true, intervalMs: 300_000 })
+    .default({ enabled: true, intervalMs: 600_000 })
     .describe(
-      'Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 5-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.',
+      'Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 10-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.',
     ),
   wallClockTimeoutMs: z
     .union([z.literal(0), z.number().int().min(60_000).max(2_147_483_647)])

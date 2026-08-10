@@ -1027,9 +1027,9 @@
         "orchestratorWake": {
           "default": {
             "enabled": true,
-            "intervalMs": 300000
+            "intervalMs": 600000
           },
-          "description": "Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 5-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.",
+          "description": "Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 10-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.",
           "type": "object",
           "properties": {
             "enabled": {
@@ -1038,8 +1038,8 @@
               "type": "boolean"
             },
             "intervalMs": {
-              "default": 300000,
-              "description": "Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 300,000 (5 minutes). 0 is invalid.",
+              "default": 600000,
+              "description": "Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 600,000 (10 minutes). 0 is invalid.",
               "type": "integer",
               "minimum": 60000,
               "maximum": 2147483647

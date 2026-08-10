@@ -75,14 +75,14 @@ describe('PluginConfigSchema backgroundJobs', () => {
     }
   });
 
-  it('defaults orchestratorWake to enabled with a 5-minute interval', () => {
+  it('defaults orchestratorWake to enabled with a 10-minute interval', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
 
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.backgroundJobs?.orchestratorWake).toEqual({
         enabled: true,
-        intervalMs: 300_000,
+        intervalMs: 600_000,
       });
     }
   });
