@@ -12,12 +12,14 @@ import {
 import { parseModelReference } from '../utils/session';
 import {
   appendInterviewAnswers,
+  claimInterviewDocument,
   createInterviewDirectoryPath,
   createInterviewFilePath,
   DEFAULT_OUTPUT_FOLDER,
   ensureInterviewFile,
   extractSummarySection,
   extractTitle,
+  InterviewDocumentOwnershipError,
   normalizeOutputFolder,
   parseSpecBlocks,
   readInterviewDocument,
@@ -364,8 +366,12 @@ export function createInterviewService(
       }
     }
 
-    const document = await fs.readFile(markdownPath, 'utf8');
     const messages = await loadMessages(sessionID);
+    const document = await claimInterviewDocument(
+      markdownPath,
+      sessionID,
+      messages.length,
+    );
     const title = extractTitle(document);
     const record: InterviewRecord = {
       id: randomUUID(),
@@ -664,7 +670,20 @@ export function createInterviewService(
       idea,
     );
     if (resumePath) {
-      const interview = await resumeInterview(input.sessionID, resumePath);
+      let interview: InterviewRecord;
+      try {
+        interview = await resumeInterview(input.sessionID, resumePath);
+      } catch (error) {
+        if (error instanceof InterviewDocumentOwnershipError) {
+          output.parts.push(
+            createInternalAgentTextPart(
+              'This interview document is already owned by another OpenCode session and cannot be resumed here.',
+            ),
+          );
+          return;
+        }
+        throw error;
+      }
       const document = await fs.readFile(interview.markdownPath, 'utf8');
       await notifyInterviewUrl(input.sessionID, interview);
       output.parts.push(

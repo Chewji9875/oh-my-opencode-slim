@@ -26,6 +26,16 @@ type DocumentLock = {
   token: string;
 };
 
+export class InterviewDocumentOwnershipError extends Error {
+  constructor(
+    readonly markdownPath: string,
+    readonly ownerSessionID: string,
+  ) {
+    super(`Interview document is owned by another session: ${ownerSessionID}`);
+    this.name = 'InterviewDocumentOwnershipError';
+  }
+}
+
 function isNoSuchFileError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
@@ -136,6 +146,67 @@ export async function withInterviewDocumentLock<T>(
   } finally {
     await releaseDocumentLock(lock);
   }
+}
+
+function buildInterviewFrontmatter(
+  sessionID: string,
+  baseMessageCount: number,
+  owner = 'agent',
+  tags = ['spec', 'diagnostic'],
+): string {
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  return [
+    '---',
+    `sessionID: ${sessionID}`,
+    `baseMessageCount: ${baseMessageCount}`,
+    `updatedAt: ${now.toISOString()}`,
+    'version: 1.0',
+    `date_created: ${dateStr}`,
+    `owner: ${owner}`,
+    `tags: [${tags.join(', ')}]`,
+    '---',
+    '',
+  ].join('\n');
+}
+
+export async function claimInterviewDocument(
+  markdownPath: string,
+  sessionID: string,
+  baseMessageCount: number,
+): Promise<string> {
+  return withInterviewDocumentLock(markdownPath, async () => {
+    const document = await fs.readFile(markdownPath, 'utf8');
+    const frontmatter = sharedParseFrontmatter(document);
+    const owner = frontmatter?.sessionID;
+    if (owner && owner !== sessionID) {
+      throw new InterviewDocumentOwnershipError(markdownPath, owner);
+    }
+    if (owner) {
+      return document;
+    }
+
+    const frontmatterMatch = document.match(
+      /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/,
+    );
+    const existingFrontmatter = frontmatterMatch?.[1]
+      .split(/\r?\n/)
+      .filter((line) => !/^sessionID\s*:/i.test(line))
+      .join('\n');
+    const next = frontmatterMatch
+      ? [
+          '---',
+          `sessionID: ${sessionID}`,
+          `baseMessageCount: ${baseMessageCount}`,
+          existingFrontmatter,
+          '---',
+          '',
+          document.slice(frontmatterMatch[0].length),
+        ].join('\n')
+      : `${buildInterviewFrontmatter(sessionID, baseMessageCount)}${document}`;
+    await fs.writeFile(markdownPath, next, 'utf8');
+    return next;
+  });
 }
 
 export function normalizeOutputFolder(outputFolder: string): string {
@@ -276,25 +347,16 @@ export function buildInterviewDocument(
   const normalizedSummary = summary.trim() || 'Waiting for interview answers.';
   const normalizedHistory = history.trim() || 'No answers yet.';
 
-  const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
-
   const owner = meta?.owner ?? 'agent';
   const tags = meta?.tags ?? ['spec', 'diagnostic'];
 
   const frontmatter = meta?.sessionID
-    ? [
-        '---',
-        `sessionID: ${meta.sessionID}`,
-        `baseMessageCount: ${meta.baseMessageCount ?? 0}`,
-        `updatedAt: ${now.toISOString()}`,
-        `version: 1.0`,
-        `date_created: ${dateStr}`,
-        `owner: ${owner}`,
-        `tags: [${tags.join(', ')}]`,
-        '---',
-        '',
-      ].join('\n')
+    ? buildInterviewFrontmatter(
+        meta.sessionID,
+        meta.baseMessageCount ?? 0,
+        owner,
+        tags,
+      )
     : '';
 
   return [

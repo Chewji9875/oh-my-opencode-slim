@@ -205,7 +205,7 @@ describe('interview finalization', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
-  test('serializes overlapping writes from service instances sharing one document', async () => {
+  test('prevents a second session from resuming the owned document', async () => {
     const directory = await fs.mkdtemp('/tmp/interview-resume-lock-');
     const documentPath = path.join(directory, 'interview', 'shared.md');
     await fs.mkdir(path.dirname(documentPath), { recursive: true });
@@ -215,75 +215,119 @@ describe('interview finalization', () => {
       'utf8',
     );
 
-    const scenarios = await Promise.all(
-      [
-        {
-          sessionID: 'ses_one',
-          summary: 'One draft',
-          questionId: 'q-one',
-          question: 'One?',
-          answer: 'One answer',
-        },
-        {
-          sessionID: 'ses_two',
-          summary: 'Two draft',
-          questionId: 'q-two',
-          question: 'Two?',
-          answer: 'Two answer',
-        },
-      ].map(async (scenario) => {
-        const messages: InterviewMessage[] = [];
-        const runtime: InterviewSessionRuntime = {
-          messages: async () => messages,
+    const firstMessages: InterviewMessage[] = [];
+    const firstService = createInterviewService(
+      { directory } as never,
+      undefined,
+      {
+        runtime: {
+          messages: async () => firstMessages,
           notify: async () => {},
           continue: async () => {},
           rename: async () => {},
-        };
-        const service = createInterviewService(
-          { directory } as never,
-          undefined,
-          { runtime, openBrowser: () => {} },
-        );
-        service.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
-        await service.handleCommandExecuteBefore(
-          {
-            command: 'interview',
-            sessionID: scenario.sessionID,
-            arguments: documentPath,
-          },
-          { parts: [] },
-        );
-        messages.push({
-          info: { role: 'assistant' },
-          parts: [
-            {
-              type: 'text',
-              text: `<interview_state>{"summary":"${scenario.summary}","title":"Shared Title","questions":[{"id":"${scenario.questionId}","question":"${scenario.question}","options":["Yes"]}]}</interview_state>`,
-            },
-          ],
-        });
-        const interviewID = service.getActiveInterviewId(scenario.sessionID);
-        expect(interviewID).not.toBeNull();
-        return { ...scenario, service, interviewID: interviewID as string };
-      }),
+        },
+        openBrowser: () => {},
+      },
+    );
+    firstService.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
+    await firstService.handleCommandExecuteBefore(
+      {
+        command: 'interview',
+        sessionID: 'ses_one',
+        arguments: documentPath,
+      },
+      { parts: [] },
+    );
+    firstMessages.push({
+      info: { role: 'assistant' },
+      parts: [
+        {
+          type: 'text',
+          text: '<interview_state>{"summary":"One draft","title":"Shared Title","questions":[{"id":"q-one","question":"One?","options":["Yes"]}]}</interview_state>',
+        },
+      ],
+    });
+    const firstInterviewID = firstService.getActiveInterviewId('ses_one');
+    expect(firstInterviewID).not.toBeNull();
+    await firstService.getInterviewState(firstInterviewID as string);
+    const ownedDocument = await fs.readFile(documentPath, 'utf8');
+
+    const secondService = createInterviewService(
+      { directory } as never,
+      undefined,
+      {
+        runtime: {
+          messages: async () => [],
+          notify: async () => {},
+          continue: async () => {},
+          rename: async () => {},
+        },
+        openBrowser: () => {},
+      },
+    );
+    secondService.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
+    const secondOutput = {
+      parts: [] as Array<{ type: string; text?: string }>,
+    };
+    await secondService.handleCommandExecuteBefore(
+      {
+        command: 'interview',
+        sessionID: 'ses_two',
+        arguments: documentPath,
+      },
+      secondOutput,
     );
 
-    await Promise.all(
-      scenarios.map(({ service, interviewID }) =>
-        service.getInterviewState(interviewID),
-      ),
-    );
-    await Promise.all(
-      scenarios.map(({ service, interviewID, questionId, answer }) =>
-        service.submitAnswers(interviewID, [{ questionId, answer }]),
-      ),
-    );
-
-    const document = await fs.readFile(documentPath, 'utf8');
-    expect(document).toContain('# Shared Title');
-    expect(document).toContain('A: One answer');
-    expect(document).toContain('A: Two answer');
+    expect(secondService.getActiveInterviewId('ses_two')).toBeNull();
+    expect(secondOutput.parts[0]?.text).toContain('already owned');
+    expect(await fs.readFile(documentPath, 'utf8')).toBe(ownedDocument);
     expect(await fs.readdir(path.dirname(documentPath))).toEqual(['shared.md']);
+
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  test('allows the owning session to resume through another service instance', async () => {
+    const directory = await fs.mkdtemp('/tmp/interview-owner-resume-');
+    const documentPath = path.join(directory, 'interview', 'owned.md');
+    await fs.mkdir(path.dirname(documentPath), { recursive: true });
+    await fs.writeFile(documentPath, '# Owned\n\nDraft.', 'utf8');
+
+    const createService = () =>
+      createInterviewService({ directory } as never, undefined, {
+        runtime: {
+          messages: async () => [],
+          notify: async () => {},
+          continue: async () => {},
+          rename: async () => {},
+        },
+        openBrowser: () => {},
+      });
+    const firstService = createService();
+    const secondService = createService();
+    firstService.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
+    secondService.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
+
+    await firstService.handleCommandExecuteBefore(
+      {
+        command: 'interview',
+        sessionID: 'same-session',
+        arguments: documentPath,
+      },
+      { parts: [] },
+    );
+    await secondService.handleCommandExecuteBefore(
+      {
+        command: 'interview',
+        sessionID: 'same-session',
+        arguments: documentPath,
+      },
+      { parts: [] },
+    );
+
+    expect(secondService.getActiveInterviewId('same-session')).not.toBeNull();
+    expect(await fs.readFile(documentPath, 'utf8')).toContain(
+      'sessionID: same-session',
+    );
 
     await fs.rm(directory, { recursive: true, force: true });
   });
