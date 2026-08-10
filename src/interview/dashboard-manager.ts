@@ -71,6 +71,26 @@ export function createDashboardManager(
     { interviewId: string; kind: InProcessKind; claimId: string }
   >();
   const nonRedeliverableInProcessClaims = new Set<string>();
+  const inFlightInProcessClaims = new Map<string, symbol>();
+
+  function acquireInProcessClaim(claimId: string): symbol | null {
+    if (
+      nonRedeliverableInProcessClaims.has(claimId) ||
+      inFlightInProcessClaims.has(claimId)
+    ) {
+      return null;
+    }
+
+    const owner = Symbol(claimId);
+    inFlightInProcessClaims.set(claimId, owner);
+    return owner;
+  }
+
+  function releaseInProcessClaim(claimId: string, owner: symbol): void {
+    if (inFlightInProcessClaims.get(claimId) === owner) {
+      inFlightInProcessClaims.delete(claimId);
+    }
+  }
 
   function canClaimInProcess(
     interviewId: string,
@@ -389,6 +409,7 @@ export function createDashboardManager(
     pendingAcks.clear();
     pendingInProcessAcks.clear();
     inFlightDeliveries.clear();
+    inFlightInProcessClaims.clear();
     nonRedeliverableClaims.clear();
     nonRedeliverableInProcessClaims.clear();
     service.setStatePushCallback(() => {});
@@ -638,10 +659,10 @@ export function createDashboardManager(
             const pending = canClaimInProcess(interviewId, 'answers')
               ? dashboard.claimPendingAnswers(interviewId)
               : null;
-            if (
-              pending &&
-              !nonRedeliverableInProcessClaims.has(pending.claimId)
-            ) {
+            const owner = pending
+              ? acquireInProcessClaim(pending.claimId)
+              : null;
+            if (pending && owner) {
               log('[interview] delivering pending answers (in-process)', {
                 interviewId,
                 count: pending.answers.length,
@@ -649,6 +670,7 @@ export function createDashboardManager(
               try {
                 await service.submitAnswers(interviewId, pending.answers);
                 if (
+                  inFlightInProcessClaims.get(pending.claimId) === owner &&
                   !dashboard.acknowledgePending(
                     interviewId,
                     'answers',
@@ -661,20 +683,27 @@ export function createDashboardManager(
                   });
                 }
               } catch (error) {
-                dashboard.rollbackPending(
-                  interviewId,
-                  'answers',
-                  pending.claimId,
-                );
+                if (inFlightInProcessClaims.get(pending.claimId) === owner) {
+                  dashboard.rollbackPending(
+                    interviewId,
+                    'answers',
+                    pending.claimId,
+                  );
+                }
                 log('[interview] answer delivery rolled back', {
                   error: error instanceof Error ? error.message : String(error),
                 });
+              } finally {
+                releaseInProcessClaim(pending.claimId, owner);
               }
             }
             const nudge = canClaimInProcess(interviewId, 'nudge')
               ? dashboard.claimNudgeAction(interviewId)
               : null;
-            if (nudge) {
+            const nudgeOwner = nudge
+              ? acquireInProcessClaim(nudge.claimId)
+              : null;
+            if (nudge && nudgeOwner) {
               log('[interview] delivering nudge action (in-process)', {
                 interviewId,
                 action: nudge.action,
@@ -682,6 +711,7 @@ export function createDashboardManager(
               try {
                 await service.handleNudgeAction(interviewId, nudge.action);
                 if (
+                  inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner &&
                   !dashboard.acknowledgePending(
                     interviewId,
                     'nudge',
@@ -694,16 +724,27 @@ export function createDashboardManager(
                   });
                 }
               } catch (error) {
-                dashboard.rollbackPending(interviewId, 'nudge', nudge.claimId);
+                if (inFlightInProcessClaims.get(nudge.claimId) === nudgeOwner) {
+                  dashboard.rollbackPending(
+                    interviewId,
+                    'nudge',
+                    nudge.claimId,
+                  );
+                }
                 log('[interview] nudge delivery rolled back', {
                   error: error instanceof Error ? error.message : String(error),
                 });
+              } finally {
+                releaseInProcessClaim(nudge.claimId, nudgeOwner);
               }
             }
             const comment = canClaimInProcess(interviewId, 'block-comment')
               ? dashboard.claimBlockComment(interviewId)
               : null;
-            if (comment) {
+            const commentOwner = comment
+              ? acquireInProcessClaim(comment.claimId)
+              : null;
+            if (comment && commentOwner) {
               log('[interview] delivering block comment (in-process)', {
                 interviewId,
                 section: comment.comment.section,
@@ -715,6 +756,8 @@ export function createDashboardManager(
                   comment.comment.comment,
                 );
                 if (
+                  inFlightInProcessClaims.get(comment.claimId) ===
+                    commentOwner &&
                   !dashboard.acknowledgePending(
                     interviewId,
                     'block-comment',
@@ -732,26 +775,34 @@ export function createDashboardManager(
                   );
                 }
               } catch (error) {
-                dashboard.rollbackPending(
-                  interviewId,
-                  'block-comment',
-                  comment.claimId,
-                );
+                if (
+                  inFlightInProcessClaims.get(comment.claimId) === commentOwner
+                ) {
+                  dashboard.rollbackPending(
+                    interviewId,
+                    'block-comment',
+                    comment.claimId,
+                  );
+                }
                 log('[interview] block comment delivery rolled back', {
                   error: error instanceof Error ? error.message : String(error),
                 });
+              } finally {
+                releaseInProcessClaim(comment.claimId, commentOwner);
               }
             }
             const chat = canClaimInProcess(interviewId, 'chat')
               ? dashboard.claimChatMessage(interviewId)
               : null;
-            if (chat) {
+            const chatOwner = chat ? acquireInProcessClaim(chat.claimId) : null;
+            if (chat && chatOwner) {
               log('[interview] delivering chat message (in-process)', {
                 interviewId,
               });
               try {
                 await service.submitChat(interviewId, chat.message);
                 if (
+                  inFlightInProcessClaims.get(chat.claimId) === chatOwner &&
                   !dashboard.acknowledgePending(
                     interviewId,
                     'chat',
@@ -764,10 +815,14 @@ export function createDashboardManager(
                   });
                 }
               } catch (error) {
-                dashboard.rollbackPending(interviewId, 'chat', chat.claimId);
+                if (inFlightInProcessClaims.get(chat.claimId) === chatOwner) {
+                  dashboard.rollbackPending(interviewId, 'chat', chat.claimId);
+                }
                 log('[interview] chat delivery rolled back', {
                   error: error instanceof Error ? error.message : String(error),
                 });
+              } finally {
+                releaseInProcessClaim(chat.claimId, chatOwner);
               }
             }
           }

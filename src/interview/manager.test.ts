@@ -4,6 +4,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import type { PluginConfig } from '../config';
 import { readDashboardAuthFile } from './dashboard';
+import { createDashboardManager } from './dashboard-manager';
 import { createInterviewManager as createInterviewManagerImpl } from './manager';
 
 // Intercept getClient so the manager's service uses the same session mocks.
@@ -601,6 +602,107 @@ describe('interview manager - session registration', () => {
 });
 
 describe('interview manager - edge cases', () => {
+  test('does not roll back a claim during an overlapping in-process delivery', async () => {
+    const tempDir = await fs.mkdtemp('/tmp/manager-test-');
+    const ctx = createMockContext({ directory: tempDir });
+    const freePort = await findFreePort();
+    const config = createTestConfig({ port: freePort, dashboard: true });
+    const messages: Array<{
+      info?: { role: string };
+      parts?: Array<{ type: string; text?: string }>;
+    }> = [];
+    let signalFirstDelivery!: () => void;
+    const firstDeliveryStarted = new Promise<void>((resolve) => {
+      signalFirstDelivery = resolve;
+    });
+    let releaseFirstDelivery!: () => void;
+    const firstDeliveryGate = new Promise<void>((resolve) => {
+      releaseFirstDelivery = resolve;
+    });
+    let submitAttempts = 0;
+    const runtime = {
+      messages: async () => messages,
+      notify: async () => {},
+      continue: async () => {
+        submitAttempts++;
+        if (submitAttempts === 1) {
+          signalFirstDelivery();
+          await firstDeliveryGate;
+        } else {
+          throw new Error('session busy');
+        }
+      },
+      rename: async () => {},
+    };
+    const manager = createDashboardManager(ctx, config, freePort, 'interview', {
+      runtime,
+    });
+
+    try {
+      await manager.handleCommandExecuteBefore(
+        {
+          command: 'interview',
+          sessionID: 'session-overlap',
+          arguments: 'Overlap Delivery Test',
+        },
+        { parts: [] },
+      );
+      const interviewId =
+        manager.service.getActiveInterviewId('session-overlap');
+      expect(interviewId).not.toBeNull();
+
+      messages.push({
+        info: { role: 'assistant' },
+        parts: [
+          {
+            type: 'text',
+            text: '<interview_state>{"summary":"Draft","questions":[{"id":"q-1","question":"What?","options":["A"]}]}</interview_state>',
+          },
+        ],
+      });
+      const auth = await readDashboardAuthFile(freePort);
+      expect(auth).not.toBeNull();
+      const queued = await fetch(
+        `http://127.0.0.1:${freePort}/api/interviews/${interviewId}/answers?token=${auth?.token}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            answers: [{ questionId: 'q-1', answer: 'A' }],
+          }),
+        },
+      );
+      expect(queued.status).toBe(202);
+
+      const idleEvent = {
+        event: {
+          type: 'session.status',
+          properties: {
+            sessionID: 'session-overlap',
+            status: { type: 'idle' },
+          },
+        },
+      };
+      const first = manager.handleEvent(idleEvent);
+      await firstDeliveryStarted;
+      const second = manager.handleEvent(idleEvent);
+      await second;
+      releaseFirstDelivery();
+      await first;
+
+      expect(submitAttempts).toBe(1);
+
+      // The successful owner acknowledged the claim. A later idle event must
+      // not see a rolled-back claim and submit the same answer again.
+      await manager.handleEvent(idleEvent);
+      expect(submitAttempts).toBe(1);
+    } finally {
+      releaseFirstDelivery();
+      await manager.dispose();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('handles session.status event with idle status', async () => {
     const tempDir = await fs.mkdtemp('/tmp/manager-test-');
     const ctx = createMockContext({ directory: tempDir });
