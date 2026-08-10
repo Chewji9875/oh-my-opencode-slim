@@ -31,6 +31,8 @@ const client = {
     message: noop,
     get: noop,
     status: noop,
+    todo: noop,
+    children: noop,
     delete: noop,
     create: noop,
     prompt: noop,
@@ -56,10 +58,10 @@ client.session.messages({
 // message (chat-headers)
 client.session.message({ path: { id: 'ses_x', messageID: 'msg_1' } });
 
-// get (cancel-task getSessionParentID, continuation-evaluator)
+// get (cancel-task getSessionParentID, orchestrator-wake)
 client.session.get({ path: { id: 'ses_x' }, query: { directory: '/d' } });
 
-// status (cancel-task getSessionStatus)
+// status (cancel-task getSessionStatus, orchestrator-wake)
 client.session.status({ query: { directory: '/d' } });
 
 // delete (cancel-task, secondary-model)
@@ -86,13 +88,34 @@ client.session.prompt({
   },
 });
 
-// promptAsync (foreground-fallback, continuation-evaluator)
+// promptAsync (foreground-fallback)
 client.session.promptAsync({
   path: { id: 'ses_x' },
   body: {
     agent: 'orchestrator',
     parts: [{ type: 'text', text: 'nudge' }],
   },
+});
+
+// promptAsync with directory query (orchestrator-wake)
+client.session.promptAsync({
+  path: { id: 'ses_x' },
+  query: { directory: '/d' },
+  body: {
+    agent: 'orchestrator',
+    model: { providerID: 'p', modelID: 'm' },
+    parts: [{ type: 'text', text: 'wake' }],
+  },
+});
+
+// todo / children (orchestrator-wake)
+client.session.todo({
+  path: { id: 'ses_x' },
+  query: { directory: '/d' },
+});
+client.session.children({
+  path: { id: 'ses_x' },
+  query: { directory: '/d' },
 });
 
 // tool.ids (secondary-model)
@@ -140,4 +163,15 @@ client.session.prompt({
   body: { parts: [{ type: 'text', text: 'x' }] },
   // @ts-expect-error top-level variant is not part of the v1 prompt body
   variant: 'high',
+});
+
+// v1 promptAsync body does not declare variant
+client.session.promptAsync({
+  path: { id: 'ses_x' },
+  query: { directory: '/d' },
+  body: {
+    parts: [{ type: 'text', text: 'x' }],
+    // @ts-expect-error variant is not part of the v1 promptAsync body
+    variant: 'high',
+  },
 });

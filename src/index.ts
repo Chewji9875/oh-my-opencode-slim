@@ -22,6 +22,7 @@ import {
   createFilterAvailableSkillsHook,
   createJsonErrorRecoveryHook,
   createLoopCommandHook,
+  createOrchestratorWakeScheduler,
   createPhaseReminderHook,
   createPostFileToolNudgeHook,
   createReflectCommandHook,
@@ -149,6 +150,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
+  let orchestratorWakeScheduler: ReturnType<
+    typeof createOrchestratorWakeScheduler
+  >;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
   let filterAvailableSkills: ReturnType<typeof createFilterAvailableSkillsHook>;
   let postFileToolNudge: ReturnType<typeof createPostFileToolNudgeHook>;
@@ -326,7 +330,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       maxRetainedSnapshots: runtime.backgroundJobs.maxRetainedSnapshots,
       readContextMinLines: runtime.backgroundJobs.readContextMinLines,
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
-      continueOnIdle: runtime.backgroundJobs.continueOnIdle === true,
       backgroundJobBoard: backgroundJobCoordinator,
       backgroundJobSupervisor,
       shouldManageSession: (sessionID) =>
@@ -338,6 +341,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.isFallbackInProgress(sessionID),
       willAttemptFallback: (sessionID) =>
         foregroundFallback.willAttemptFallback(sessionID),
+      coordinator: sessionLifecycle,
+    });
+
+    orchestratorWakeScheduler = createOrchestratorWakeScheduler(ctx, {
+      config: runtime.backgroundJobs.orchestratorWake,
+      shouldManageSession: (sessionID) =>
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+      hasInputWait: (sessionID) =>
+        taskSessionManagerHook.hasInputWait(sessionID),
+      isFallbackInProgress: (sessionID) =>
+        foregroundFallback.isFallbackInProgress(sessionID),
       coordinator: sessionLifecycle,
     });
 
@@ -418,8 +432,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       registerSessionAsOrchestrator: (sessionID) => {
         sessionMetadata.setAgent(sessionID, 'orchestrator');
       },
-      beginUserWait: (sessionID) =>
-        taskSessionManagerHook.beginUserWait(sessionID),
+      beginUserWait: (sessionID) => {
+        taskSessionManagerHook.beginUserWait(sessionID);
+        orchestratorWakeScheduler.suppress(sessionID);
+      },
     });
 
     const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
@@ -937,6 +953,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         },
       );
 
+      await orchestratorWakeScheduler.event(
+        input as {
+          event: {
+            type: string;
+            properties?: {
+              info?: { id?: string };
+              sessionID?: string;
+              status?: { type?: string };
+            };
+          };
+        },
+      );
+
       // Runtime model fallback for foreground agents (rate-limit detection)
       await foregroundFallback.handleEvent(input.event);
 
@@ -988,6 +1017,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     dispose: async () => {
       await taskSessionManagerHook.event({
+        event: { type: 'server.instance.disposed' },
+      });
+      await orchestratorWakeScheduler.event({
         event: { type: 'server.instance.disposed' },
       });
       await multiplexerSessionManager.cleanupOnInstanceDisposed();
@@ -1088,6 +1120,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         });
       }
       taskSessionManagerHook.observeChatMessage(input, output);
+      orchestratorWakeScheduler.observeChatMessage(input, output);
     },
 
     // Inject orchestrator system prompt for serve-mode sessions. In serve
