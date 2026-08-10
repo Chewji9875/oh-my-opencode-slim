@@ -8,10 +8,13 @@
  * and the event stream. Each bridge is independently try/catch-guarded.
  */
 
+import { loadPluginConfig } from '../config/loader';
+import { InterviewConfigSchema } from '../config/schema';
 import { OhMyOpenCodeLite } from '../index';
 import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
 import { buildPluginInput } from './client-shim';
+import { createV2InterviewBridge } from './interview-bridge';
 import type {
   V2Cleanup,
   V2Context,
@@ -52,6 +55,12 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     }
 
     if (!v1Hooks) return async () => {};
+
+    const interviewConfig = InterviewConfigSchema.parse(
+      loadPluginConfig(directory).interview ?? {},
+    );
+    const interviewBridge = createV2InterviewBridge(ctx, interviewConfig);
+    disposers.push(() => interviewBridge.dispose());
 
     // Resolve agents/commands via the v1 config() hook (model resolution etc.).
     let resolvedAgents: Record<string, Record<string, unknown>> | undefined;
@@ -180,6 +189,32 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
     } catch (err) {
       log('[v2] command.transform failed', String(err));
+    }
+
+    // `/interview` is a v2 command marker. The context bridge consumes the
+    // rendered marker and delegates the actual behavior to the interview
+    // service without expanding the global v2 client shim.
+    try {
+      const reg = await ctx.command.transform((draft) => {
+        try {
+          interviewBridge.registerCommand(draft);
+        } catch (err) {
+          log('[v2] interview command adapt failed', String(err));
+        }
+      });
+      disposers.push(() => reg.dispose());
+    } catch (err) {
+      log('[v2] interview command registration failed', String(err));
+    }
+
+    try {
+      const reg = await ctx.session.hook('context', async (event) =>
+        interviewBridge.handleContext(event),
+      );
+      disposers.push(() => reg.dispose());
+      log('[v2] interview context bridge registered');
+    } catch (err) {
+      log('[v2] interview context bridge failed', String(err));
     }
 
     // ── System + messages transforms (session context hook) ──
@@ -342,13 +377,18 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const eventHook = v1Hooks.event as
         | ((i: { event: Record<string, unknown> }) => Promise<void>)
         | undefined;
-      if (eventHook) {
+      if (eventHook || interviewBridge) {
         const iter = ctx.event.subscribe();
+        const eventIterator = iter[Symbol.asyncIterator]();
+        let eventStopped = false;
         void (async () => {
           try {
-            for await (const ev of iter) {
+            while (!eventStopped) {
+              const next = await eventIterator.next();
+              if (next.done) break;
               try {
-                await eventHook({ event: ev });
+                await interviewBridge.handleEvent(next.value);
+                if (eventHook) await eventHook({ event: next.value });
               } catch (err) {
                 log('[v2] event handler failed', String(err));
               }
@@ -357,6 +397,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             log('[v2] event stream ended', String(err));
           }
         })();
+        disposers.push(async () => {
+          eventStopped = true;
+          await eventIterator.return?.();
+        });
         log('[v2] event stream subscribed');
       }
     } catch (err) {

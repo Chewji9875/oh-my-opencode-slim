@@ -4,6 +4,7 @@ import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import {
+  InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type PluginConfig,
   PluginConfigSchema,
@@ -47,6 +48,51 @@ export interface LoadPluginConfigOptions {
 }
 
 const PROMPTS_DIR_NAME = 'oh-my-opencode-slim';
+const INTERVIEW_CONFIG_KEYS = [
+  'maxQuestions',
+  'outputFolder',
+  'autoOpenBrowser',
+  'port',
+  'dashboard',
+] as const;
+
+function retainExplicitInterviewFields(
+  parsedConfig: PluginConfig,
+  rawConfig: unknown,
+): PluginConfig {
+  if (!parsedConfig.interview) {
+    return parsedConfig;
+  }
+
+  const rawInterview =
+    typeof rawConfig === 'object' &&
+    rawConfig !== null &&
+    !Array.isArray(rawConfig) &&
+    typeof (rawConfig as Record<string, unknown>).interview === 'object' &&
+    (rawConfig as Record<string, unknown>).interview !== null &&
+    !Array.isArray((rawConfig as Record<string, unknown>).interview)
+      ? ((rawConfig as Record<string, unknown>).interview as Record<
+          string,
+          unknown
+        >)
+      : undefined;
+
+  if (!rawInterview) {
+    return { ...parsedConfig, interview: undefined };
+  }
+
+  const interview: Record<string, unknown> = {};
+  for (const key of INTERVIEW_CONFIG_KEYS) {
+    if (Object.hasOwn(rawInterview, key)) {
+      interview[key] = parsedConfig.interview[key];
+    }
+  }
+
+  return {
+    ...parsedConfig,
+    interview: interview as PluginConfig['interview'],
+  };
+}
 
 /**
  * Load and validate plugin configuration from a specific file path.
@@ -172,11 +218,16 @@ function loadConfigFromPath(
       return null;
     }
 
+    // Zod applies nested defaults while parsing each layer. Keep interview
+    // defaults from masquerading as explicitly configured overrides; the
+    // merged interview config is normalized after all layers are merged.
+    const layerConfig = retainExplicitInterviewFields(result.data, rawConfig);
+
     // Zod applies webfetch.enabled's default while parsing each layer. Keep
     // that default from masquerading as an explicitly configured override;
     // the merged webfetch config is normalized after all layers are merged.
     if (
-      result.data.webfetch &&
+      layerConfig.webfetch &&
       typeof rawConfig === 'object' &&
       rawConfig !== null &&
       'webfetch' in rawConfig &&
@@ -185,14 +236,14 @@ function loadConfigFromPath(
       !Array.isArray(rawConfig.webfetch) &&
       !Object.hasOwn(rawConfig.webfetch, 'enabled')
     ) {
-      const { enabled: _enabled, ...webfetch } = result.data.webfetch;
+      const { enabled: _enabled, ...webfetch } = layerConfig.webfetch;
       return {
-        ...result.data,
+        ...layerConfig,
         webfetch: webfetch as PluginConfig['webfetch'],
       };
     }
 
-    return result.data;
+    return layerConfig;
   } catch (error) {
     // File doesn't exist or isn't readable - this is expected and fine
     if (
@@ -330,6 +381,7 @@ export function mergePluginConfigs(
     agents: deepMerge(base.agents, override.agents),
     presets: deepMerge(base.presets, override.presets),
     multiplexer: deepMerge(base.multiplexer, override.multiplexer),
+    interview: deepMerge(base.interview, override.interview),
     backgroundJobs: deepMerge(base.backgroundJobs, override.backgroundJobs),
     fallback: deepMerge(base.fallback, override.fallback),
     council: deepMerge(base.council, override.council),
@@ -420,6 +472,9 @@ export function loadPluginConfig(
 
   if (config.webfetch) {
     config.webfetch = WebfetchConfigSchema.parse(config.webfetch);
+  }
+  if (config.interview) {
+    config.interview = InterviewConfigSchema.parse(config.interview);
   }
 
   // Override preset from environment variable if set
