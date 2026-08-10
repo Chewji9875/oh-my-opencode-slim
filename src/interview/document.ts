@@ -29,8 +29,13 @@ export function createInterviewFilePath(
   directory: string,
   outputFolder: string,
   idea: string,
+  uniqueId?: string,
 ): string {
-  const fileName = `${slugify(idea) || 'interview'}.md`;
+  const readableSlug = slugify(idea) || 'interview';
+  const uniqueSuffix = uniqueId
+    ? `-${uniqueId.replace(/[^a-z0-9-]+/gi, '-')}`
+    : '';
+  const fileName = `${readableSlug}${uniqueSuffix}.md`;
   return path.join(
     createInterviewDirectoryPath(directory, outputFolder),
     fileName,
@@ -190,17 +195,47 @@ export async function ensureInterviewFile(
 ): Promise<void> {
   await fs.mkdir(path.dirname(record.markdownPath), { recursive: true });
   try {
-    await fs.access(record.markdownPath);
-  } catch {
     await fs.writeFile(
       record.markdownPath,
       buildInterviewDocument(record.idea, '', '', {
         sessionID: record.sessionID,
         baseMessageCount: record.baseMessageCount,
       }),
-      'utf8',
+      { encoding: 'utf8', flag: 'wx' },
     );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw error;
+    }
   }
+}
+
+/**
+ * Move an interview document without replacing a document created by another
+ * interview. The hard-link operation is atomic and fails if the destination
+ * already exists, unlike fs.rename which replaces files on Unix.
+ */
+export async function moveInterviewDocument(
+  record: InterviewRecord,
+  destinationPath: string,
+): Promise<boolean> {
+  try {
+    await fs.link(record.markdownPath, destinationPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      return false;
+    }
+    throw error;
+  }
+
+  try {
+    await fs.unlink(record.markdownPath);
+  } catch (error) {
+    await fs.unlink(destinationPath).catch(() => {});
+    throw error;
+  }
+
+  return true;
 }
 
 export async function readInterviewDocument(

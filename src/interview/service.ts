@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
@@ -17,6 +18,7 @@ import {
   ensureInterviewFile,
   extractSummarySection,
   extractTitle,
+  moveInterviewDocument,
   normalizeOutputFolder,
   parseSpecBlocks,
   readInterviewDocument,
@@ -196,7 +198,6 @@ export function createInterviewService(
     | ((interviewId: string, state: InterviewState) => void)
     | null = null;
   let onInterviewCreated: ((interview: InterviewRecord) => void) | null = null;
-  let idCounter = 0;
   let abandonedOrderCounter = 0;
   const finalizationPending = new Set<string>();
   const finalizationReady = new Set<string>();
@@ -257,25 +258,25 @@ export function createInterviewService(
       return;
     }
 
-    const dir = path.dirname(interview.markdownPath);
-    const newPath = path.join(dir, `${newSlug}.md`);
-
-    // Don't overwrite existing files
-    try {
-      await fs.access(newPath);
-      // File exists, don't rename
+    const newPath = createInterviewFilePath(
+      ctx.directory,
+      outputFolder,
+      assistantTitle,
+      interview.id,
+    );
+    if (path.resolve(interview.markdownPath) === path.resolve(newPath)) {
       return;
-    } catch {
-      // File doesn't exist, safe to rename
     }
 
     try {
-      await fs.rename(interview.markdownPath, newPath);
-      interview.markdownPath = newPath;
-      log('[interview] renamed file with assistant title:', {
-        from: currentFileName,
-        to: newSlug,
-      });
+      const moved = await moveInterviewDocument(interview, newPath);
+      if (moved) {
+        interview.markdownPath = newPath;
+        log('[interview] renamed file with assistant title:', {
+          from: currentFileName,
+          to: path.basename(newPath, '.md'),
+        });
+      }
     } catch (error) {
       log('[interview] failed to rename file:', {
         error: error instanceof Error ? error.message : String(error),
@@ -363,11 +364,17 @@ export function createInterviewService(
     }
 
     const messages = await loadMessages(sessionID);
+    const uniqueId = randomUUID();
     const record: InterviewRecord = {
-      id: `${Date.now()}-${++idCounter}-${slugify(idea) || 'interview'}`,
+      id: uniqueId,
       sessionID,
       idea: normalizedIdea,
-      markdownPath: createInterviewFilePath(ctx.directory, outputFolder, idea),
+      markdownPath: createInterviewFilePath(
+        ctx.directory,
+        outputFolder,
+        idea,
+        uniqueId,
+      ),
       createdAt: nowIso(),
       status: 'active',
       baseMessageCount: messages.length,
@@ -404,7 +411,7 @@ export function createInterviewService(
     const messages = await loadMessages(sessionID);
     const title = extractTitle(document);
     const record: InterviewRecord = {
-      id: `${Date.now()}-${++idCounter}-${slugify(path.basename(markdownPath, '.md')) || 'interview'}`,
+      id: randomUUID(),
       sessionID,
       idea: title || path.basename(markdownPath, '.md'),
       markdownPath,
