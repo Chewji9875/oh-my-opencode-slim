@@ -1433,7 +1433,7 @@ describe('interview service', () => {
   });
 
   describe('agent-provided title', () => {
-    test('renames file when assistant provides title in interview_state', async () => {
+    test('keeps path stable and stores assistant title in markdown', async () => {
       const tempDir = await fs.mkdtemp('/tmp/interview-test-');
 
       // Start with empty messages
@@ -1485,14 +1485,19 @@ describe('interview service', () => {
         ],
       });
 
-      // Sync interview (this triggers the rename)
+      // Sync interview (the assistant title updates Markdown, not its path)
       const state = await service.getInterviewState(requiredInterviewId);
 
-      // File should be renamed to use assistant-provided title
+      // The durable path remains tied to the record's original idea.
       files = await fs.readdir(interviewDir);
       expect(files.length).toBe(1);
-      expect(files[0]).toMatch(/^task-manager-[0-9a-f-]+\.md$/);
-      expect(state.markdownPath).toMatch(/task-manager-[0-9a-f-]+\.md$/);
+      expect(files[0]).toMatch(
+        /^my-great-app-idea-with-long-description-[0-9a-f-]+\.md$/,
+      );
+      expect(state.markdownPath).toMatch(
+        /my-great-app-idea-with-long-description-[0-9a-f-]+\.md$/,
+      );
+      expect(state.document).toContain('# task-manager');
 
       // Cleanup
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -1555,7 +1560,7 @@ describe('interview service', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     });
 
-    test('uses a unique title filename if target filename already exists', async () => {
+    test('keeps shared path when title matches another file', async () => {
       const tempDir = await fs.mkdtemp('/tmp/interview-test-');
 
       const messagesData: Array<{
@@ -1615,12 +1620,13 @@ describe('interview service', () => {
 
       const state = await service.getInterviewState(requiredInterviewId);
 
-      // A title rename gets its own unique suffix and leaves the existing
-      // document untouched.
+      // The active document keeps its path and the unrelated file remains
+      // untouched.
       files = await fs.readdir(interviewDir);
-      expect(files).not.toContain(originalPath as string);
+      expect(files).toContain(originalPath as string);
       expect(files).toContain('target-name.md');
-      expect(state.markdownPath).toMatch(/target-name-[0-9a-f-]+\.md$/);
+      expect(state.markdownPath).toMatch(/original-idea-[0-9a-f-]+\.md$/);
+      expect(state.document).toContain('# target-name');
       expect(
         await fs.readFile(path.join(interviewDir, 'target-name.md'), 'utf8'),
       ).toContain('Existing.');

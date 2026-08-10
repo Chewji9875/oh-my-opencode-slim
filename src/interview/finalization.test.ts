@@ -183,8 +183,12 @@ describe('interview finalization', () => {
     );
 
     expect(paths[0]).not.toBe(paths[1]);
-    expect(path.basename(paths[0])).toMatch(/^shared-product-[0-9a-f-]+\.md$/);
-    expect(path.basename(paths[1])).toMatch(/^shared-product-[0-9a-f-]+\.md$/);
+    expect(path.basename(paths[0])).toMatch(
+      /^same-slug-product-[0-9a-f-]+\.md$/,
+    );
+    expect(path.basename(paths[1])).toMatch(
+      /^same-slug-product-[0-9a-f-]+\.md$/,
+    );
 
     const documents = await Promise.all(
       paths.map((documentPath) => fs.readFile(documentPath, 'utf8')),
@@ -201,7 +205,7 @@ describe('interview finalization', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
-  test('serializes overlapping writes from sessions resuming one document', async () => {
+  test('serializes overlapping writes from service instances sharing one document', async () => {
     const directory = await fs.mkdtemp('/tmp/interview-resume-lock-');
     const documentPath = path.join(directory, 'interview', 'shared.md');
     await fs.mkdir(path.dirname(documentPath), { recursive: true });
@@ -211,69 +215,75 @@ describe('interview finalization', () => {
       'utf8',
     );
 
-    const messages = new Map<string, InterviewMessage[]>();
-    const runtime: InterviewSessionRuntime = {
-      messages: async (sessionID) => messages.get(sessionID) ?? [],
-      notify: async () => {},
-      continue: async () => {},
-      rename: async () => {},
-    };
-    const service = createInterviewService({ directory } as never, undefined, {
-      runtime,
-      openBrowser: () => {},
-    });
-    service.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
-
-    for (const sessionID of ['ses_one', 'ses_two']) {
-      await service.handleCommandExecuteBefore(
-        { command: 'interview', sessionID, arguments: documentPath },
-        { parts: [] },
-      );
-    }
-
-    messages.set('ses_one', [
-      {
-        info: { role: 'assistant' },
-        parts: [
+    const scenarios = await Promise.all(
+      [
+        {
+          sessionID: 'ses_one',
+          summary: 'One draft',
+          questionId: 'q-one',
+          question: 'One?',
+          answer: 'One answer',
+        },
+        {
+          sessionID: 'ses_two',
+          summary: 'Two draft',
+          questionId: 'q-two',
+          question: 'Two?',
+          answer: 'Two answer',
+        },
+      ].map(async (scenario) => {
+        const messages: InterviewMessage[] = [];
+        const runtime: InterviewSessionRuntime = {
+          messages: async () => messages,
+          notify: async () => {},
+          continue: async () => {},
+          rename: async () => {},
+        };
+        const service = createInterviewService(
+          { directory } as never,
+          undefined,
+          { runtime, openBrowser: () => {} },
+        );
+        service.setBaseUrlResolver(async () => 'http://127.0.0.1:43211');
+        await service.handleCommandExecuteBefore(
           {
-            type: 'text',
-            text: '<interview_state>{"summary":"One draft","questions":[{"id":"q-one","question":"One?","options":["Yes"]}]}</interview_state>',
+            command: 'interview',
+            sessionID: scenario.sessionID,
+            arguments: documentPath,
           },
-        ],
-      },
-    ]);
-    messages.set('ses_two', [
-      {
-        info: { role: 'assistant' },
-        parts: [
-          {
-            type: 'text',
-            text: '<interview_state>{"summary":"Two draft","questions":[{"id":"q-two","question":"Two?","options":["Yes"]}]}</interview_state>',
-          },
-        ],
-      },
-    ]);
-
-    const interviewIDs = ['ses_one', 'ses_two'].map((sessionID) => {
-      const interviewID = service.getActiveInterviewId(sessionID);
-      expect(interviewID).not.toBeNull();
-      return interviewID as string;
-    });
-    await Promise.all(
-      interviewIDs.map((interviewID) => service.getInterviewState(interviewID)),
+          { parts: [] },
+        );
+        messages.push({
+          info: { role: 'assistant' },
+          parts: [
+            {
+              type: 'text',
+              text: `<interview_state>{"summary":"${scenario.summary}","title":"Shared Title","questions":[{"id":"${scenario.questionId}","question":"${scenario.question}","options":["Yes"]}]}</interview_state>`,
+            },
+          ],
+        });
+        const interviewID = service.getActiveInterviewId(scenario.sessionID);
+        expect(interviewID).not.toBeNull();
+        return { ...scenario, service, interviewID: interviewID as string };
+      }),
     );
-    await Promise.all([
-      service.submitAnswers(interviewIDs[0] as string, [
-        { questionId: 'q-one', answer: 'One answer' },
-      ]),
-      service.submitAnswers(interviewIDs[1] as string, [
-        { questionId: 'q-two', answer: 'Two answer' },
-      ]),
-    ]);
+
+    await Promise.all(
+      scenarios.map(({ service, interviewID }) =>
+        service.getInterviewState(interviewID),
+      ),
+    );
+    await Promise.all(
+      scenarios.map(({ service, interviewID, questionId, answer }) =>
+        service.submitAnswers(interviewID, [{ questionId, answer }]),
+      ),
+    );
 
     const document = await fs.readFile(documentPath, 'utf8');
+    expect(document).toContain('# Shared Title');
     expect(document).toContain('A: One answer');
     expect(document).toContain('A: Two answer');
+    expect(await fs.readdir(path.dirname(documentPath))).toEqual(['shared.md']);
 
     await fs.rm(directory, { recursive: true, force: true });
   });

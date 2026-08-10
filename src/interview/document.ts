@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import * as fsSync from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseFrontmatter as sharedParseFrontmatter } from '../utils/frontmatter';
@@ -12,6 +14,129 @@ import type {
 // ─── Path Utilities ──────────────────────────────────────────────────
 
 export const DEFAULT_OUTPUT_FOLDER = 'interview';
+
+const DOCUMENT_LOCK_RETRY_LIMIT = 200;
+const DOCUMENT_LOCK_RETRY_DELAY_MS = 25;
+const DOCUMENT_LOCK_STALE_MS = 60_000;
+const activeDocumentLockTokens = new Set<string>();
+
+type DocumentLock = {
+  handle: FileHandle;
+  lockPath: string;
+  token: string;
+};
+
+function isNoSuchFileError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function isStaleDocumentLock(lockPath: string): Promise<boolean> {
+  let stat: fsSync.Stats;
+  try {
+    stat = await fs.stat(lockPath);
+  } catch (error) {
+    return isNoSuchFileError(error);
+  }
+
+  if (Date.now() - stat.mtimeMs < DOCUMENT_LOCK_STALE_MS) {
+    return false;
+  }
+
+  try {
+    const content = await fs.readFile(lockPath, 'utf8');
+    const metadata = JSON.parse(content) as {
+      pid?: unknown;
+      token?: unknown;
+    };
+    if (typeof metadata.pid !== 'number' || metadata.pid <= 0) {
+      return true;
+    }
+
+    if (metadata.pid === process.pid && typeof metadata.token === 'string') {
+      return !activeDocumentLockTokens.has(metadata.token);
+    }
+
+    try {
+      process.kill(metadata.pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    }
+  } catch {
+    return true;
+  }
+}
+
+async function acquireDocumentLock(lockPath: string): Promise<DocumentLock> {
+  for (let attempt = 0; attempt < DOCUMENT_LOCK_RETRY_LIMIT; attempt++) {
+    try {
+      const handle = await fs.open(lockPath, 'wx');
+      const token = randomUUID();
+      try {
+        await handle.writeFile(
+          JSON.stringify({
+            pid: process.pid,
+            startedAt: Date.now(),
+            token,
+          }),
+          'utf8',
+        );
+      } catch (error) {
+        await handle.close().catch(() => {});
+        await fs.unlink(lockPath).catch(() => {});
+        throw error;
+      }
+      activeDocumentLockTokens.add(token);
+      return { handle, lockPath, token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+
+      if (await isStaleDocumentLock(lockPath)) {
+        await fs.unlink(lockPath).catch(() => {});
+        continue;
+      }
+
+      if (attempt + 1 < DOCUMENT_LOCK_RETRY_LIMIT) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, DOCUMENT_LOCK_RETRY_DELAY_MS),
+        );
+      }
+    }
+  }
+
+  throw new Error(`Timed out acquiring interview document lock: ${lockPath}`);
+}
+
+async function releaseDocumentLock(lock: DocumentLock): Promise<void> {
+  await lock.handle.close().catch(() => {});
+  try {
+    const content = await fs.readFile(lock.lockPath, 'utf8');
+    const metadata = JSON.parse(content) as { token?: unknown };
+    if (metadata.token === lock.token) {
+      await fs.unlink(lock.lockPath);
+    }
+  } catch {
+    // The lock may have been removed by stale-lock recovery after a failure.
+  } finally {
+    activeDocumentLockTokens.delete(lock.token);
+  }
+}
+
+export async function withInterviewDocumentLock<T>(
+  markdownPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const canonicalPath = path.resolve(markdownPath);
+  await fs.mkdir(path.dirname(canonicalPath), { recursive: true });
+  const lock = await acquireDocumentLock(`${canonicalPath}.lock`);
+  try {
+    return await operation();
+  } finally {
+    await releaseDocumentLock(lock);
+  }
+}
 
 export function normalizeOutputFolder(outputFolder: string): string {
   const normalized = outputFolder.trim().replace(/^\/+|\/+$/g, '');
@@ -210,34 +335,6 @@ export async function ensureInterviewFile(
   }
 }
 
-/**
- * Move an interview document without replacing a document created by another
- * interview. The hard-link operation is atomic and fails if the destination
- * already exists, unlike fs.rename which replaces files on Unix.
- */
-export async function moveInterviewDocument(
-  record: InterviewRecord,
-  destinationPath: string,
-): Promise<boolean> {
-  try {
-    await fs.link(record.markdownPath, destinationPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      return false;
-    }
-    throw error;
-  }
-
-  try {
-    await fs.unlink(record.markdownPath);
-  } catch (error) {
-    await fs.unlink(destinationPath).catch(() => {});
-    throw error;
-  }
-
-  return true;
-}
-
 export async function readInterviewDocument(
   record: InterviewRecord,
 ): Promise<string> {
@@ -253,13 +350,19 @@ export async function readInterviewDocument(
 export async function rewriteInterviewDocument(
   record: InterviewRecord,
   summary: string,
+  title?: string,
 ): Promise<string> {
   const existing = await readInterviewDocument(record);
   const history = extractHistorySection(existing);
-  const next = buildInterviewDocument(record.idea, summary, history, {
-    sessionID: record.sessionID,
-    baseMessageCount: record.baseMessageCount,
-  });
+  const next = buildInterviewDocument(
+    title || extractTitle(existing) || record.idea,
+    summary,
+    history,
+    {
+      sessionID: record.sessionID,
+      baseMessageCount: record.baseMessageCount,
+    },
+  );
   await fs.writeFile(record.markdownPath, next, 'utf8');
   return next;
 }
@@ -325,10 +428,15 @@ export async function appendInterviewAnswers(
     .join('\n\n');
   await fs.writeFile(
     record.markdownPath,
-    buildInterviewDocument(record.idea, summary, nextHistory, {
-      sessionID: record.sessionID,
-      baseMessageCount: record.baseMessageCount,
-    }),
+    buildInterviewDocument(
+      extractTitle(existing) || record.idea,
+      summary,
+      nextHistory,
+      {
+        sessionID: record.sessionID,
+        baseMessageCount: record.baseMessageCount,
+      },
+    ),
     'utf8',
   );
 }

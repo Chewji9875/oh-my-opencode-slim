@@ -18,7 +18,6 @@ import {
   ensureInterviewFile,
   extractSummarySection,
   extractTitle,
-  moveInterviewDocument,
   normalizeOutputFolder,
   parseSpecBlocks,
   readInterviewDocument,
@@ -26,7 +25,7 @@ import {
   resolveExistingInterviewPath,
   rewriteInterviewDocument,
   rewriteInterviewDocumentWithFinalSpec,
-  slugify,
+  withInterviewDocumentLock,
 } from './document';
 import {
   buildFallbackState,
@@ -190,7 +189,6 @@ export function createInterviewService(
   const activeInterviewIds = new Map<string, string>();
   const interviewsById = new Map<string, InterviewRecord>();
   const activeSyncs = new Map<string, Promise<InterviewState>>();
-  const documentLocks = new Map<string, Promise<void>>();
   const sessionBusy = new Map<string, boolean>();
   const sessionModel = new Map<string, string>();
   const browserOpened = new Set<string>(); // Track interviews that have opened browser
@@ -202,29 +200,6 @@ export function createInterviewService(
   let abandonedOrderCounter = 0;
   const finalizationPending = new Set<string>();
   const finalizationReady = new Set<string>();
-
-  async function withDocumentLock<T>(
-    markdownPath: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const key = path.resolve(markdownPath);
-    const previous = documentLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    documentLocks.set(key, current);
-
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (documentLocks.get(key) === current) {
-        documentLocks.delete(key);
-      }
-    }
-  }
 
   function setBaseUrlResolver(resolver: () => Promise<string>): void {
     resolveBaseUrl = resolver;
@@ -262,50 +237,6 @@ export function createInterviewService(
     }
     browserOpened.add(interviewId);
     browserOpener(url);
-  }
-
-  async function maybeRenameWithTitle(
-    interview: InterviewRecord,
-    assistantTitle: string | undefined,
-  ): Promise<void> {
-    if (!assistantTitle) {
-      return;
-    }
-    const newSlug = slugify(assistantTitle);
-    if (!newSlug) {
-      return;
-    }
-
-    const currentFileName = path.basename(interview.markdownPath, '.md');
-    // If already matches (or user-provided idea matches), skip
-    if (currentFileName === newSlug) {
-      return;
-    }
-
-    const newPath = createInterviewFilePath(
-      ctx.directory,
-      outputFolder,
-      assistantTitle,
-      interview.id,
-    );
-    if (path.resolve(interview.markdownPath) === path.resolve(newPath)) {
-      return;
-    }
-
-    try {
-      const moved = await moveInterviewDocument(interview, newPath);
-      if (moved) {
-        interview.markdownPath = newPath;
-        log('[interview] renamed file with assistant title:', {
-          from: currentFileName,
-          to: path.basename(newPath, '.md'),
-        });
-      }
-    } catch (error) {
-      log('[interview] failed to rename file:', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   async function loadMessages(sessionID: string): Promise<InterviewMessage[]> {
@@ -404,7 +335,9 @@ export function createInterviewService(
       baseMessageCount: messages.length,
     };
 
-    await ensureInterviewFile(record);
+    await withInterviewDocumentLock(record.markdownPath, () =>
+      ensureInterviewFile(record),
+    );
     activeInterviewIds.set(sessionID, record.id);
     interviewsById.set(record.id, record);
     fileCache = null;
@@ -488,34 +421,37 @@ export function createInterviewService(
     const parsed = isCleanFinalResponse
       ? { state: null, latestAssistantError: undefined }
       : findLatestAssistantState(interviewMessages, maxQuestions);
-    const synced = await withDocumentLock(interview.markdownPath, async () => {
-      const existingDocument = await readInterviewDocument(interview);
-      const fallbackState = buildFallbackState(interviewMessages);
-      const state = parsed.state ?? {
-        ...fallbackState,
-        summary:
-          extractSummarySection(existingDocument) || fallbackState.summary,
-      };
+    const synced = await withInterviewDocumentLock(
+      interview.markdownPath,
+      async () => {
+        const existingDocument = await readInterviewDocument(interview);
+        const fallbackState = buildFallbackState(interviewMessages);
+        const state = parsed.state ?? {
+          ...fallbackState,
+          summary:
+            extractSummarySection(existingDocument) || fallbackState.summary,
+        };
 
-      // Keep title rename and the following document rewrite in one critical
-      // section so a resumed session cannot race another session's update.
-      await maybeRenameWithTitle(interview, state.title);
+        let document: string;
+        if (isCleanFinalResponse) {
+          document = await rewriteInterviewDocumentWithFinalSpec(
+            interview,
+            latestAssistantText,
+          );
+          finalizationPending.delete(interview.id);
+        } else if (parsed.state) {
+          document = await rewriteInterviewDocument(
+            interview,
+            state.summary,
+            state.title,
+          );
+        } else {
+          document = await readInterviewDocument(interview);
+        }
 
-      let document: string;
-      if (isCleanFinalResponse) {
-        document = await rewriteInterviewDocumentWithFinalSpec(
-          interview,
-          latestAssistantText,
-        );
-        finalizationPending.delete(interview.id);
-      } else if (parsed.state) {
-        document = await rewriteInterviewDocument(interview, state.summary);
-      } else {
-        document = await readInterviewDocument(interview);
-      }
-
-      return { document, state };
-    });
+        return { document, state };
+      },
+    );
     const { document, state } = synced;
     const blocks = parseSpecBlocks(document);
 
@@ -671,7 +607,7 @@ export function createInterviewService(
         );
       }
 
-      await withDocumentLock(interview.markdownPath, () =>
+      await withInterviewDocumentLock(interview.markdownPath, () =>
         appendInterviewAnswers(interview, state.questions, answers),
       );
       const prompt = buildAnswerPrompt(answers, state.questions, maxQuestions);
