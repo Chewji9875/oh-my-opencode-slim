@@ -456,16 +456,19 @@ export function createWebfetchTool(
                         finalUrl,
                         args.extract_main,
                       )
-                    : {
-                        title: undefined,
-                        rawContent: cleanFetchedText(rawText),
-                        html: cleanFetchedText(rawText),
-                        text: cleanFetchedText(rawText),
-                        markdown: cleanFetchedText(rawText),
-                        extractedMain: false,
-                        canonicalUrl: undefined,
-                        headings: [],
-                      };
+                    : (() => {
+                        const cleaned = cleanFetchedText(rawText);
+                        return {
+                          title: undefined,
+                          rawContent: cleaned,
+                          html: cleaned,
+                          text: cleaned,
+                          markdown: cleaned,
+                          extractedMain: false,
+                          canonicalUrl: undefined,
+                          headings: [],
+                        };
+                      })();
 
                   fetchResult = {
                     requestedUrl: args.url,
