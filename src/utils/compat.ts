@@ -80,6 +80,11 @@ export function crossSpawn(
 
 /**
  * Cross-runtime file write that works in both Bun and Node.js.
+ *
+ * Order matters: Buffer is checked before treating the remainder as
+ * ArrayBuffer so Buffer slices are written as-is (no parent-buffer copy).
+ * Remaining union member is treated as ArrayBuffer without `instanceof`,
+ * which fails for cross-realm ArrayBuffers.
  */
 export async function crossWrite(
   path: string,
@@ -89,9 +94,9 @@ export async function crossWrite(
     await fsWriteFile(path, Buffer.from(data));
     return;
   }
-  if (data instanceof ArrayBuffer) {
-    await fsWriteFile(path, Buffer.from(data));
+  if (Buffer.isBuffer(data)) {
+    await fsWriteFile(path, data);
     return;
   }
-  await fsWriteFile(path, data);
+  await fsWriteFile(path, Buffer.from(data));
 }
