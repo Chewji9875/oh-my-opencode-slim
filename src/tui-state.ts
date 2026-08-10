@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -84,7 +84,19 @@ function writeTuiSnapshot(snapshot: TuiSnapshot, projectDir: string): void {
   try {
     const filePath = getTuiStatePath(projectDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, `${JSON.stringify(snapshot)}\n`);
+    const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, `${JSON.stringify(snapshot)}\n`);
+      fs.renameSync(tmpPath, filePath);
+    } finally {
+      // Remove temp residue on the failure path; hard crashes are out of
+      // reach, and readers only ever open the final file.
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        // best-effort
+      }
+    }
   } catch {
     // TUI state is best-effort only.
   }
@@ -95,7 +107,15 @@ function updateSnapshot(
   mutator: (snapshot: TuiSnapshot) => void,
 ): void {
   const snapshot = readTuiSnapshot(projectDir);
+  const beforeModels = JSON.stringify(snapshot.agentModels);
+  const beforeVariants = JSON.stringify(snapshot.agentVariants);
   mutator(snapshot);
+  if (
+    JSON.stringify(snapshot.agentModels) === beforeModels &&
+    JSON.stringify(snapshot.agentVariants) === beforeVariants
+  ) {
+    return; // state unchanged — skip the disk write
+  }
   snapshot.updatedAt = Date.now();
   writeTuiSnapshot(snapshot, projectDir);
 }
