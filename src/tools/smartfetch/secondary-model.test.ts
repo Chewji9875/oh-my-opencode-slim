@@ -204,4 +204,61 @@ describe('smartfetch/secondary-model', () => {
     expect(result.text).toBe('Fallback answer');
     expect(result.model).toEqual(models[1]);
   });
+
+  test('waits for a timed-out prompt to settle before deleting its session', async () => {
+    const originalTimeout = _testConfig.secondaryModelTimeoutMs;
+    _testConfig.secondaryModelTimeoutMs = 0;
+
+    let resolvePrompt!: (value: {
+      data: { parts: Array<{ type: string; text: string }> };
+    }) => void;
+    const promptResult = new Promise<{
+      data: { parts: Array<{ type: string; text: string }> };
+    }>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    let resolveDelete!: () => void;
+    const deleted = new Promise<void>((resolve) => {
+      resolveDelete = resolve;
+    });
+
+    mockV2Session = {
+      create: mock(async () => ({ data: { id: 'session-timeout' } })),
+      prompt: mock(() => promptResult),
+      delete: mock(async () => {
+        resolveDelete();
+        return { data: true };
+      }),
+    };
+    mockV2Tool = {
+      ids: mock(async () => ({ data: ['read'] })),
+    };
+    mockV2Client = {
+      session: mockV2Session,
+      tool: mockV2Tool,
+    };
+
+    const settledResult = {
+      data: { parts: [{ type: 'text', text: 'Late answer' }] },
+    };
+    try {
+      await expect(
+        runSecondaryModelWithFallback(
+          testInput,
+          [models[0]],
+          'Summarize',
+          'This is enough fetched content to clear the short-content guard.',
+        ),
+      ).rejects.toThrow('Secondary model timed out');
+
+      expect(mockV2Session.delete).toHaveBeenCalledTimes(0);
+
+      resolvePrompt(settledResult);
+      await deleted;
+      expect(mockV2Session.delete).toHaveBeenCalledTimes(1);
+    } finally {
+      resolvePrompt(settledResult);
+      _testConfig.secondaryModelTimeoutMs = originalTimeout;
+    }
+  });
 });

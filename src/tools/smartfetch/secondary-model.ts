@@ -141,6 +141,7 @@ const SECONDARY_MODEL_TIMEOUT_MS = 30_000;
  */
 export const _testConfig = {
   deleteRetryDelayMs: SESSION_DELETE_RETRY_DELAY_MS,
+  secondaryModelTimeoutMs: SECONDARY_MODEL_TIMEOUT_MS,
 };
 
 /**
@@ -214,6 +215,9 @@ async function runSecondaryModel(
   const effectivePrompt = inputTruncated
     ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
     : prompt;
+  let promptPromise: Promise<unknown> | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let promptTimedOut = false;
   try {
     const toolIDsResponse = await client.tool.ids({
       query: { directory },
@@ -224,33 +228,34 @@ async function runSecondaryModel(
     );
 
     const { variant, ...modelOnly } = model;
+    promptPromise = client.session.prompt({
+      path: { id: sessionId },
+      query: { directory },
+      body: {
+        model: modelOnly,
+        // The v1 runtime reads the variant from the body top level and
+        // strips unknown keys from `model`; the SDK type omits it, so
+        // spread it through the body shape directly.
+        ...(variant ? { variant } : {}),
+        system:
+          'Answer only from the supplied content. Do not use tools or outside knowledge.',
+        tools: disabledTools,
+        parts: [
+          {
+            type: 'text',
+            text: buildPrompt(truncatedContent, effectivePrompt),
+          },
+        ],
+      },
+    });
     const result = await Promise.race([
-      client.session.prompt({
-        path: { id: sessionId },
-        query: { directory },
-        body: {
-          model: modelOnly,
-          // The v1 runtime reads the variant from the body top level and
-          // strips unknown keys from `model`; the SDK type omits it, so
-          // spread it through the body shape directly.
-          ...(variant ? { variant } : {}),
-          system:
-            'Answer only from the supplied content. Do not use tools or outside knowledge.',
-          tools: disabledTools,
-          parts: [
-            {
-              type: 'text',
-              text: buildPrompt(truncatedContent, effectivePrompt),
-            },
-          ],
-        },
+      promptPromise,
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          promptTimedOut = true;
+          reject(new Error('Secondary model timed out'));
+        }, _testConfig.secondaryModelTimeoutMs);
       }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Secondary model timed out')),
-          SECONDARY_MODEL_TIMEOUT_MS,
-        ),
-      ),
     ]);
 
     const parts =
@@ -268,7 +273,14 @@ async function runSecondaryModel(
       sourceChars,
     };
   } finally {
-    await deleteSessionSafely(input, sessionId);
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (promptTimedOut && promptPromise) {
+      void promptPromise
+        .catch(() => undefined)
+        .then(() => deleteSessionSafely(input, sessionId));
+    } else {
+      await deleteSessionSafely(input, sessionId);
+    }
   }
 }
 
