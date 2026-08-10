@@ -321,14 +321,14 @@ multiplexer panes attached while the parent orchestrator continues scheduling.
 
 When an orchestrator parent stays continuously idle, the plugin may send a
 periodic internal wake prompt so incomplete TODOs are not abandoned. This is
-**enabled by default** with a **10-minute** interval:
+**enabled by default** with a **5-minute** interval:
 
 ```jsonc
 {
   "backgroundJobs": {
     "orchestratorWake": {
       "enabled": true,
-      "intervalMs": 600000
+      "intervalMs": 300000
     }
   }
 }

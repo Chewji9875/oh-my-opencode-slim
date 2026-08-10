@@ -151,8 +151,8 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `backgroundJobs.readContextMaxFiles` | integer | `8` | Maximum number of recent read-context files shown per reusable child session (0–50) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.maxRetainedSnapshots` | integer | `20` | Maximum board snapshots retained per checkpoint cache epoch (1–100). Adding a snapshot beyond the limit starts a new epoch with only the current snapshot, intentionally creating one cache miss See [Background Job Management](#background-job-management). |
 | `backgroundJobs.strategy` | `"latest"` \| `"checkpoint-compatible"` | `"latest"` | Board injection strategy. `latest` preserves the current strip-and-replace behavior; `checkpoint-compatible` appends only when the formatted board changes and uses `backgroundJobs.maxRetainedSnapshots` per cache epoch. Cache state resets on compaction/session boundaries and is lost on plugin restart See [Background Job Management](#background-job-management). |
-| `backgroundJobs.orchestratorWake.enabled` | boolean | `true` | When true, idle orchestrator sessions with incomplete todos may receive periodic internal wake prompts (default every 10 minutes of continuous parent idle). Requires host session APIs; inactive on the v2 shim. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
-| `backgroundJobs.orchestratorWake.intervalMs` | integer | `600000` | Continuous parent-idle interval between wake evaluations (`60000`–`2147483647` ms). `0` is invalid. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
+| `backgroundJobs.orchestratorWake.enabled` | boolean | `true` | When true, idle orchestrator sessions with incomplete todos may receive periodic internal wake prompts (default every 5 minutes of continuous parent idle). Requires host session APIs; inactive on the v2 shim. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
+| `backgroundJobs.orchestratorWake.intervalMs` | integer | `300000` | Continuous parent-idle interval between wake evaluations (`60000`–`2147483647` ms). `0` is invalid. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.wallClockTimeoutMs` | integer | `0` | **Opt-in wall-clock supervisor.** `0` disables it. Otherwise, only native `task(..., background: true)` child sessions are supervised; accepted values are `60000`–`2147483647` milliseconds See [Background Job Management](#background-job-management). |
 | `backgroundJobs.abortGraceMs` | integer | `10000` | Grace period after a wall-clock deadline for a terminal confirmation. Accepted values are `1000`–`60000` milliseconds; a hanging or failed abort does not extend this grace See [Background Job Management](#background-job-management). |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
@@ -301,7 +301,7 @@ The wall-clock supervisor is separately opt-in and remains disabled unless
     "maxRetainedSnapshots": 10,
     "orchestratorWake": {
       "enabled": true,
-      "intervalMs": 600000
+      "intervalMs": 300000
     },
     "wallClockTimeoutMs": 900000,
     "abortGraceMs": 10000
@@ -309,7 +309,7 @@ The wall-clock supervisor is separately opt-in and remains disabled unless
 }
 ```
 
-`orchestratorWake` defaults to enabled with a 10-minute continuous-idle interval.
+`orchestratorWake` defaults to enabled with a 5-minute continuous-idle interval.
 Set `enabled: false` to keep idle reconciliation and background-job orchestration
 without periodic wake prompts. See the
 [Background Orchestration](background-orchestration.md) guide for the concept,
