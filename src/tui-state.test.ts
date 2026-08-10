@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -144,5 +144,69 @@ describe('tui-state persistence', () => {
       fs.rmSync(dirA, { recursive: true, force: true });
       fs.rmSync(dirB, { recursive: true, force: true });
     }
+  });
+
+  test('skips the disk write when the recorded value is unchanged', () => {
+    recordTuiAgentModel(
+      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      tempDir,
+    );
+
+    const filePath = getTuiStatePath(tempDir);
+    const oldMtime = new Date('2000-01-01T00:00:00Z');
+    fs.utimesSync(filePath, oldMtime, oldMtime);
+    const baselineMtime = fs.statSync(filePath).mtimeMs;
+
+    // Same agent, same model: nothing changed, so the file must not be
+    // rewritten (a write would bump the mtime from 2000 back to "now").
+    recordTuiAgentModel(
+      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      tempDir,
+    );
+
+    expect(fs.statSync(filePath).mtimeMs).toBe(baselineMtime);
+  });
+
+  test('keeps the final file intact when the atomic rename fails', async () => {
+    recordTuiAgentModel(
+      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      tempDir,
+    );
+
+    const fsModule = await import('node:fs');
+    const renameSpy = spyOn(fsModule, 'renameSync').mockImplementation(() => {
+      throw new Error('rename failed');
+    });
+
+    try {
+      recordTuiAgentModel(
+        { agentName: 'explorer', model: 'openai/gpt-5.6' },
+        tempDir,
+      );
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    // The previously written state must still be readable in full.
+    expect(readTuiSnapshot(tempDir).agentModels).toEqual({
+      explorer: 'openai/gpt-5.6-luna',
+    });
+
+    const stateDir = path.dirname(getTuiStatePath(tempDir));
+    expect(
+      fs.readdirSync(stateDir).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([]);
+  });
+
+  test('leaves no temp files behind on the happy path', () => {
+    recordTuiAgentModel(
+      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      tempDir,
+    );
+
+    const stateDir = path.dirname(getTuiStatePath(tempDir));
+    expect(
+      fs.readdirSync(stateDir).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([]);
   });
 });
