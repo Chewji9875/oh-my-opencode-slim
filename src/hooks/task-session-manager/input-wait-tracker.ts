@@ -1,7 +1,7 @@
 import {
   beginUserWait as beginSharedUserWait,
   hasUserWait,
-} from './continuation-attempt-gate';
+} from './user-wait-gate';
 
 const IDLESS_INPUT_WAIT = Symbol('idless-input-wait');
 const INPUT_WAIT_ASK_EVENTS = {
@@ -32,7 +32,8 @@ function inputWaitKey(kind: 'permission' | 'question', requestID: string) {
 
 export function createInputWaitTracker(options: {
   shouldManageSession: (sessionID: string) => boolean;
-  invalidateContinuation: (sessionID: string) => void;
+  /** Cancel delayed idle work when an input wait arms. */
+  invalidateIdle: (sessionID: string) => void;
 }) {
   const inputWaitsByParent = new Map<string, Set<string | symbol>>();
 
@@ -50,7 +51,7 @@ export function createInputWaitTracker(options: {
       );
     }
     beginSharedUserWait(sessionID);
-    options.invalidateContinuation(sessionID);
+    options.invalidateIdle(sessionID);
   }
 
   function clearInputWaits(sessionID: string): void {
@@ -73,13 +74,13 @@ export function createInputWaitTracker(options: {
       if (!requestID) {
         waits.add(IDLESS_INPUT_WAIT);
         inputWaitsByParent.set(sessionID, waits);
-        options.invalidateContinuation(sessionID);
+        options.invalidateIdle(sessionID);
         return;
       }
       const key = inputWaitKey(INPUT_WAIT_ASK_EVENTS[event.type], requestID);
       waits.add(key);
       inputWaitsByParent.set(sessionID, waits);
-      options.invalidateContinuation(sessionID);
+      options.invalidateIdle(sessionID);
       return;
     }
 

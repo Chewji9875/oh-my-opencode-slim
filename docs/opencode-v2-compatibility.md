@@ -77,6 +77,7 @@ the rest.
 | Built-in MCPs (context7, grep.app) | ✅ | ⚠️ config-only | v2 has no programmatic MCP hook; add 2 lines to `opencode.json` — see [below](#restoring-built-in-mcps-on-v2) |
 | `/preset` (interactive switcher) | ✅ | ❌ at load only | the switcher is a v1-TUI 3-level UI; on v2 set `"preset"` in the config file (applies at load) |
 | Foreground model fallback (rate-limit failover) | ✅ | ❌ | v2 locks the model at session creation; the plugin API has no per-prompt model override, session model-setter, or `/model` command, so mid-flight switching is impossible |
+| Orchestrator wake scheduler (`backgroundJobs.orchestratorWake`) | ✅ | ❌ | Requires host `session.get` / `todo` / `children` / `status` / `promptAsync`; the v2 shim lacks these APIs so the capability-gated feature stays inactive |
 | Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ | v1-TUI-pane integration; v2 renders subagents natively instead |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
 | Default agent on new session | ✅ orchestrator | ⚠️ TUI shows `build` | v1 sets `default_agent`; v2's TUI ignores that field and defaults to the first agent in its list (`build`). `run`/API still default to orchestrator. See [limitations](#limitations) |

@@ -46,14 +46,12 @@ export async function handleEvent(
       clearInputWaits(sessionID: string): void;
       waitsByParent: Map<string, Set<string | symbol>>;
     };
-    continuationTokens: {
-      clearContinuation(sessionID: string): void;
-      invalidateContinuation(sessionID: string): void;
-      /** Release local uncommitted reservations only; keep global consumed. */
+    idleSessionTokens: {
+      clearSession(sessionID: string): void;
+      invalidate(sessionID: string): void;
+      /** Drop local idle-token bookkeeping; keep process-global wait_for_user. */
       disposeLocalState(): void;
       sessionTokens: Map<string, symbol>;
-      evaluations: Map<string, Set<symbol>>;
-      consumed: { has(sessionID: string): boolean };
     };
     options: {
       shouldManageSession: (sessionID: string) => boolean;
@@ -163,16 +161,13 @@ export async function handleEvent(
     deps.backgroundJobSupervisor?.dispose();
     deps.retainedBoardSnapshots.clear();
     const idleSessionIds = deps.idleReconciler.clearAllTimers();
-    // Local-only: release this instance's uncommitted reservations and drop
-    // local tokens/evaluations. Do not enumerate or clear process-global
-    // consumed attempts owned by the shared gate.
+    // Local-only: drop idle tokens. Process-global wait_for_user stays armed.
     const waitSessionIDs = new Set([
       ...idleSessionIds,
-      ...deps.continuationTokens.sessionTokens.keys(),
-      ...deps.continuationTokens.evaluations.keys(),
+      ...deps.idleSessionTokens.sessionTokens.keys(),
       ...deps.inputWaits.waitsByParent.keys(),
     ]);
-    deps.continuationTokens.disposeLocalState();
+    deps.idleSessionTokens.disposeLocalState();
     for (const sessionID of waitSessionIDs) {
       deps.inputWaits.clearInputWaits(sessionID);
     }
@@ -228,7 +223,7 @@ export async function handleEvent(
     const sessionId =
       input.event.properties?.info?.id || input.event.properties?.sessionID;
     if (sessionId) {
-      deps.continuationTokens.invalidateContinuation(sessionId);
+      deps.idleSessionTokens.invalidate(sessionId);
     }
     if (sessionId && deps.options.shouldManageSession(sessionId)) {
       const props = input.event.properties as { error?: unknown } | undefined;
@@ -299,14 +294,14 @@ export async function handleEvent(
     const statusType = (
       input.event.properties as { status?: { type?: string } } | undefined
     )?.status?.type;
-    if (sessionId) deps.continuationTokens.invalidateContinuation(sessionId);
+    if (sessionId) deps.idleSessionTokens.invalidate(sessionId);
     if (statusType !== 'busy') {
       return;
     }
     // Live busy cancels a pending child idle-reconcile — the session
     // recovered (FG re-prompt or continued work).
-    // Note: invalidateContinuation above already cleared the parent
-    // idle-reconcile timer; clearIdleTimers handles the child timer.
+    // Note: invalidate above already cleared the parent idle-reconcile
+    // timer; clearIdleTimers handles the child timer.
     if (sessionId) {
       deps.idleReconciler.clearIdleTimers(sessionId);
       // Live busy after a deferred 401/410 means the fallback re-prompt
@@ -349,13 +344,12 @@ export async function handleEvent(
     input.event.properties?.info?.id || input.event.properties?.sessionID;
   if (!sessionId) return;
 
-  // Foreground-fallback teardown recreates the session; preserve a committed
-  // continuation attempt so the epoch is not rearmed without a real user message.
-  // Genuine deletion clears process-global attempt state for the session.
+  // Foreground-fallback teardown recreates the session; keep process-global
+  // wait_for_user. Genuine deletion clears wait state for the session.
   if (deps.options.isFallbackInProgress?.(sessionId)) {
-    deps.continuationTokens.invalidateContinuation(sessionId);
+    deps.idleSessionTokens.invalidate(sessionId);
   } else {
-    deps.continuationTokens.clearContinuation(sessionId);
+    deps.idleSessionTokens.clearSession(sessionId);
   }
   deps.inputWaits.clearInputWaits(sessionId);
   deps.retainedBoardSnapshots.delete(sessionId);

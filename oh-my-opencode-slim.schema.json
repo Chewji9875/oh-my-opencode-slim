@@ -1024,10 +1024,27 @@
           "minimum": 1,
           "maximum": 100
         },
-        "continueOnIdle": {
-          "default": false,
-          "description": "Beta opt-in. When true, idle orchestrator sessions with incomplete todos may receive one automatic hidden continuation prompt. Disabled by default; idle reconciliation and background-job orchestration continue without automatic continuation prompts.",
-          "type": "boolean"
+        "orchestratorWake": {
+          "default": {
+            "enabled": true,
+            "intervalMs": 300000
+          },
+          "description": "Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 5-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "When true, idle orchestrator sessions with incomplete todos may receive periodic internal wake prompts. Default enabled.",
+              "type": "boolean"
+            },
+            "intervalMs": {
+              "default": 300000,
+              "description": "Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 300,000 (5 minutes). 0 is invalid.",
+              "type": "integer",
+              "minimum": 60000,
+              "maximum": 2147483647
+            }
+          }
         },
         "wallClockTimeoutMs": {
           "default": 0,

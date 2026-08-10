@@ -3,21 +3,16 @@ import { log } from '../../utils/logger';
 
 export function createIdleReconciler(options: {
   backgroundJobBoard: BackgroundJobStore;
-  evaluateContinuation: (
-    parentSessionID: string,
-    sessionToken: symbol,
-  ) => Promise<void>;
   reconcileInjectedTerminalJobs: (parentSessionID: string) => void;
   /** Called when a deferred inline error is terminalized at idle. */
   onErrorTerminalize?: (sessionID: string) => void;
   idleReconcileDelayMs: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
   hasInputWait: (sessionID: string) => boolean;
-  getContinuationSessionToken: (sessionID: string) => symbol;
-  isCurrentContinuation: (
+  getIdleSessionToken: (sessionID: string) => symbol;
+  isCurrentIdleSessionToken: (
     sessionID: string,
     sessionToken: symbol,
-    evaluationToken?: symbol,
   ) => boolean;
   taskContextTracker: {
     pendingManagedTaskIds: Set<string>;
@@ -43,14 +38,13 @@ export function createIdleReconciler(options: {
     ) {
       return;
     }
-    const sessionToken = options.getContinuationSessionToken(parentSessionID);
+    const sessionToken = options.getIdleSessionToken(parentSessionID);
     const timer = setTimeout(() => {
       idleReconcileTimers.delete(parentSessionID);
-      if (!options.isCurrentContinuation(parentSessionID, sessionToken)) {
+      if (!options.isCurrentIdleSessionToken(parentSessionID, sessionToken)) {
         return;
       }
       options.reconcileInjectedTerminalJobs(parentSessionID);
-      void options.evaluateContinuation(parentSessionID, sessionToken);
     }, options.idleReconcileDelayMs).unref?.();
     idleReconcileTimers.set(parentSessionID, timer);
   }
@@ -211,8 +205,8 @@ export function createIdleReconciler(options: {
     scheduleErrorTerminalize,
     clearIdleTimers,
     clearAllTimers,
-    /** Callback for continuation-token-manager's onInvalidateContinuation. */
-    onInvalidateContinuation: (sessionID: string) => {
+    /** Callback for idle-session-tokens invalidate. */
+    onInvalidateIdle: (sessionID: string) => {
       const timer = idleReconcileTimers.get(sessionID);
       if (timer) {
         clearTimeout(timer);

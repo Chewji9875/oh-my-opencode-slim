@@ -45,7 +45,7 @@ Fast, structural code search and refactoring - more powerful than plain text gre
 | Tool | Description |
 |------|-------------|
 | `cancel_task` | Cancel a tracked background specialist task by native task ID or Background Job Board alias |
-| `wait_for_user` | Pause automatic incomplete-todo continuation until the next distinct external user message |
+| `wait_for_user` | Pause automatic orchestrator wake prompts until the next distinct external user message |
 
 `cancel_task` is orchestrator-only. It only cancels background tasks tracked for
 the current orchestrator session, and it does not roll back partial edits. After

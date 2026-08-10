@@ -19,14 +19,9 @@ import {
   stabilizeRunningTaskParts,
   updateFromInjectedCompletion,
 } from './board-injection';
-import { evaluateContinuation as evaluateContinuationFn } from './continuation-evaluator';
-import {
-  type ContinuationModelSelection,
-  parseContinuationModelSelection,
-} from './continuation-model-selection';
-import { createContinuationTokenManager } from './continuation-token-manager';
 import { handleEvent } from './event-router';
 import { createIdleReconciler } from './idle-reconciliation';
+import { createIdleSessionTokens } from './idle-session-tokens';
 import { createInputWaitTracker } from './input-wait-tracker';
 import { createPendingCallTracker } from './pending-call-tracker';
 import { createTaskContextTracker } from './task-context-tracker';
@@ -54,12 +49,6 @@ export function createTaskSessionManagerHook(
     maxRetainedSnapshots: number;
     readContextMinLines?: number;
     readContextMaxFiles?: number;
-    /**
-     * Beta opt-in. When true, idle orchestrator sessions with incomplete todos
-     * may receive one automatic continuation promptAsync. Disabled by default;
-     * idle reconciliation continues without continuation SDK calls.
-     */
-    continueOnIdle?: boolean;
     backgroundJobBoard?: BackgroundJobStore;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     shouldManageSession: (sessionID: string) => boolean;
@@ -82,7 +71,6 @@ export function createTaskSessionManagerHook(
     idleReconcileDelayMs?: number;
   },
 ) {
-  const continueOnIdle = options.continueOnIdle === true;
   const backgroundJobBoard =
     options.backgroundJobBoard ??
     new BackgroundJobBoard({
@@ -101,33 +89,23 @@ export function createTaskSessionManagerHook(
     string,
     Map<string, BackgroundJobExecution>
   >();
-  const observedContinuationModels = new Map<
-    string,
-    ContinuationModelSelection
-  >();
   /** Managed sessions with a deferred inline 401/410 awaiting fallback outcome. */
   const deferredInlineErrors = new Set<string>();
 
   // Forward refs for circular deps — set after corresponding managers exist.
   // These are captured by closure in createIdleReconciler and only called
   // at runtime (event handlers), well after initialization completes.
-  let evaluateContinuation: (
-    parentSessionID: string,
-    sessionToken: symbol,
-  ) => Promise<void>;
-  let getContinuationSessionToken: (sessionID: string) => symbol = () => {
-    throw new Error('unreachable: getContinuationSessionToken not initialized');
+  let getIdleSessionToken: (sessionID: string) => symbol = () => {
+    throw new Error('unreachable: getIdleSessionToken not initialized');
   };
-  let isCurrentContinuation: (
+  let isCurrentIdleSessionToken: (
     sessionID: string,
     sessionToken: symbol,
-    evaluationToken?: symbol,
   ) => boolean = () => false;
   let hasInputWait: (sessionID: string) => boolean = () => false;
 
   const idleReconciler = createIdleReconciler({
     backgroundJobBoard,
-    evaluateContinuation: (s, t) => evaluateContinuation(s, t),
     reconcileInjectedTerminalJobs: (parentSessionID: string) =>
       reconcileInjectedTerminalJobs(injectionState, parentSessionID),
     // Fallback could not recover a deferred 401/410; drop the deferred
@@ -142,59 +120,34 @@ export function createTaskSessionManagerHook(
       options.idleReconcileDelayMs ?? IDLE_RECONCILE_DELAY_MS,
     isFallbackInProgress: options.isFallbackInProgress,
     hasInputWait: (s) => hasInputWait(s),
-    getContinuationSessionToken: (s) => getContinuationSessionToken(s),
-    isCurrentContinuation: (s, t, e) => isCurrentContinuation(s, t, e),
+    getIdleSessionToken: (s) => getIdleSessionToken(s),
+    isCurrentIdleSessionToken: (s, t) => isCurrentIdleSessionToken(s, t),
     taskContextTracker,
   });
 
-  const continuationTokens = createContinuationTokenManager({
-    onInvalidateContinuation: idleReconciler.onInvalidateContinuation,
+  const idleSessionTokens = createIdleSessionTokens({
+    onInvalidate: idleReconciler.onInvalidateIdle,
   });
-  getContinuationSessionToken = (s) =>
-    continuationTokens.getContinuationSessionToken(s);
-  isCurrentContinuation = (s, t, e) =>
-    continuationTokens.isCurrentContinuation(s, t, e);
+  getIdleSessionToken = (s) => idleSessionTokens.getSessionToken(s);
+  isCurrentIdleSessionToken = (s, t) =>
+    idleSessionTokens.isCurrentSessionToken(s, t);
 
   const inputWaits = createInputWaitTracker({
     shouldManageSession: options.shouldManageSession,
-    invalidateContinuation: (sessionID) =>
-      continuationTokens.invalidateContinuation(sessionID),
+    invalidateIdle: (sessionID) => idleSessionTokens.invalidate(sessionID),
   });
   hasInputWait = (s) => inputWaits.hasInputWait(s);
 
-  type SdkResponse = { data?: unknown };
-  type SessionSdk = {
-    todo?: (input: unknown) => Promise<SdkResponse>;
-    children?: (input: unknown) => Promise<SdkResponse>;
-    status?: (input: unknown) => Promise<SdkResponse>;
-    get?: (input: unknown) => Promise<SdkResponse>;
-    promptAsync?: (input: unknown) => Promise<unknown>;
-  };
-  const sessionSdk = (_ctx.client as unknown as { session?: SessionSdk })
-    .session;
-
-  evaluateContinuation = (parentSessionID, sessionToken) =>
-    evaluateContinuationFn(parentSessionID, sessionToken, {
-      continueOnIdle,
-      backgroundJobBoard,
-      continuationTokens,
-      inputWaits,
-      options,
-      sessionSdk,
-      getObservedModelSelection: (sessionID) =>
-        observedContinuationModels.get(sessionID),
-    });
-
   if (options.coordinator) {
     options.coordinator.onSessionDeleted((sessionId) => {
-      // Fallback teardown must not rearm a committed continuation epoch.
+      // Fallback teardown keeps process-global wait_for_user; genuine delete
+      // clears it via clearSession.
       if (options.isFallbackInProgress?.(sessionId)) {
-        continuationTokens.invalidateContinuation(sessionId);
+        idleSessionTokens.invalidate(sessionId);
       } else {
-        continuationTokens.clearContinuation(sessionId);
+        idleSessionTokens.clearSession(sessionId);
       }
       inputWaits.clearInputWaits(sessionId);
-      observedContinuationModels.delete(sessionId);
       idleReconciler.clearIdleTimers(sessionId);
       // During a foreground fallback abort/re-prompt cycle, the session
       // is being torn down and immediately recreated with a fallback model.
@@ -242,6 +195,12 @@ export function createTaskSessionManagerHook(
       inputWaits.beginUserWait(sessionID);
     },
 
+    /**
+     * Narrow exposure for the orchestrator-wake scheduler: true while a
+     * question/permission is open or wait_for_user is latched.
+     */
+    hasInputWait: (sessionID: string): boolean => hasInputWait(sessionID),
+
     observeChatMessage: (input: unknown, output: unknown): void => {
       const inputMessage = isObjectRecord(input) ? input : undefined;
       const outputRecord = isObjectRecord(output) ? output : undefined;
@@ -286,22 +245,7 @@ export function createTaskSessionManagerHook(
       ) {
         return;
       }
-      const outputModel = isObjectRecord(outputMessage?.model)
-        ? outputMessage.model
-        : undefined;
-      const variant =
-        typeof inputMessage?.variant === 'string'
-          ? inputMessage.variant
-          : outputModel?.variant;
-      const modelSelection =
-        parseContinuationModelSelection(inputMessage?.model, variant) ??
-        parseContinuationModelSelection(outputModel, variant);
-      if (modelSelection) {
-        observedContinuationModels.set(sessionID, modelSelection);
-      } else {
-        observedContinuationModels.delete(sessionID);
-      }
-      continuationTokens.rearmForUserMessage(sessionID, messageIdentity);
+      idleSessionTokens.onExternalUserMessage(sessionID, messageIdentity);
     },
 
     'tool.execute.before': (
@@ -387,20 +331,17 @@ export function createTaskSessionManagerHook(
         };
       };
     }): Promise<void> => {
-      if (input.event.type === 'server.instance.disposed') {
-        observedContinuationModels.clear();
-      } else if (input.event.type === 'session.deleted') {
+      if (input.event.type === 'session.deleted') {
         const sessionID =
           input.event.properties?.info?.id ?? input.event.properties?.sessionID;
         if (sessionID) {
-          observedContinuationModels.delete(sessionID);
           deferredInlineErrors.delete(sessionID);
         }
       }
 
       return handleEvent(input, {
         inputWaits,
-        continuationTokens,
+        idleSessionTokens,
         options,
         idleReconciler,
         deferredInlineErrors,

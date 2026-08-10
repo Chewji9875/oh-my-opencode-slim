@@ -37,7 +37,7 @@ The required native/background-control tools are:
 | `task(..., background: true)` | Start a specialist in the background and immediately return a task ID |
 | hook-driven completion | OpenCode injects terminal background task results automatically |
 | `cancel_task` | Plugin-provided tool to cancel a tracked background task by task ID or Background Job Board alias |
-| `wait_for_user` | Plugin-provided orchestrator tool that pauses automatic continuation while the user performs external manual work |
+| `wait_for_user` | Plugin-provided orchestrator tool that pauses automatic orchestrator wakes while the user performs external manual work |
 
 If these are not available, the scheduler cannot use the default background
 workflow. Configure the environment variable through the installer or use the
@@ -164,9 +164,9 @@ changes before launching a replacement lane.
 Terminal jobs are reconciled automatically after their result is injected into
 the orchestrator session. That lifecycle state is not proof the output was used;
 the orchestrator must still verify it consumed the relevant result before
-finalizing. When idle reconciliation performs that reconciliation, the opt-in
-continuation evaluator can run in the same idle cycle, subject to its existing
-guards.
+finalizing. Separately, the default-on orchestrator wake scheduler may prompt an
+idle parent with incomplete todos after continuous idle time; it does not depend
+on the local job board.
 
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
@@ -317,41 +317,66 @@ rather than "work complete". It tracks running task IDs, exposes recent work in
 the background job board, updates aliases from task results, and keeps
 multiplexer panes attached while the parent orchestrator continues scheduling.
 
-### Incomplete-todo continuation nudge
+### Orchestrator wake scheduler
 
-Automatic incomplete-todo continuation is an **opt-in beta feature**. Idle
-reconciliation and background-job orchestration always run without it. Enable
-the beta only when you want hidden continuation prompts:
+When an orchestrator parent stays continuously idle, the plugin may send a
+periodic internal wake prompt so incomplete TODOs are not abandoned. This is
+**enabled by default** with a **5-minute** interval:
 
 ```jsonc
 {
   "backgroundJobs": {
-    "continueOnIdle": true
+    "orchestratorWake": {
+      "enabled": true,
+      "intervalMs": 300000
+    }
   }
 }
 ```
 
-When `backgroundJobs.continueOnIdle` is `true`, after an orchestrator session
-becomes idle the plugin may send **at most one** internal, delayed continuation
-prompt when OpenCode reports incomplete todos. That limit is per session between
-real external user messages (text/file/image).
-Synthetic/internal inputs and subsequent idle/busy events do not rearm it. A
-real user message rearms the one-shot nudge once per message identity
-(`chat.message` `messageID` / `message.id`), shared across hook instances in the
-process; observing the same message twice does not open a second epoch. Internal
-prompts and todo updates do not rearm.
+`intervalMs` must be an integer from `60000` to `2147483647`. `0` is invalid.
+Set `enabled: false` to disable wakes while keeping idle reconciliation and
+background-job orchestration.
 
-Continuation is suppressed when the SDK reports the parent or any direct child
-as active, when a terminal child result has not yet been reconciled, during
-foreground fallback, while OpenCode is waiting for a question or permission
-response, after the orchestrator calls `wait_for_user`, or whenever SDK data is
-unavailable or malformed. A matching reply, or a rejected question, clears its
-tool-backed wait but does not itself inject a nudge; the normal session lifecycle
-decides whether a later nudge is needed.
+Behavior:
 
-When idle reconciliation first reconciles an injected terminal result, the
-opt-in evaluator may run in that same idle cycle; the existing liveness,
-wait, fallback, and one-attempt guards still apply.
+- Per-session recursive `setTimeout(...).unref()` after continuous parent-idle
+  time (never a global interval).
+- Only sessions known as the parent `orchestrator` via session metadata.
+- Host client APIs are authoritative (`session.get`, `todo`, `children`,
+  `status`, `promptAsync` with the nested directory request shape). The local
+  Background Job Board is never read or used as a gate.
+- Wake requires valid host response shapes, parent currently idle, and at least
+  one TODO with status `pending` or `in_progress`. Unknown/malformed status
+  fails closed. **Active children do not suppress a wake.**
+- Suppress/clear on question/permission input waits, `wait_for_user`, foreground
+  fallback, session busy, session deletion, external user messages, and server
+  disposal.
+- One in-flight evaluation/wake per session. Status/waits/generation are
+  rechecked immediately before `promptAsync`. Cooldown/reservation is recorded
+  before the call so a failed `promptAsync` cannot storm retries.
+- Default-on safety: the scheduler evaluates a bounded host-progress fingerprint
+  (TODO statuses plus child status/update evidence) to decide whether to keep
+  waking. After **two** successful wakes with an unchanged fingerprint, further
+  wakes stop for that continuous idle spell. A real external user message or
+  host-observed progress re-arms the cap. Busy caused by the wake itself does
+  **not** rearm the cap; unrelated busy/error lifecycle events do. The wake
+  prompt text is static and does **not** include a fingerprint or snapshot.
+- Static wake text (internal initiator part via `promptAsync` only — no message
+  transform injection or history rewrite):
+
+```text
+<system-reminder>
+Finish any incomplete TODOs. Await running agents; if one appears stuck, assess it and cancel/respawn only when justified. Do not respond to this reminder.
+</system-reminder>
+```
+
+The scheduler does **not** perform automatic cancellation and does not rely on
+the local job board. When no incomplete TODOs remain, it ends the current idle
+spell and stops polling until new activity.
+
+**v2 availability:** the v2 shim lacks the required session APIs, so this
+capability-gated feature remains inactive there.
 
 For external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers
@@ -364,16 +389,6 @@ errors, and idle/busy events do not clear it. Immediate choices, clarifications,
 and pasted command output continue to use the `question` tool. If
 `wait_for_user` is intentionally listed in `disabled_tools`, the orchestrator
 uses the `question` tool as the blocking boundary instead.
-
-This is a best-effort runtime check, not a scheduler or persisted state. The
-one-attempt guard and explicit `wait_for_user` state are process-local (shared
-across hook instances in the same JS process via an internal gate). They do not
-survive process restart or cross-process boundaries. Recreating a hook/plugin
-instance inside the same process does **not** rearm a consumed or waiting epoch;
-only a distinct real external user message (or genuine session deletion) does.
-After a process restart, the in-memory job board cannot establish prior result
-reconciliation, and the SDK's current session/todo status remains the liveness
-authority.
 
 ### Background Job Board Injection
 
