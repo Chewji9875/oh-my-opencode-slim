@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../utils/background-job-board';
+import { buildPluginInput } from '../v2/client-shim';
 import { createTaskResultTool } from './task-result';
 
 let mockClient: Record<string, any>;
@@ -86,6 +87,45 @@ describe('task_result', () => {
       } as any),
     ).rejects.toThrow('still running');
     expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('rejects an untracked child whose live session is retrying', async () => {
+    const { tool, messages } = createTool();
+    mockClient.session.status.mockImplementation(async () => ({
+      data: { ses_child1: { type: 'retry' } },
+    }));
+
+    await expect(
+      tool.execute({ task_id: 'ses_child1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('still running');
+    expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('returns a tracked result through the v2 client shim', async () => {
+    const { board, tool } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'completed',
+      resultSummary: 'complete findings',
+    });
+    mockClient = (buildPluginInput('/test/project') as { client: never })
+      .client;
+
+    const output = await tool.execute({ task_id: 'exp-1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toBe('complete findings');
   });
 
   test('rejects a task owned by another parent session', async () => {

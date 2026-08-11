@@ -59,13 +59,22 @@ Use this when the user asks to see a prior task's full result, or before retryin
       }
 
       const client = getClient(options.input);
-      const session = await client.session.get({
-        path: { id: taskID },
-        query: { directory: options.input.directory },
-      });
-      const info = session.data as { parentID?: string } | undefined;
-      if (info?.parentID !== parentSessionID) {
-        throw new Error(`Task ${requested} does not belong to this session`);
+      const sessionClient = client.session as typeof client.session & {
+        get?: typeof client.session.get;
+      };
+      if (sessionClient.get) {
+        const session = await sessionClient.get({
+          path: { id: taskID },
+          query: { directory: options.input.directory },
+        });
+        const info = session.data as { parentID?: string } | undefined;
+        if (info?.parentID !== parentSessionID) {
+          throw new Error(`Task ${requested} does not belong to this session`);
+        }
+      } else if (!tracked) {
+        throw new Error(
+          `Task ${requested} is not tracked by this session and cannot be verified`,
+        );
       }
 
       const statuses = await client.session.status({
@@ -73,10 +82,22 @@ Use this when the user asks to see a prior task's full result, or before retryin
       });
       const statusMap = statuses.data;
       const status = isRecord(statusMap) ? statusMap[taskID] : undefined;
-      if (isRecord(status) && status.type === 'busy') {
+      if (
+        isRecord(status) &&
+        (status.type === 'busy' || status.type === 'retry')
+      ) {
         throw new Error(
           `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
         );
+      }
+
+      if (!sessionClient.get) {
+        const result = tracked?.resultSummary?.trim();
+        if (!result) {
+          throw new Error(`Task ${requested} has no completed text result`);
+        }
+        options.backgroundJobBoard.markUsed(parentSessionID, taskID);
+        return result;
       }
 
       const result = await extractSessionResult(client, taskID, {
