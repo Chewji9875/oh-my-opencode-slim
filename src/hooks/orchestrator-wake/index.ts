@@ -433,7 +433,7 @@ export function createOrchestratorWakeScheduler(
           current.generation === generation &&
           current.continuousIdle
         ) {
-          void evaluate(sessionID, generation);
+          void evaluate(sessionID, generation, recoveryWake);
         }
       });
       return;
