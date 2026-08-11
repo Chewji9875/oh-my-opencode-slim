@@ -537,6 +537,7 @@ export function createAgents(
     disabled,
     councillorAgents.length > 0 ? ['council'] : undefined,
     !runtime.disabledTools.includes('wait_for_user'),
+    runtime.backgroundJobs.orchestratorWake.enabled,
   );
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
