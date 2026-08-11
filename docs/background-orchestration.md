@@ -300,10 +300,11 @@ The prompt/runtime treats background tasks as a small job board:
 | task ID | Native OpenCode background task/session ID |
 | specialist | Agent type assigned |
 | objective | What the task is responsible for |
-| state | running, completed, error, cancelled, timed out |
+| state | running; stopped (runtime ended without terminal task output); completed, error, or cancelled (explicit terminal task output); reconciled (terminal result consumed) |
 | ownership | Files/folders/subsystems the task may edit |
 | dependencies | Tasks that must complete first |
 | result | Final task output once terminal |
+| status certainty | `status uncertain` when the live status map is malformed or unavailable; it never implies completion |
 
 The current todo list can represent user-visible work, but task IDs and file
 ownership need to be explicit in the orchestrator's working context.
@@ -423,6 +424,25 @@ and only the new current snapshot is kept. This intentionally creates one cache
 miss at the epoch boundary, after which a fresh run of up to the configured limit
 can accumulate. The cache is lost on plugin restart, so snapshots are not
 restored beyond those present in the current OpenCode message history.
+
+### Runtime Liveness Reconciliation
+
+The job board is a local projection; OpenCode's live session-status map is the
+liveness authority. After a tracked task launches, the plugin periodically
+checks that single map for every board job still marked `running`, while normal
+session events remain the fast path.
+
+`busy` and `retry` confirm that a job is live. An explicit `idle` state or an
+absent session in an otherwise valid map records `stopped, unreconciled` rather
+than `completed`: it means execution ended before a native terminal task result
+was delivered, not that the task succeeded. Stopped sessions are never reusable
+and stay visible to the parent for recovery. A later live `busy` observation can
+revive them, and only explicit terminal task output proves completion, error, or
+cancellation.
+
+Malformed status entries and failed status requests are surfaced as `status
+uncertain`; they never prove that a job stopped or completed. Each observation
+is generation-aware, so a delayed response cannot modify a relaunched task.
 
 ### Opt-in Wall-clock Supervisor
 

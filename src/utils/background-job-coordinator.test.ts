@@ -116,6 +116,27 @@ describe('BackgroundJobCoordinator', () => {
     expect(order).toEqual(['second']);
   });
 
+  test('throws in one outcome listener without blocking later outcomes', () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const delivered: string[] = [];
+    coordinator.addTerminalOutcomeListener(() => {
+      throw new Error('first outcome listener failed');
+    });
+    coordinator.addTerminalOutcomeListener((record) => {
+      delivered.push(record.taskID);
+    });
+    board.registerLaunch({
+      taskID: 'ses_123',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    board.updateStatus({ taskID: 'ses_123', state: 'completed' });
+
+    expect(delivered).toEqual(['ses_123']);
+  });
+
   test('full chain: board terminal → coordinator → listener for deferred job', () => {
     const board = new BackgroundJobBoard();
     const coordinator = new BackgroundJobCoordinator(board);

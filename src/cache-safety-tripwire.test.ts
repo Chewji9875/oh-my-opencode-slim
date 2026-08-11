@@ -67,6 +67,10 @@ const ALLOWLIST = new Map<string, string>([
     'Date.now() captures idleObservedAt to detect post-idle busy recovery from foreground-fallback re-prompts; never serialized into prompt content.',
   ],
   [
+    'hooks/task-session-manager/runtime-status-reconciliation.ts',
+    'Date.now() establishes in-memory request/observation ordering for generation-safe status reconciliation; board timestamps are never formatted into prompt content.',
+  ],
+  [
     'hooks/image-hook.ts',
     'Date.now() throttles temp-image cleanup; extracted image paths are deterministic per part id.',
   ],

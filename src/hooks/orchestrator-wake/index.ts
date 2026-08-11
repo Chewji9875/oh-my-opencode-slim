@@ -40,6 +40,9 @@ import {
 export const ORCHESTRATOR_WAKE_TEXT =
   '<system-reminder>\nFinish any incomplete TODOs. Await running agents; if one appears stuck, assess it and cancel/respawn only when justified. Do not respond to this reminder.\n</system-reminder>';
 
+export const ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT =
+  '<system-reminder>\nA background job stopped without a terminal result. Consult the Background Job Board, recover or reroute the work as needed, and do not wait for that job as if it were still running. Do not respond to this reminder.\n</system-reminder>';
+
 /** After this many successful wakes with an unchanged fingerprint, stop. */
 export const ORCHESTRATOR_WAKE_UNCHANGED_CAP = 2;
 
@@ -217,6 +220,8 @@ export function createOrchestratorWakeScheduler(
   const localSessions = new Map<string, LocalSessionState>();
   /** Reservations this hook owns and must release when it is disposed. */
   const localWakeOwners = new Map<string, symbol>();
+  const pendingStoppedRecoveries = new Set<string>();
+  let disposed = false;
 
   function touchLocal(sessionID: string): LocalSessionState {
     const existing = localSessions.get(sessionID);
@@ -260,6 +265,7 @@ export function createOrchestratorWakeScheduler(
     releaseLocalWakeOwner(sessionID);
     clearLocalSession(sessionID);
     clearWakeSession(sessionID);
+    pendingStoppedRecoveries.delete(sessionID);
   }
 
   /**
@@ -408,6 +414,7 @@ export function createOrchestratorWakeScheduler(
   async function evaluate(
     sessionID: string,
     generation: symbol,
+    recoveryWake = false,
   ): Promise<void> {
     const state = localSessions.get(sessionID);
     if (!state || state.generation !== generation) return;
@@ -446,7 +453,7 @@ export function createOrchestratorWakeScheduler(
         endIdleSpell(sessionID, true);
         return;
       }
-      if (!hasIncompleteTodos(snapshot.todos)) {
+      if (!recoveryWake && !hasIncompleteTodos(snapshot.todos)) {
         // No incomplete work: end the spell; do not keep polling.
         endIdleSpell(sessionID, false);
         return;
@@ -482,7 +489,7 @@ export function createOrchestratorWakeScheduler(
         endIdleSpell(sessionID, true);
         return;
       }
-      if (!hasIncompleteTodos(latest.todos)) {
+      if (!recoveryWake && !hasIncompleteTodos(latest.todos)) {
         endIdleSpell(sessionID, false);
         return;
       }
@@ -521,10 +528,17 @@ export function createOrchestratorWakeScheduler(
         body: {
           agent: 'orchestrator',
           ...(modelSelection ? { model: modelSelection.model } : {}),
-          parts: [createInternalAgentTextPart(ORCHESTRATOR_WAKE_TEXT)],
+          parts: [
+            createInternalAgentTextPart(
+              recoveryWake
+                ? ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT
+                : ORCHESTRATOR_WAKE_TEXT,
+            ),
+          ],
         },
         throwOnError: true,
       });
+      if (recoveryWake) pendingStoppedRecoveries.delete(sessionID);
     } catch (error) {
       // Failed promptAsync already reserved; clear expecting-busy so a later
       // unrelated busy can rearm normally.
@@ -609,6 +623,31 @@ export function createOrchestratorWakeScheduler(
     rearmWakeProgress(sessionID);
   }
 
+  /**
+   * Immediately evaluate an idle orchestrator after a child stops without a
+   * native terminal result. This is deliberately separate from the periodic
+   * TODO wake: stopped work needs recovery even when its parent has no todo.
+   */
+  function triggerStoppedJobRecovery(sessionID: string): void {
+    if (
+      disposed ||
+      !enabled ||
+      !hasRequiredSessionApis(sessionSdk) ||
+      !options.shouldManageSession(sessionID)
+    ) {
+      return;
+    }
+    pendingStoppedRecoveries.add(sessionID);
+    rearmWakeProgress(sessionID);
+    if (!canSchedule(sessionID)) return;
+    const state = touchLocal(sessionID);
+    clearTimer(state);
+    bumpGeneration(state);
+    state.continuousIdle = true;
+    rearmWakeProgress(sessionID);
+    void evaluate(sessionID, state.generation, true);
+  }
+
   async function event(input: {
     event: {
       type: string;
@@ -622,6 +661,8 @@ export function createOrchestratorWakeScheduler(
     const { type, properties } = input.event;
 
     if (type === 'server.instance.disposed') {
+      disposed = true;
+      pendingStoppedRecoveries.clear();
       for (const sessionID of [...localWakeOwners.keys()]) {
         releaseLocalWakeOwner(sessionID);
       }
@@ -649,6 +690,10 @@ export function createOrchestratorWakeScheduler(
     if (isIdleEvent(type, properties)) {
       if (options.shouldManageSession(sessionID)) {
         clearExpectingWakeBusy(sessionID);
+        if (pendingStoppedRecoveries.has(sessionID)) {
+          triggerStoppedJobRecovery(sessionID);
+          return;
+        }
         beginContinuousIdle(sessionID);
       }
       return;
@@ -688,6 +733,7 @@ export function createOrchestratorWakeScheduler(
   return {
     event,
     observeChatMessage,
+    triggerStoppedJobRecovery,
     /** Clear timers when wait_for_user or fallback begins. */
     suppress,
     /** Test seam */

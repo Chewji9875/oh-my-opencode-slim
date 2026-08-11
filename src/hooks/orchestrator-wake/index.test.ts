@@ -5,6 +5,7 @@ import { resetUserWaitGateForTests } from '../task-session-manager/user-wait-gat
 import {
   buildOrchestratorWakeFingerprint,
   createOrchestratorWakeScheduler,
+  ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
   ORCHESTRATOR_WAKE_TEXT,
   ORCHESTRATOR_WAKE_UNCHANGED_CAP,
 } from './index';
@@ -176,6 +177,47 @@ describe('buildOrchestratorWakeFingerprint', () => {
 });
 
 describe('orchestrator wake scheduler', () => {
+  test('immediately wakes an idle parent after a stopped child', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      sessionClient: makeClient({ todos: [], promptAsync }),
+    });
+
+    scheduler.triggerStoppedJobRecovery('p1');
+    await clock.advance(0);
+
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          parts: [
+            createInternalAgentTextPart(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT),
+          ],
+        }),
+      }),
+    );
+  });
+
+  test('does not recover-wake when disabled, waiting for input, busy, or disposed', async () => {
+    const cases = [
+      createScheduler({ enabled: false }),
+      createScheduler({ hasInputWait: () => true }),
+      createScheduler({
+        sessionClient: makeClient({ statusData: { p1: { type: 'busy' } } }),
+      }),
+      createScheduler(),
+    ];
+    const disposed = cases[3];
+    await disposed?.scheduler.event({
+      event: { type: 'server.instance.disposed' },
+    });
+
+    for (const item of cases) item?.scheduler.triggerStoppedJobRecovery('p1');
+    await clock.advance(0);
+
+    for (const item of cases) {
+      expect(item?.session?.promptAsync).not.toHaveBeenCalled();
+    }
+  });
   test('does nothing when disabled', async () => {
     const promptAsync = mock(async () => ({}));
     const { scheduler } = createScheduler({
