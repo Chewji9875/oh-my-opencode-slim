@@ -168,6 +168,12 @@ finalizing. Separately, the default-on orchestrator wake scheduler may prompt an
 idle parent with incomplete todos after continuous idle time; it does not depend
 on the local job board.
 
+After a full OpenCode or plugin restart, persisted running background-task
+history is rehydrated into the local job board and immediately reconciled against
+live host session status. A missing or idle child is therefore surfaced as
+`stopped, unreconciled`, while a busy child remains running; status lookup
+failures remain uncertain rather than being treated as completion.
+
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
 

@@ -77,6 +77,26 @@ function taskLaunchOutput(taskID: string): string {
   ].join('\n');
 }
 
+function historicalRunningTaskPart(
+  taskID: string,
+  input: Record<string, unknown> = {
+    background: true,
+    subagent_type: 'explorer',
+    description: 'recover scheduler task',
+    prompt: 'inspect scheduler state',
+  },
+) {
+  return {
+    type: 'tool',
+    tool: 'task',
+    state: {
+      status: 'running',
+      input,
+      output: taskLaunchOutput(taskID),
+    },
+  };
+}
+
 type HookOptions = {
   shouldManageSession?: (sessionID: string) => boolean;
   registerSessionAsOrchestrator?: (sessionID: string) => void;
@@ -251,6 +271,236 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain(
       'exp-1 / child-1 / explorer / running',
     );
+  });
+
+  test('rehydrates historical background tasks and reconciles stopped children immediately', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('historical-child')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+      background: true,
+      agent: 'explorer',
+      description: 'recover scheduler task',
+      objective: 'recover scheduler task',
+    });
+    expect(boardText(messages)).toContain(
+      'historical-child / explorer / stopped, unreconciled',
+    );
+  });
+
+  test('rehydrates a completed tool call when its child output is still running', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionStatus: {},
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const taskPart = historicalRunningTaskPart('completed-call-child');
+    taskPart.state.status = 'completed';
+    const messages = {
+      messages: [
+        {
+          info: { role: 'assistant', sessionID: 'parent-1' },
+          parts: [taskPart],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('completed-call-child')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+    });
+  });
+
+  test('consumes historical terminal completion before restart reconciliation', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: { role: 'assistant', sessionID: 'parent-1' },
+          parts: [historicalRunningTaskPart('completed-child')],
+        },
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              synthetic: true,
+              text: [
+                '<task id="completed-child" state="completed">',
+                '<summary>Background task completed: recovered</summary>',
+                '<task_result>',
+                'historical result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('completed-child')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'historical result',
+    });
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  test('keeps a rehydrated child running when live status is busy', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionStatus: { 'historical-child': { type: 'busy' } },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+    expect(board.get('historical-child')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+    });
+    expect(boardText(messages)).toContain(
+      'historical-child / explorer / running',
+    );
+  });
+
+  test('ignores foreground, terminal, and malformed historical task parts', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            historicalRunningTaskPart('foreground-child', {
+              background: false,
+              subagent_type: 'explorer',
+            }),
+            {
+              ...historicalRunningTaskPart('terminal-child'),
+              state: {
+                ...historicalRunningTaskPart('terminal-child').state,
+                status: 'completed',
+                output: [
+                  'task_id: terminal-child',
+                  'state: completed',
+                  '',
+                  '<task_result>',
+                  'done',
+                  '</task_result>',
+                ].join('\n'),
+              },
+            },
+            historicalRunningTaskPart('missing-id', {
+              background: true,
+              subagent_type: 'explorer',
+            }),
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    (
+      messages.messages[0].parts[2] as { state: { output: string } }
+    ).state.output = 'state: running\nmalformed output';
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.list()).toHaveLength(0);
+  });
+
+  test('rehydration is idempotent across repeated transforms', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+    const first = board.get('historical-child');
+    await transformMessages(hook, messages as never);
+    const second = board.get('historical-child');
+
+    expect(second).toMatchObject({
+      alias: first?.alias,
+      generation: first?.generation,
+      state: 'stopped',
+    });
+    expect(status).toHaveBeenCalledTimes(1);
   });
 
   test('stores background task launches in job board prompt context', async () => {
