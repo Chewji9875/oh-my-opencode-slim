@@ -27,9 +27,18 @@ export function normalizeUrl(input: string): {
   let upgradedToHttps = false;
   let fallbackUrl: string | undefined;
   if (parsed.protocol === 'http:') {
-    fallbackUrl = originalUrl;
+    fallbackUrl = parsed.toString();
     parsed.protocol = 'https:';
     upgradedToHttps = true;
+  }
+  // Fragments never reach the server (RFC 3986 §3.5); strip them from the
+  // URLs actually fetched so the same document requested with different
+  // anchors issues a single request. originalUrl keeps the fragment.
+  parsed.hash = '';
+  if (fallbackUrl) {
+    const fallback = new URL(fallbackUrl);
+    fallback.hash = '';
+    fallbackUrl = fallback.toString();
   }
   return { url: parsed.toString(), upgradedToHttps, fallbackUrl, originalUrl };
 }
