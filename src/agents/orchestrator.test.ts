@@ -18,6 +18,7 @@ describe('orchestrator prompt', () => {
     expect(prompt).toContain('call `wait_for_user` as your final tool action');
     expect(prompt).toContain('give the user concrete manual steps');
     expect(prompt).toContain('end the turn');
+    expect(prompt).toContain('never use `wait_for_user` to await them');
     expect(prompt).toContain('Do not rely on ordinary text alone');
   });
 
@@ -31,5 +32,13 @@ describe('orchestrator prompt', () => {
     expect(prompt).toContain(
       'use the `question` tool as the blocking boundary',
     );
+  });
+
+  test('omits end-turn instruction when wake scheduler is disabled', () => {
+    const prompt = buildOrchestratorPrompt(undefined, undefined, true, false);
+
+    expect(prompt).toContain('call `wait_for_user` as your final tool action');
+    expect(prompt).not.toContain('End Turn After Background Tasks');
+    expect(prompt).toContain('Do not immediately wait after spawning');
   });
 });

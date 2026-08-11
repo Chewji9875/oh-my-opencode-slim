@@ -124,12 +124,14 @@ const PARALLEL_DELEGATION_EXAMPLES = [
  * Build the orchestrator prompt with dynamic agent filtering.
  * @param disabledAgents - Set of disabled agent names to exclude from the prompt
  * @param waitForUserEnabled - Whether explicit text-only HITL waiting is available
+ * @param wakeSchedulerEnabled - Whether the orchestrator wake scheduler can resume the session after idle
  * @returns The complete orchestrator prompt string
  */
 export function buildOrchestratorPrompt(
   disabledAgents?: ReadonlySet<string>,
   excludeDescriptions?: string[],
   waitForUserEnabled = true,
+  wakeSchedulerEnabled = true,
 ): string {
   // Filter agent descriptions
   const enabledAgents = Object.entries(AGENT_DESCRIPTIONS)
@@ -148,7 +150,7 @@ export function buildOrchestratorPrompt(
   ).join('\n');
 
   const externalManualWaitInstruction = waitForUserEnabled
-    ? '- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then call `wait_for_user` as your final tool action and end the turn. Do not rely on ordinary text alone to mark this waiting state, and do not call more tools after `wait_for_user`.'
+    ? '- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then call `wait_for_user` as your final tool action and end the turn. Do not rely on ordinary text alone to mark this waiting state, and do not call more tools after `wait_for_user`. Background tasks are not external manual work — never use `wait_for_user` to await them; the system resumes automatically via the Background Job Board and orchestrator wake scheduler.'
     : '- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then use the `question` tool as the blocking boundary and ask them to respond when finished. `wait_for_user` is disabled, so do not reference or call it.';
 
   return `<Role>
@@ -225,7 +227,10 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Use \`cancel_task\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan.
 - Cancellation is not rollback: if cancelling a writer, inspect and reconcile partial file changes before launching a replacement lane.
 
-### Active Task Amendments
+${wakeSchedulerEnabled ? `#### End Turn After Background Tasks
+After spawning all independent background tasks and any remaining non-overlapping work, end the turn immediately with a brief status message. Do not call \`wait_for_user\` to await background task completion — the system notifies you automatically via the Background Job Board when tasks finish, and the orchestrator wake scheduler resumes you. Do not poll for status with repeated tool calls. The correct flow is: launch tasks → brief status → end turn → completion hook or wake scheduler resumes → reconcile results.
+
+` : ''}### Active Task Amendments
 - A task in the Active / Unreconciled section is still running and cannot receive another \`task\` call, even with its \`task_id\`. Do not try to resume, replace, or cancel it merely because the user adds to its existing scope.
 - For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then resume the same specialist only after its session appears in Reusable Sessions.
 - Cancel a running task only when its current objective is genuinely obsolete or must be replaced. Never create-and-cancel speculative duplicate sessions.
@@ -300,11 +305,13 @@ export function createOrchestratorAgent(
   disabledAgents?: Set<string>,
   excludeDescriptions?: string[],
   waitForUserEnabled = true,
+  wakeSchedulerEnabled = true,
 ): AgentDefinition {
   const basePrompt = buildOrchestratorPrompt(
     disabledAgents,
     excludeDescriptions,
     waitForUserEnabled,
+    wakeSchedulerEnabled,
   );
   const prompt = resolvePrompt(
     'orchestrator',
