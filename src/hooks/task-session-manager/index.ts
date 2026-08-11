@@ -4,11 +4,14 @@ import {
   type BackgroundJobExecution,
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
+  deriveTaskSessionLabel,
   isInternalInitiatorPart,
+  parseTaskIdFromTaskOutput,
+  parseTaskStateFromOutput,
 } from '../../utils';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import type { SessionLifecycle } from '../session-lifecycle';
-import { isUserMessageWithParts } from '../types';
+import { isMessageWithParts, isUserMessageWithParts } from '../types';
 import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
   type InjectedTerminalJobs,
@@ -41,6 +44,94 @@ export { BACKGROUND_JOB_BOARD_METADATA_KEY } from './board-injection';
  * significant complexity for a case that rarely exceeds this window in practice.
  */
 const IDLE_RECONCILE_DELAY_MS = 2_000;
+
+const RECOVERED_TASK_AGENT_FALLBACK = 'unknown';
+
+function rehydrateHistoricalRunningTasks(
+  messages: unknown[],
+  backgroundJobBoard: BackgroundJobStore,
+  shouldManageSession: (sessionID: string) => boolean,
+  registerSessionAsOrchestrator?: (sessionID: string) => void,
+): number {
+  let rehydrated = 0;
+  const managedOrchestratorSessionIDs = new Set<string>();
+
+  for (const message of messages) {
+    if (!isMessageWithParts(message)) continue;
+    if (message.info.agent !== 'orchestrator') continue;
+
+    const parentSessionID = message.info.sessionID;
+    if (!parentSessionID) continue;
+    if (!shouldManageSession(parentSessionID)) {
+      registerSessionAsOrchestrator?.(parentSessionID);
+      if (!shouldManageSession(parentSessionID)) continue;
+    }
+    managedOrchestratorSessionIDs.add(parentSessionID);
+  }
+
+  for (const message of messages) {
+    if (!isMessageWithParts(message)) continue;
+
+    const parentSessionID = message.info.sessionID;
+    if (
+      !parentSessionID ||
+      !managedOrchestratorSessionIDs.has(parentSessionID)
+    ) {
+      continue;
+    }
+
+    for (const part of message.parts) {
+      if (part.type !== 'tool' || part.tool !== 'task') continue;
+      if (!isObjectRecord(part.state)) continue;
+
+      const state = part.state;
+      if (typeof state.output !== 'string') continue;
+      if (!isObjectRecord(state.input) || state.input.background !== true) {
+        continue;
+      }
+
+      const taskID = parseTaskIdFromTaskOutput(state.output);
+      if (!taskID || parseTaskStateFromOutput(state.output) !== 'running') {
+        continue;
+      }
+      if (backgroundJobBoard.get(taskID)) continue;
+
+      const agent =
+        typeof state.input.subagent_type === 'string' &&
+        state.input.subagent_type.trim() !== ''
+          ? state.input.subagent_type.trim()
+          : RECOVERED_TASK_AGENT_FALLBACK;
+      const description =
+        typeof state.input.description === 'string'
+          ? state.input.description
+          : undefined;
+      const prompt =
+        typeof state.input.prompt === 'string' ? state.input.prompt : undefined;
+      const label = deriveTaskSessionLabel({
+        description,
+        prompt,
+        agentType: agent,
+      });
+
+      backgroundJobBoard.registerLaunch({
+        taskID,
+        parentSessionID,
+        agent,
+        description: label,
+        objective: label,
+        background: true,
+        preserveRun: true,
+        // Historical parts do not carry a trustworthy launch timestamp. Zero
+        // also prevents this registration from looking like a live observation
+        // to the first runtime-status reconciliation.
+        now: 0,
+      });
+      rehydrated += 1;
+    }
+  }
+
+  return rehydrated;
+}
 
 export function createTaskSessionManagerHook(
   _ctx: PluginInput,
@@ -295,6 +386,13 @@ export function createTaskSessionManagerHook(
       // cache. Terminal results are left untouched (they materialize once).
       stabilizeRunningTaskParts(messages);
 
+      const rehydratedCount = rehydrateHistoricalRunningTasks(
+        messages,
+        backgroundJobBoard,
+        options.shouldManageSession,
+        options.registerSessionAsOrchestrator,
+      );
+
       for (const [messageIndex, message] of messages.entries()) {
         if (!isUserMessageWithParts(message)) continue;
         if (message.info.agent && message.info.agent !== 'orchestrator') {
@@ -321,6 +419,10 @@ export function createTaskSessionManagerHook(
             partIndex,
           );
         }
+      }
+
+      if (rehydratedCount > 0) {
+        await runtimeStatusReconciler.reconcile();
       }
     },
 

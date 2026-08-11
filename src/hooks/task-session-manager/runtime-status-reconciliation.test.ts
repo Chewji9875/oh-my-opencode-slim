@@ -150,6 +150,44 @@ describe('runtime status reconciliation', () => {
     expect(board.get('child-1')).toMatchObject({ state: 'running' });
   });
 
+  test('serializes overlapping reconciliation and observes jobs added in-flight', async () => {
+    const firstResponse = deferred<unknown>();
+    let lookupCount = 0;
+    const status = mock(() => {
+      lookupCount += 1;
+      if (lookupCount === 1) return firstResponse.promise;
+      return Promise.resolve({
+        data: {
+          'child-1': { type: 'busy' },
+          'child-2': { type: 'idle' },
+        },
+      });
+    });
+    const { board, reconciler } = createReconciler(status);
+
+    const firstReconciliation = reconciler.reconcile();
+    await Promise.resolve();
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'second reconciliation job',
+      now: 0,
+    });
+    const secondReconciliation = reconciler.reconcile();
+
+    expect(status).toHaveBeenCalledTimes(1);
+    firstResponse.resolve({ data: { 'child-1': { type: 'busy' } } });
+    await Promise.all([firstReconciliation, secondReconciliation]);
+
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(board.get('child-2')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+    });
+    reconciler.dispose();
+  });
+
   test('does not apply an old status response to a relaunched generation', async () => {
     const response = deferred<unknown>();
     const { board, reconciler } = createReconciler(() => response.promise);

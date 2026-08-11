@@ -22,10 +22,16 @@ export function createRuntimeStatusReconciler(options: {
   const delayMs = options.delayMs ?? RUNTIME_STATUS_RECONCILE_DELAY_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
-  let reconciling = false;
+  let activeReconcile: Promise<void> | undefined;
+  let rerunRequested = false;
 
   function schedule(): void {
-    if (disposed || timer || reconciling) return;
+    if (disposed) return;
+    if (activeReconcile) {
+      rerunRequested = true;
+      return;
+    }
+    if (timer) return;
     if (
       !options.backgroundJobBoard.list().some((job) => job.state === 'running')
     ) {
@@ -38,86 +44,103 @@ export function createRuntimeStatusReconciler(options: {
     timer.unref?.();
   }
 
-  async function reconcile(): Promise<void> {
-    if (disposed || reconciling) return;
+  async function reconcilePass(): Promise<void> {
+    if (disposed) return;
     const running = options.backgroundJobBoard
       .list()
       .filter((job) => job.state === 'running');
     if (running.length === 0) return;
 
-    reconciling = true;
-    try {
-      const requestStartedAt = Date.now();
-      const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
-        timeoutMs: options.statusTimeoutMs,
-      });
-      if (disposed) return;
-      const observedAt = Date.now();
-      if (snapshot.error) {
-        for (const job of running) {
-          options.backgroundJobBoard.markStatusUncertain(
-            job.taskID,
-            `Runtime status lookup failed: ${snapshot.error}`,
-            job.generation,
-          );
-        }
-        log('[task-session-manager] runtime status reconciliation uncertain', {
-          activeJobs: running.length,
-          error: snapshot.error,
-        });
-        return;
-      }
-
+    const requestStartedAt = Date.now();
+    const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+      timeoutMs: options.statusTimeoutMs,
+    });
+    if (disposed) return;
+    const observedAt = Date.now();
+    if (snapshot.error) {
       for (const job of running) {
-        if (disposed) return;
-        const current = options.backgroundJobBoard.get(job.taskID);
-        if (
-          current?.state !== 'running' ||
-          current.generation !== job.generation
-        ) {
-          continue;
-        }
-        const status = runtimeSessionStatus(snapshot, job.taskID);
-        if (status === undefined) {
-          options.backgroundJobBoard.markStatusUncertain(
-            job.taskID,
-            'Runtime status response did not contain a recognized session state.',
-            job.generation,
-          );
-          continue;
-        }
-        if (status === 'busy' || status === 'retry') {
-          options.backgroundJobBoard.markRunningFromLiveSession(
-            job.taskID,
-            observedAt,
-            job.generation,
-          );
-          continue;
-        }
-
-        const stopped = options.backgroundJobBoard.markStopped(
+        options.backgroundJobBoard.markStatusUncertain(
           job.taskID,
-          'Background session stopped before a terminal task result was received.',
-          requestStartedAt,
+          `Runtime status lookup failed: ${snapshot.error}`,
           job.generation,
         );
-        if (stopped?.state !== 'stopped') continue;
-        options.taskContextTracker.pendingManagedTaskIds.delete(job.taskID);
-        options.backgroundJobBoard.addContext(
-          job.taskID,
-          options.taskContextTracker.contextFilesForPrompt(job.taskID),
-        );
-        options.taskContextTracker.prune(options.backgroundJobBoard);
-        log('[task-session-manager] reconciled runtime-stopped job', {
-          taskID: stopped.taskID,
-          alias: stopped.alias,
-          parentSessionID: stopped.parentSessionID,
-        });
       }
-    } finally {
-      reconciling = false;
-      schedule();
+      log('[task-session-manager] runtime status reconciliation uncertain', {
+        activeJobs: running.length,
+        error: snapshot.error,
+      });
+      return;
     }
+
+    for (const job of running) {
+      if (disposed) return;
+      const current = options.backgroundJobBoard.get(job.taskID);
+      if (
+        current?.state !== 'running' ||
+        current.generation !== job.generation
+      ) {
+        continue;
+      }
+      const status = runtimeSessionStatus(snapshot, job.taskID);
+      if (status === undefined) {
+        options.backgroundJobBoard.markStatusUncertain(
+          job.taskID,
+          'Runtime status response did not contain a recognized session state.',
+          job.generation,
+        );
+        continue;
+      }
+      if (status === 'busy' || status === 'retry') {
+        options.backgroundJobBoard.markRunningFromLiveSession(
+          job.taskID,
+          observedAt,
+          job.generation,
+        );
+        continue;
+      }
+
+      const stopped = options.backgroundJobBoard.markStopped(
+        job.taskID,
+        'Background session stopped before a terminal task result was received.',
+        requestStartedAt,
+        job.generation,
+      );
+      if (stopped?.state !== 'stopped') continue;
+      options.taskContextTracker.pendingManagedTaskIds.delete(job.taskID);
+      options.backgroundJobBoard.addContext(
+        job.taskID,
+        options.taskContextTracker.contextFilesForPrompt(job.taskID),
+      );
+      options.taskContextTracker.prune(options.backgroundJobBoard);
+      log('[task-session-manager] reconciled runtime-stopped job', {
+        taskID: stopped.taskID,
+        alias: stopped.alias,
+        parentSessionID: stopped.parentSessionID,
+      });
+    }
+  }
+
+  async function reconcile(): Promise<void> {
+    if (disposed) return;
+    if (activeReconcile) {
+      rerunRequested = true;
+      await activeReconcile;
+      return;
+    }
+
+    const run = (async () => {
+      try {
+        do {
+          rerunRequested = false;
+          await reconcilePass();
+        } while (!disposed && rerunRequested);
+      } finally {
+        activeReconcile = undefined;
+        schedule();
+      }
+    })();
+    activeReconcile = run;
+    await run;
   }
 
   function dispose(): void {
