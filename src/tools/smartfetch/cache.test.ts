@@ -34,6 +34,85 @@ describe('smartfetch/cache', () => {
     });
   });
 
+  test('URL fragments are not part of the cache key (RFC 3986)', () => {
+    const noFragment = buildCacheKey(
+      'https://example.com/docs',
+      true,
+      'auto',
+      false,
+    );
+    const sec1 = buildCacheKey(
+      'https://example.com/docs#sec1',
+      true,
+      'auto',
+      false,
+    );
+    const sec2 = buildCacheKey(
+      'https://example.com/docs#sec2',
+      true,
+      'auto',
+      false,
+    );
+    const emptyFragment = buildCacheKey(
+      'https://example.com/docs#',
+      true,
+      'auto',
+      false,
+    );
+
+    expect(sec1).toBe(noFragment);
+    expect(sec2).toBe(noFragment);
+    expect(emptyFragment).toBe(noFragment);
+  });
+
+  test('query strings still distinguish cache keys', () => {
+    const page1 = buildCacheKey(
+      'https://example.com/docs?page=1#x',
+      true,
+      'auto',
+      false,
+    );
+    const page2 = buildCacheKey(
+      'https://example.com/docs?page=2#x',
+      true,
+      'auto',
+      false,
+    );
+
+    expect(page1).not.toBe(page2);
+  });
+
+  test('option changes still produce distinct cache keys', () => {
+    const base = buildCacheKey(
+      'https://example.com/docs#sec1',
+      true,
+      'auto',
+      false,
+    );
+    const noExtract = buildCacheKey(
+      'https://example.com/docs#sec1',
+      false,
+      'auto',
+      false,
+    );
+    const alwaysLlms = buildCacheKey(
+      'https://example.com/docs#sec1',
+      true,
+      'always',
+      false,
+    );
+    const saveBinary = buildCacheKey(
+      'https://example.com/docs#sec1',
+      true,
+      'auto',
+      true,
+    );
+
+    expect(noExtract).not.toBe(base);
+    expect(alwaysLlms).not.toBe(base);
+    expect(saveBinary).not.toBe(base);
+  });
+
   test('llms.txt-shaped result is charged once for its content', () => {
     const llmsTxt = Array.from(
       { length: 64 },

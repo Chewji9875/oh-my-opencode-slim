@@ -7,5 +7,6 @@ export * from './internal-initiator';
 export { initLogger, log } from './logger';
 export * from './polling';
 export * from './session';
+export * from './session-runtime-status';
 export * from './task';
 export { extractZip } from './zip-extractor';

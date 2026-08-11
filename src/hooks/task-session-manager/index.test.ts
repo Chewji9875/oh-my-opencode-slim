@@ -88,6 +88,7 @@ type HookOptions = {
   sessionStatus?: unknown;
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
+  runtimeStatusReconcileDelayMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
   willAttemptFallback?: (sessionID: string) => boolean;
   coordinator?: SessionLifecycle;
@@ -121,6 +122,7 @@ function createHook(options?: HookOptions) {
       willAttemptFallback: options?.willAttemptFallback,
       coordinator: options?.coordinator,
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
+      runtimeStatusReconcileDelayMs: options?.runtimeStatusReconcileDelayMs,
     },
   );
 
@@ -4288,7 +4290,7 @@ describe('task-session-manager hook', () => {
     expect(messages.messages[0].parts[0].text).toBe('do something');
   });
 
-  test('reconciles running child session job from session.idle event', async () => {
+  test('marks a running child as stopped when idle has no terminal task result', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4310,8 +4312,71 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'stopped',
+      terminalUnreconciled: true,
+      resultSummary:
+        'Background session stopped before a terminal task result was received.',
+    });
+  });
+
+  test('ignores an idle observation after the child has relaunched', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'first run',
+      now: 0,
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 20,
+    });
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
+    });
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'second run',
+      now: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+  });
+
+  test('starts runtime reconciliation after task launch', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 0,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'runtime-check',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: taskLaunchOutput('child-1') },
+    );
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
     });
   });
 
@@ -4414,7 +4479,7 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-2')).toBeUndefined();
   });
 
-  test('reconciles from idle when fallback guard passes', async () => {
+  test('marks stopped from idle when fallback guard passes', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4438,8 +4503,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'stopped',
+      terminalUnreconciled: true,
     });
   });
 
@@ -4479,7 +4544,7 @@ describe('task-session-manager hook', () => {
     });
     expect(board.get('child-1')).toMatchObject({ state: 'running' });
 
-    // Second idle (real completion) — fallback no longer in progress
+    // Second idle stops the child without an explicit task result.
     const hook2 = createHook({
       backgroundJobBoard: board,
       shouldManageSession: () => false,
@@ -4491,8 +4556,8 @@ describe('task-session-manager hook', () => {
     });
     await flushChildIdleReconcile();
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'stopped',
+      terminalUnreconciled: true,
     });
   });
 
@@ -4610,15 +4675,15 @@ describe('task-session-manager hook', () => {
     });
 
     // Simulate parent tool never firing tool.execute.after (cancelled).
-    // Child goes idle after finishing — board must still reconcile.
+    // Child goes idle without task output — board must stop waiting.
     await hook.event({
       event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
     });
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'stopped',
+      terminalUnreconciled: true,
     });
   });
 
@@ -4691,77 +4756,80 @@ describe('task-session-manager hook', () => {
   test.each([
     ['foreground-created-first', ['foreground-child', 'background-child']],
     ['background-created-first', ['background-child', 'foreground-child']],
-  ])('ambiguous early created events never supervise the foreground child (%s)', async (_, createdOrder) => {
-    const board = new BackgroundJobBoard();
-    const clock = createSupervisorClock();
-    const abort = mock(async () => undefined);
-    const supervisor = new BackgroundJobSupervisor({
-      backgroundJobStore: board,
-      wallClockTimeoutMs: 100,
-      abortGraceMs: 10,
-      abort,
-      now: clock.now,
-      setTimeout: clock.setTimeout,
-      clearTimeout: clock.clearTimeout,
-    });
-    const { hook } = createHook({
-      backgroundJobBoard: board,
-      backgroundJobSupervisor: supervisor,
-    });
-
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'background-call' },
-      {
-        args: {
-          subagent_type: 'explorer',
-          background: true,
-          description: 'background child',
-        },
-      },
-    );
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'foreground-call' },
-      {
-        args: {
-          subagent_type: 'explorer',
-          background: false,
-          description: 'foreground child',
-        },
-      },
-    );
-
-    for (const taskID of createdOrder) {
-      await hook.event({
-        event: {
-          type: 'session.created',
-          properties: { info: { id: taskID, parentID: 'parent-1' } },
-        },
+  ])(
+    'ambiguous early created events never supervise the foreground child (%s)',
+    async (_, createdOrder) => {
+      const board = new BackgroundJobBoard();
+      const clock = createSupervisorClock();
+      const abort = mock(async () => undefined);
+      const supervisor = new BackgroundJobSupervisor({
+        backgroundJobStore: board,
+        wallClockTimeoutMs: 100,
+        abortGraceMs: 10,
+        abort,
+        now: clock.now,
+        setTimeout: clock.setTimeout,
+        clearTimeout: clock.clearTimeout,
       });
-    }
+      const { hook } = createHook({
+        backgroundJobBoard: board,
+        backgroundJobSupervisor: supervisor,
+      });
 
-    expect(board.get('background-child')?.background).toBe(false);
-    expect(board.get('foreground-child')?.background).toBe(false);
-    expect(abort).not.toHaveBeenCalled();
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'background-call' },
+        {
+          args: {
+            subagent_type: 'explorer',
+            background: true,
+            description: 'background child',
+          },
+        },
+      );
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'foreground-call' },
+        {
+          args: {
+            subagent_type: 'explorer',
+            background: false,
+            description: 'foreground child',
+          },
+        },
+      );
 
-    await hook['tool.execute.after'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'foreground-call' },
-      { output: taskLaunchOutput('foreground-child') },
-    );
-    await hook['tool.execute.after'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'background-call' },
-      { output: taskLaunchOutput('background-child') },
-    );
+      for (const taskID of createdOrder) {
+        await hook.event({
+          event: {
+            type: 'session.created',
+            properties: { info: { id: taskID, parentID: 'parent-1' } },
+          },
+        });
+      }
 
-    expect(board.get('foreground-child')?.background).toBe(false);
-    expect(board.get('background-child')?.background).toBe(true);
-    const backgroundJob = board.get('background-child');
-    expect(backgroundJob).toBeDefined();
-    const deadline = (backgroundJob?.runStartedAt ?? 0) + 100;
-    await clock.advanceTo(deadline);
+      expect(board.get('background-child')?.background).toBe(false);
+      expect(board.get('foreground-child')?.background).toBe(false);
+      expect(abort).not.toHaveBeenCalled();
 
-    expect(abort).toHaveBeenCalledTimes(1);
-    expect(abort).toHaveBeenCalledWith('background-child');
-  });
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'foreground-call' },
+        { output: taskLaunchOutput('foreground-child') },
+      );
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'background-call' },
+        { output: taskLaunchOutput('background-child') },
+      );
+
+      expect(board.get('foreground-child')?.background).toBe(false);
+      expect(board.get('background-child')?.background).toBe(true);
+      const backgroundJob = board.get('background-child');
+      expect(backgroundJob).toBeDefined();
+      const deadline = (backgroundJob?.runStartedAt ?? 0) + 100;
+      await clock.advanceTo(deadline);
+
+      expect(abort).toHaveBeenCalledTimes(1);
+      expect(abort).toHaveBeenCalledWith('background-child');
+    },
+  );
 
   test('missing after-hook callID fails closed while an exact background call remains', async () => {
     const board = new BackgroundJobBoard();
@@ -4967,7 +5035,7 @@ describe('task-session-manager hook', () => {
     expect(job?.state).toBe('cancelled');
   });
 
-  test('idle via session.status idle path triggers reconciliation', async () => {
+  test('idle via session.status path marks the job stopped', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4992,8 +5060,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'stopped',
+      terminalUnreconciled: true,
     });
   });
 

@@ -24,6 +24,7 @@ import { createIdleReconciler } from './idle-reconciliation';
 import { createIdleSessionTokens } from './idle-session-tokens';
 import { createInputWaitTracker } from './input-wait-tracker';
 import { createPendingCallTracker } from './pending-call-tracker';
+import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
 import { createTaskContextTracker } from './task-context-tracker';
 import {
   handleToolExecuteAfter,
@@ -69,6 +70,8 @@ export function createTaskSessionManagerHook(
     coordinator?: SessionLifecycle;
     /** Test seam only; production always uses the reconciliation delay. */
     idleReconcileDelayMs?: number;
+    /** Test seam only; production uses the runtime reconciliation delay. */
+    runtimeStatusReconcileDelayMs?: number;
   },
 ) {
   const backgroundJobBoard =
@@ -122,6 +125,12 @@ export function createTaskSessionManagerHook(
     hasInputWait: (s) => hasInputWait(s),
     getIdleSessionToken: (s) => getIdleSessionToken(s),
     isCurrentIdleSessionToken: (s, t) => isCurrentIdleSessionToken(s, t),
+    taskContextTracker,
+  });
+  const runtimeStatusReconciler = createRuntimeStatusReconciler({
+    input: _ctx,
+    backgroundJobBoard,
+    delayMs: options.runtimeStatusReconcileDelayMs,
     taskContextTracker,
   });
 
@@ -261,17 +270,19 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
       }),
 
-    'tool.execute.after': (
+    'tool.execute.after': async (
       input: { tool: string; sessionID?: string; callID?: string },
       output: { output: unknown; metadata?: unknown },
-    ): Promise<void> =>
-      handleToolExecuteAfter(input, output, {
+    ): Promise<void> => {
+      await handleToolExecuteAfter(input, output, {
         directory: _ctx.directory,
         backgroundJobBoard,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         pendingCallTracker,
         taskContextTracker,
-      }),
+      });
+      runtimeStatusReconciler.schedule();
+    },
 
     'experimental.chat.messages.transform': async (
       _input: Record<string, never>,
@@ -339,6 +350,9 @@ export function createTaskSessionManagerHook(
         }
       }
 
+      if (input.event.type === 'server.instance.disposed') {
+        runtimeStatusReconciler.dispose();
+      }
       return handleEvent(input, {
         inputWaits,
         idleSessionTokens,
@@ -352,7 +366,7 @@ export function createTaskSessionManagerHook(
         pendingInjectedTerminalJobsByParent,
         retainedBoardSnapshots: injectionState.retainedBoardSnapshots,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
-      });
+      }).then(() => runtimeStatusReconciler.schedule());
     },
   };
 }

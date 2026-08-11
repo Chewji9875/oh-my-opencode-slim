@@ -52,6 +52,7 @@ export function createIdleReconciler(options: {
   function scheduleChildIdleReconciliation(
     sessionID: string,
     idleObservedAt: number,
+    observedGeneration: number,
   ): void {
     if (childIdleReconcileTimers.has(sessionID)) return;
     if (options.isFallbackInProgress?.(sessionID)) return;
@@ -61,7 +62,9 @@ export function createIdleReconciler(options: {
       if (options.isFallbackInProgress?.(sessionID)) return;
 
       const job = options.backgroundJobBoard.get(sessionID);
-      if (job?.state !== 'running') return;
+      if (job?.state !== 'running' || job.generation !== observedGeneration) {
+        return;
+      }
 
       // Busy after the idle means the session recovered (e.g. FG re-prompt).
       if (
@@ -71,17 +74,19 @@ export function createIdleReconciler(options: {
         return;
       }
 
-      log('[task-session-manager] reconciled running job from idle', {
+      log('[task-session-manager] observed runtime-stopped job from idle', {
         sessionID,
         alias: job.alias,
         parentSessionID: job.parentSessionID,
       });
-      options.backgroundJobBoard.updateStatus({
-        taskID: sessionID,
-        state: 'completed',
-        resultSummary: 'Background task completed (reconciled from idle event)',
-      });
-      options.backgroundJobBoard.markReconciled(sessionID);
+      options.backgroundJobBoard.markStopped(
+        sessionID,
+        'Background session stopped before a terminal task result was received.',
+        // The idle event itself happened after the last busy event. Preserve
+        // that ordering when timestamps share millisecond precision.
+        idleObservedAt + 1,
+        observedGeneration,
+      );
       options.taskContextTracker.pendingManagedTaskIds.delete(sessionID);
       options.backgroundJobBoard.addContext(
         sessionID,
