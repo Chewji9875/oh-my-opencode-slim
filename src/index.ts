@@ -356,6 +356,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.isFallbackInProgress(sessionID),
       coordinator: sessionLifecycle,
     });
+    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      if (record.state !== 'stopped' || !record.terminalUnreconciled) return;
+      orchestratorWakeScheduler.triggerStoppedJobRecovery(
+        record.parentSessionID,
+      );
+    });
 
     // Initialize hooks and wrapPostToolHook helper for error isolation
 

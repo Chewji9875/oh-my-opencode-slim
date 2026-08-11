@@ -154,7 +154,7 @@ export function createV2InterviewBridge(
     transcripts.set(event.sessionID, messages);
 
     const trailing = event.messages.at(-1);
-    if (!trailing || trailing.role !== 'user') return;
+    if (trailing?.role !== 'user') return;
     const text = textFromContent(trailing.content);
     const match = text.match(MARKER_PATTERN);
     if (!match) return;

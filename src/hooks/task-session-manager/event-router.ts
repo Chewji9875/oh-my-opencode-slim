@@ -65,6 +65,7 @@ export async function handleEvent(
       scheduleChildIdleReconciliation(
         sessionID: string,
         idleObservedAt: number,
+        observedGeneration: number,
       ): void;
       scheduleErrorTerminalize(sessionID: string, idleObservedAt: number): void;
       clearIdleTimers(sessionID: string): void;
@@ -213,6 +214,7 @@ export async function handleEvent(
         deps.idleReconciler.scheduleChildIdleReconciliation(
           sessionId,
           Date.now(),
+          job.generation,
         );
       }
     }

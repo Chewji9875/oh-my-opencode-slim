@@ -33,9 +33,7 @@ describe('smartfetch/network', () => {
   });
 
   test('normalizeUrl keeps origin and query string while dropping the fragment', () => {
-    const normalized = normalizeUrl(
-      'https://example.com/docs?page=2#anchor',
-    );
+    const normalized = normalizeUrl('https://example.com/docs?page=2#anchor');
 
     expect(normalized.url).toBe('https://example.com/docs?page=2');
     expect(new URL(normalized.url).origin).toBe('https://example.com');

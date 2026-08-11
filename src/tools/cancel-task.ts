@@ -4,7 +4,6 @@ import {
   tool,
 } from '@opencode-ai/plugin';
 import type { BackgroundJobStore } from '../utils/background-job-store';
-import { isRecord as isObjectRecord } from '../utils/guards';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
 import { delay } from '../utils/polling';
@@ -13,6 +12,10 @@ import {
   SESSION_ID_PATTERN,
   withTimeout,
 } from '../utils/session';
+import {
+  getRuntimeSessionStatusSnapshot,
+  runtimeSessionStatus,
+} from '../utils/session-runtime-status';
 
 const z = tool.schema;
 
@@ -129,6 +132,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. Accep
         );
       }
 
+      const generation = job.generation;
       try {
         await abortAndVerifySession(options, job.taskID);
       } catch (error) {
@@ -140,19 +144,18 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. Accep
           boardRunning,
           error: error instanceof Error ? error.message : String(error),
         });
-        options.backgroundJobBoard.updateStatus({
-          taskID: job.taskID,
-          state: 'running',
-          statusUncertain: true,
-          lastStatusError:
-            error instanceof Error ? error.message : String(error),
-        });
+        const message = error instanceof Error ? error.message : String(error);
+        const updated = options.backgroundJobBoard.markStatusUncertain(
+          job.taskID,
+          message,
+          generation,
+        );
         return [
           `task_id: ${job.taskID}`,
-          'state: running',
+          `state: ${updated?.state ?? 'unknown'}`,
           '',
           '<task_error>',
-          error instanceof Error ? error.message : String(error),
+          message,
           '</task_error>',
         ].join('\n');
       }
@@ -275,7 +278,11 @@ async function deleteAndVerifySession(
       reason,
       error: error instanceof Error ? error.message : String(error),
     });
-    const status = await getSessionStatus(options.input, taskID);
+    const status = await getSessionStatus(
+      options.input,
+      taskID,
+      options.deleteVerifyMs ?? 1_500,
+    );
     log('[cancel-task] delete failure verification status', {
       taskID,
       reason,
@@ -299,7 +306,11 @@ async function deleteAndVerifySession(
   let lastStatus: string | undefined;
   while (Date.now() <= deadline) {
     attempts += 1;
-    const status = await getSessionStatus(options.input, taskID);
+    const status = await getSessionStatus(
+      options.input,
+      taskID,
+      Math.max(1, deadline - Date.now()),
+    );
     lastStatus = status.status;
     log('[cancel-task] delete verification status', {
       taskID,
@@ -310,7 +321,7 @@ async function deleteAndVerifySession(
       statusKeys: status.keys,
       stableStoppedSince,
     });
-    if (status.status === 'busy' || status.status === 'retry') {
+    if (status.status !== 'idle') {
       stableStoppedSince = undefined;
       await delay(retryIntervalMs);
       continue;
@@ -328,42 +339,22 @@ async function deleteAndVerifySession(
 async function getSessionStatus(
   input: PluginInput,
   taskID: string,
+  timeoutMs?: number,
 ): Promise<{
   status: string | undefined;
   source: string;
   keys: string[];
 }> {
-  try {
-    const result = await getClient(input).session.status({
-      query: { directory: input.directory },
-    });
-    const data = result.data;
-    if (!isObjectRecord(data)) {
-      return { status: undefined, source: 'invalid-data', keys: [] };
-    }
-    const keys = Object.keys(data).slice(0, 20);
-    const item = data[taskID];
-    if (item === undefined) {
-      return { status: 'idle', source: 'missing-from-map', keys };
-    }
-    if (isObjectRecord(item) && typeof item.type === 'string') {
-      return { status: item.type, source: 'task-map-entry', keys };
-    }
-    if (typeof data.type === 'string') {
-      return { status: data.type, source: 'legacy-data-type', keys };
-    }
-    const nested = data.status;
-    if (isObjectRecord(nested) && typeof nested.type === 'string') {
-      return { status: nested.type, source: 'legacy-data-status', keys };
-    }
-    return { status: undefined, source: 'unknown-shape', keys };
-  } catch (error) {
-    log('[cancel-task] session status lookup failed', {
-      taskID,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { status: undefined, source: 'lookup-error', keys: [] };
-  }
+  const snapshot = await getRuntimeSessionStatusSnapshot(input, { timeoutMs });
+  return {
+    status: runtimeSessionStatus(snapshot, taskID),
+    source: snapshot.error
+      ? 'lookup-error'
+      : snapshot.statuses.has(taskID)
+        ? 'task-map-entry'
+        : 'missing-from-map',
+    keys: [...snapshot.statuses.keys()].slice(0, 20),
+  };
 }
 
 function normalizeCancelReason(reason?: string): string {

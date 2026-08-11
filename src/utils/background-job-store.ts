@@ -7,7 +7,6 @@ import type {
   WallClockTimeoutClaimInput,
   WallClockTimeoutFinalizeInput,
 } from './background-job-board';
-import type { TaskOutputState } from './task';
 
 /**
  * Unified interface for background job operations.
@@ -30,6 +29,20 @@ export interface BackgroundJobStore {
   ): BackgroundJobRecord | undefined;
   markRunningFromLiveSession(
     taskID: string,
+    now?: number,
+    expectedGeneration?: number,
+  ): BackgroundJobRecord | undefined;
+  markStopped(
+    taskID: string,
+    resultSummary: string,
+    observedAt?: number,
+    expectedGeneration?: number,
+    now?: number,
+  ): BackgroundJobRecord | undefined;
+  markStatusUncertain(
+    taskID: string,
+    lastStatusError: string,
+    expectedGeneration?: number,
     now?: number,
   ): BackgroundJobRecord | undefined;
   markReconciled(taskID: string, now?: number): BackgroundJobRecord | undefined;
@@ -55,7 +68,7 @@ export interface BackgroundJobStore {
   getResultSummary(taskID: string): string | undefined;
   getLastLiveBusyAt(taskID: string): number | undefined;
   getParentSessionID(taskID: string): string | undefined;
-  getState(taskID: string): TaskOutputState | 'reconciled' | undefined;
+  getState(taskID: string): BackgroundJobRecord['state'] | undefined;
   resolve(
     parentSessionID: string,
     taskIDOrAlias: string,
