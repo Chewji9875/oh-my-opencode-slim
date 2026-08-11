@@ -45,6 +45,7 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createTaskResultTool,
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
@@ -167,6 +168,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let interviewManager: ReturnType<typeof createInterviewManager>;
   let companionManager: CompanionManager;
   let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
+  let taskResultTools: ReturnType<typeof createTaskResultTool>;
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool>;
@@ -428,6 +430,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
     });
+    taskResultTools = createTaskResultTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      shouldManageSession: (sessionID) =>
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+    });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
@@ -444,6 +452,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
     tools = {
       ...cancelTaskTools,
+      ...taskResultTools,
       ...waitForUserTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch ? { webfetch } : {}),
