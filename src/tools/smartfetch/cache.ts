@@ -30,6 +30,9 @@ export function buildCacheKey(
   saveBinary: boolean,
 ) {
   const parsed = new URL(url);
+  // Fragments never reach the server (RFC 3986 §3.5); #sec1 and #sec2 are
+  // the same document, so they must share one cache entry.
+  parsed.hash = '';
   return JSON.stringify({
     url: parsed.toString(),
     extractMain,
