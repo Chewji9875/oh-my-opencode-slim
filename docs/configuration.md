@@ -156,12 +156,8 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `backgroundJobs.wallClockTimeoutMs` | integer | `0` | **Opt-in wall-clock supervisor.** `0` disables it. Otherwise, only native `task(..., background: true)` child sessions are supervised; accepted values are `60000`–`2147483647` milliseconds See [Background Job Management](#background-job-management). |
 | `backgroundJobs.abortGraceMs` | integer | `10000` | Grace period after a wall-clock deadline for a terminal confirmation. Accepted values are `1000`–`60000` milliseconds; a hanging or failed abort does not extend this grace See [Background Job Management](#background-job-management). |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
-| `fallback.enabled` | boolean | `true` | Enable model failover on timeout/error |
-| `fallback.timeoutMs` | number | `15000` | Time before aborting and trying next model |
-| `fallback.retryDelayMs` | number | `500` | Delay between retry attempts |
-| `fallback.maxRetries` | number | `3` | Maximum failover attempts before giving up |
-| `fallback.runtimeOverride` | boolean | `true` | **Deprecated.** No longer used. Fallback is always disabled when a user explicitly selects a model via `/model`. |
-| `fallback.retry_on_empty` | boolean | `true` | Treat silent empty provider responses (0 tokens) as failures and retry. Set `false` to accept empty responses |
+| `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. |
+| `fallback.maxRetries` | number | `3` | Consecutive retryable 429 responses allowed for the same foreground model before Slim aborts or selects the next configured fallback model. It does not cap OpenCode provider retries or background subagent retries. |
 | `council.presets` | object | - | **Required if using council.** Named councillor presets See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.model` | string | - | Councillor model See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.variant` | string | - | Councillor variant See [Council configuration note](#council-configuration-note). |
@@ -324,6 +320,11 @@ background native task calls; foreground calls or calls with `background`
 omitted are not supervised. It is independent from OpenCode's external
 task-wait timeout, and a wall-clock timeout cannot be recovered by reusing the
 running session.
+
+`fallback.maxRetries` is unrelated to the wall-clock supervisor and to
+OpenCode's provider retry policy. A value of `0` disables Slim's foreground
+429 failover budget; it does not prevent OpenCode from retrying a provider
+request in a child session.
 
 ### Agent Display Names
 
