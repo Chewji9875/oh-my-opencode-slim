@@ -25,7 +25,8 @@ Required behavior:
   existing `.gitignore` and `.ignore`; add only missing entries, without
   duplicates, so `.gitignore` contains `.slim/deepwork/` and `.ignore` contains
   `!.slim/deepwork/` and `!.slim/deepwork/**`;
-- keep OpenCode todos aligned with the active deepwork phase;
+- before starting each phase, replace the OpenCode todo list with actionable
+  delivery todos for that phase only;
 - create and maintain a local markdown progress file under `.slim/deepwork/`;
 - save code/doc deliverables to project paths (e.g. `src/`, `docs/`); reserve
   `.slim/deepwork/` strictly for progress files;
