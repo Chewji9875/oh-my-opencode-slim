@@ -45,10 +45,13 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createTaskNudgeTool,
   createTaskResultTool,
+  createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
+import { TaskActivityTracker } from './tools/task-activity';
 import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
 import { recordTuiAgentModel, recordTuiAgentModels } from './tui-state';
 import {
@@ -169,6 +172,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let companionManager: CompanionManager;
   let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
   let taskResultTools: ReturnType<typeof createTaskResultTool>;
+  let taskStatusTools: ReturnType<typeof createTaskStatusTool>;
+  let taskNudgeTools: ReturnType<typeof createTaskNudgeTool>;
+  const taskActivityTracker = new TaskActivityTracker();
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool>;
@@ -440,6 +446,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
     });
+    taskStatusTools = createTaskStatusTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      activityTracker: taskActivityTracker,
+    });
+    taskNudgeTools = createTaskNudgeTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+    });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
@@ -457,6 +472,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     tools = {
       ...cancelTaskTools,
       ...taskResultTools,
+      ...taskStatusTools,
+      ...taskNudgeTools,
       ...waitForUserTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch ? { webfetch } : {}),
@@ -891,9 +908,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       };
 
       const eventSessionID =
-        event.properties?.info?.id ?? event.properties?.sessionID;
+        event.properties?.info?.id ??
+        event.properties?.info?.sessionID ??
+        event.properties?.sessionID;
       const statusType = event.properties?.status?.type;
       if (eventSessionID) {
+        if (
+          event.type === 'message.updated' ||
+          event.type === 'step-finish' ||
+          (event.type === 'session.status' && (statusType === 'busy' || statusType === 'retry'))
+        ) {
+          taskActivityTracker.touch(eventSessionID);
+        }
         if (
           event.type === 'session.status' &&
           (statusType === 'busy' || statusType === 'retry')
@@ -905,6 +931,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           event.type === 'session.deleted'
         ) {
           sessionMetadata.markOrchestratorIdle(eventSessionID);
+          if (event.type === 'session.deleted') taskActivityTracker.forget(eventSessionID);
         }
       }
 
