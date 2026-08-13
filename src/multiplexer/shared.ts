@@ -245,3 +245,89 @@ export async function gracefulClosePane(
     return false;
   }
 }
+
+export interface SessionReadinessOptions {
+  /** Override the per-attempt readiness probe (default: GET /session/status). */
+  checkSessionReady?: (
+    url: URL,
+    sessionId: string,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
+  /** Injectable cancellation-safe delay for backoff between attempts. */
+  delay?: (milliseconds: number) => Promise<void>;
+  /** Per-attempt abort timeout in milliseconds (default 1000). */
+  readinessAttemptTimeoutMs?: number;
+}
+
+const SESSION_READINESS_DELAYS_MS = [50, 100, 200, 400, 500, 500, 250] as const;
+
+/**
+ * Poll the OpenCode `/session/status` endpoint until the child session is
+ * attachable, with a bounded retry schedule and a per-attempt abort timeout.
+ *
+ * Prevents the attach-before-ready race where `opencode attach --session
+ * <id>` launches before the server has published the session and falls back
+ * to the new-session picker TUI. Returns false when the session never became
+ * ready within the bounded window.
+ */
+export async function waitForSessionReady(
+  serverUrl: string,
+  sessionId: string,
+  options: SessionReadinessOptions = {},
+): Promise<boolean> {
+  const check = options.checkSessionReady ?? defaultSessionReady;
+  const delay = options.delay ?? defaultDelay;
+  const attemptTimeoutMs = options.readinessAttemptTimeoutMs ?? 1_000;
+  const url = new URL('/session/status', serverUrl);
+
+  for (
+    let attempt = 0;
+    attempt <= SESSION_READINESS_DELAYS_MS.length;
+    attempt++
+  ) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
+    timeout.unref?.();
+    let ready = false;
+    try {
+      ready = await Promise.race([
+        check(url, sessionId, controller.signal),
+        new Promise<boolean>((resolve) =>
+          controller.signal.addEventListener('abort', () => resolve(false), {
+            once: true,
+          }),
+        ),
+      ]);
+    } catch {
+      // A session can briefly be unreachable while OpenCode publishes it.
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (ready) return true;
+
+    const delayMs = SESSION_READINESS_DELAYS_MS[attempt];
+    if (delayMs === undefined) return false;
+    await delay(delayMs);
+  }
+  return false;
+}
+
+async function defaultSessionReady(
+  url: URL,
+  sessionId: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const response = await fetch(url, { signal });
+  if (!response.ok) return false;
+  const statuses = (await response.json()) as Record<
+    string,
+    { type?: string } | undefined
+  >;
+  return ['idle', 'running', 'busy', 'retry'].includes(
+    statuses[sessionId]?.type ?? '',
+  );
+}
+
+function defaultDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}

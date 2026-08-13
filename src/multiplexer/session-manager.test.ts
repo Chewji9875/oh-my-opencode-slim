@@ -33,12 +33,14 @@ const mockMultiplexer = {
   applyLayout: mock(async () => {}),
 };
 const mockIsServerRunning = mock(async () => true);
+const mockWaitForSessionReady = mock(async () => true);
 
 // Mock the multiplexer module
 mock.module('../multiplexer', () => ({
   getMultiplexer: () => mockMultiplexer,
   isServerRunning: mockIsServerRunning,
   startAvailabilityCheck: () => {},
+  waitForSessionReady: mockWaitForSessionReady,
 }));
 
 // Mock the plugin context
@@ -106,6 +108,8 @@ describe('MultiplexerSessionManager', () => {
     mockMultiplexerType = 'tmux';
     mockIsServerRunning.mockReset();
     mockIsServerRunning.mockResolvedValue(true);
+    mockWaitForSessionReady.mockReset();
+    mockWaitForSessionReady.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -239,11 +243,171 @@ describe('MultiplexerSessionManager', () => {
       const firstCreate = manager.onSessionCreated(event);
       const secondCreate = manager.onSessionCreated(event);
 
-      await Promise.resolve();
+      await flushPromises();
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
 
       deferred.resolve({ success: true, paneId: 'p-race' });
+
+      await Promise.all([firstCreate, secondCreate]);
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+    });
+
+    test('waits for child session readiness before spawning the pane', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+      const readiness = createDeferred<boolean>();
+
+      mockWaitForSessionReady.mockImplementationOnce(() => readiness.promise);
+
+      const create = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-ready',
+            parentID: 'parent-ready',
+            title: 'Ready Worker',
+          },
+        },
+      });
+
+      await flushPromises();
+
+      // Readiness still pending: no pane may be spawned yet.
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      readiness.resolve(true);
+      await create;
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledWith(
+        'child-ready',
+        'Ready Worker',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+    });
+
+    test('skips spawn when child session readiness times out', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      mockWaitForSessionReady.mockResolvedValueOnce(false);
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-timeout',
+            parentID: 'parent-timeout',
+            title: 'Timeout Worker',
+          },
+        },
+      });
+
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+      expect(mockWaitForSessionReady).toHaveBeenCalledWith(
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        'child-timeout',
+        expect.any(Object),
+      );
+    });
+
+    test('respawns only after readiness when a known session goes busy', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-respawn',
+            parentID: 'parent-respawn',
+            title: 'Respawn Worker',
+          },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+
+      // Idle close untracks the pane so a later busy event respawns it.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'idle' },
+        },
+      });
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      // First respawn attempt: readiness times out, no pane.
+      mockWaitForSessionReady.mockResolvedValueOnce(false);
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'busy' },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+
+      // Session becomes visible; respawn proceeds.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'busy' },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
+        'child-respawn',
+        'Respawn Worker',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+    });
+
+    test('duplicate create events do not double-wait or double-spawn', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+      const readiness = createDeferred<boolean>();
+
+      mockWaitForSessionReady.mockImplementation(() => readiness.promise);
+
+      const event = {
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-dupe',
+            parentID: 'parent-dupe',
+            title: 'Dupe Worker',
+          },
+        },
+      };
+
+      const firstCreate = manager.onSessionCreated(event);
+      const secondCreate = manager.onSessionCreated(event);
+
+      await Promise.resolve();
+
+      // Spawning guard held: readiness is polled once, spawn deferred.
+      expect(mockWaitForSessionReady).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      readiness.resolve(true);
 
       await Promise.all([firstCreate, secondCreate]);
 

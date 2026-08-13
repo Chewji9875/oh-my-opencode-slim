@@ -253,3 +253,122 @@ describe('buildShellLaunchArgs', () => {
     }
   });
 });
+
+describe('waitForSessionReady', () => {
+  const url = 'http://127.0.0.1:7777/base';
+
+  test('returns true immediately when the session is already ready', async () => {
+    const { waitForSessionReady } = await importShared();
+    const check = mock(async () => true);
+    const delays: number[] = [];
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async (ms) => void delays.push(ms),
+    });
+    expect(ready).toBe(true);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(delays).toEqual([]);
+  });
+
+  test('delayed readiness: polls until the session appears, then succeeds', async () => {
+    const { waitForSessionReady } = await importShared();
+    const seen: Array<{ url: string; sessionId: string }> = [];
+    let attempt = 0;
+    const check = mock(async (checkUrl: URL, sessionId: string) => {
+      seen.push({ url: checkUrl.href, sessionId });
+      attempt += 1;
+      return attempt >= 3;
+    });
+    const delays: number[] = [];
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async (ms) => void delays.push(ms),
+    });
+    expect(ready).toBe(true);
+    expect(check).toHaveBeenCalledTimes(3);
+    expect(seen).toEqual([
+      { url: 'http://127.0.0.1:7777/session/status', sessionId: 'session-1' },
+      { url: 'http://127.0.0.1:7777/session/status', sessionId: 'session-1' },
+      { url: 'http://127.0.0.1:7777/session/status', sessionId: 'session-1' },
+    ]);
+    expect(delays).toEqual([50, 100]);
+  });
+
+  test('readiness timeout: returns false without ever succeeding', async () => {
+    const { waitForSessionReady } = await importShared();
+    const check = mock(async () => false);
+    const delays: number[] = [];
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async (ms) => void delays.push(ms),
+    });
+    expect(ready).toBe(false);
+    // 8 attempts = 7 backoff delays + one final attempt
+    expect(check).toHaveBeenCalledTimes(8);
+    expect(delays).toEqual([50, 100, 200, 400, 500, 500, 250]);
+  });
+
+  test('a throwing probe is treated as not-ready and keeps polling', async () => {
+    const { waitForSessionReady } = await importShared();
+    let attempt = 0;
+    const check = mock(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('network');
+      return true;
+    });
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+    });
+    expect(ready).toBe(true);
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+
+  test('a hanging probe is aborted by the per-attempt timeout', async () => {
+    const { waitForSessionReady } = await importShared();
+    const check = mock(() => new Promise<boolean>(() => {}));
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+      readinessAttemptTimeoutMs: 5,
+    });
+    expect(ready).toBe(false);
+    expect(check).toHaveBeenCalledTimes(8);
+  });
+
+  test('default probe parses the target status from /session/status', async () => {
+    const originalFetch = globalThis.fetch;
+    const requested: string[] = [];
+    globalThis.fetch = mock(async (input) => {
+      requested.push(String(input));
+      return Response.json({
+        target: { type: 'busy' },
+        other: { type: 'idle' },
+      });
+    }) as typeof fetch;
+    try {
+      const { waitForSessionReady } = await importShared();
+      expect(
+        await waitForSessionReady('http://127.0.0.1:7777/base', 'target'),
+      ).toBe(true);
+      expect(requested).toEqual(['http://127.0.0.1:7777/session/status']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('default probe reports false when the session is absent', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () =>
+      Response.json({ other: { type: 'idle' } }),
+    ) as typeof fetch;
+    try {
+      const { waitForSessionReady } = await importShared();
+      expect(
+        await waitForSessionReady('http://127.0.0.1:7777/base', 'missing'),
+      ).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
