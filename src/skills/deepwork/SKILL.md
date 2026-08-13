@@ -44,6 +44,8 @@ Required behavior:
   whether to split the same agent into multiple bounded lanes;
 - after each planned phase, validate and update the deepwork file, then ask
   `@oracle` to review the phase result before continuing;
+- after phase validation, run the normal Oracle gate review and an `@explorer`
+  structure scan in parallel; reconcile both before continuing;
 - do not continue review or refinement merely because further improvement is
   possible; treat `impact × confidence ÷ cost`, discounted after each pass,
   only as a qualitative reminder that additional cycles must earn their delay
@@ -101,6 +103,20 @@ For re-reviews, tell Oracle to prioritize unresolved material findings, risks
 introduced by remediation, and whether prior findings are resolved. It must not
 reopen accepted, unchanged, or resolved concerns. When the two re-reviews are
 exhausted, do not continue the review loop without explicit user authorization.
+
+## Structure Scan
+
+Alongside each normal Oracle gate review, ask `@explorer` to factually scan the
+completed phase's changed paths and immediate dependencies for duplication
+candidates, dependency direction, responsibility overlap, and file or folder
+placement concerns. Explorer reports evidence only; it does not judge whether
+the structure is harmful.
+
+The orchestrator reconciles the Explorer evidence directly alongside Oracle's
+normal gate report. It decides whether the reported structural concerns require
+action, can be deferred, or do not warrant a change. Do not request another
+Oracle review for the structure scan. When cleanup or refactoring would expand
+scope, record the concern and ask the user before authorizing it.
 
 ## Designer Handoff Guardrail
 
