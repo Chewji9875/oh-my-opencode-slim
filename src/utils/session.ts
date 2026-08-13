@@ -163,6 +163,11 @@ function isPromptCancellationError(error: unknown): boolean {
 export interface SessionExtractionResult {
   text: string;
   empty: boolean;
+  /** True only when the last message is a completed assistant turn with no
+   *  message-level error. This is terminal evidence that the session is not
+   *  idle mid-work; callers must not present partial output as a final result
+   *  without it. */
+  terminal?: boolean;
 }
 
 /** Extract only the final assistant response to keep task retrieval bounded. */
@@ -177,7 +182,11 @@ export async function extractFinalSessionResult(
     ...(options?.directory ? { query: { directory: options.directory } } : {}),
   });
   const messages = (messagesResult.data ?? []) as Array<{
-    info?: { role: string };
+    info?: {
+      role: string;
+      time?: { completed?: number };
+      error?: unknown;
+    };
     parts?: Array<{ type: string; text?: string }>;
   }>;
   const message = messages.findLast((item) => item.info?.role === 'assistant');
@@ -191,7 +200,14 @@ export async function extractFinalSessionResult(
     .map((part) => part.text!)
     .join('\n\n');
 
-  return { text, empty: text.length === 0 };
+  const last = messages[messages.length - 1];
+  const terminal =
+    last !== undefined &&
+    last === message &&
+    typeof last.info?.time?.completed === 'number' &&
+    last.info?.error === undefined;
+
+  return { text, empty: text.length === 0, terminal };
 }
 
 /**

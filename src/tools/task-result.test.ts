@@ -103,6 +103,91 @@ describe('task_result', () => {
     expect(messages).not.toHaveBeenCalled();
   });
 
+  test('rejects a tracked task that ended in error', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'error',
+      resultSummary: 'provider exploded',
+    });
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('ended in error: provider exploded');
+    expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('rejects a tracked task that was cancelled', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.markCancelled('ses_child1', 'orchestrator aborted');
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('was cancelled: orchestrator aborted');
+    expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('returns a reconciled task whose terminal outcome was completed', async () => {
+    const { board, tool } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
+    board.markReconciled('ses_child1');
+
+    const output = await tool.execute({ task_id: 'exp-1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toBe('complete findings');
+  });
+
+  test('rejects a reconciled task whose terminal outcome was error', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'error',
+      resultSummary: 'model unavailable',
+    });
+    board.markReconciled('ses_child1');
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('ended in error: model unavailable');
+    expect(messages).not.toHaveBeenCalled();
+  });
+
   test('rejects an untracked child whose live session is busy', async () => {
     const { tool, messages } = createTool();
     mockClient.session.status.mockImplementation(async () => ({
@@ -131,6 +216,95 @@ describe('task_result', () => {
       } as any),
     ).rejects.toThrow('still running');
     expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('rejects an untracked idle session with no terminal evidence', async () => {
+    const { tool, messages } = createTool();
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant' },
+          parts: [{ type: 'text', text: 'partial findings' }],
+        },
+      ],
+    });
+
+    await expect(
+      tool.execute({ task_id: 'ses_child1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('no terminal evidence');
+    expect(messages).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects an untracked session idle mid-exchange', async () => {
+    const { tool } = createTool();
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant', time: { completed: 100 } },
+          parts: [{ type: 'text', text: 'earlier answer' }],
+        },
+        {
+          info: { role: 'user' },
+          parts: [{ type: 'text', text: 'continue' }],
+        },
+      ],
+    });
+
+    await expect(
+      tool.execute({ task_id: 'ses_child1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('no terminal evidence');
+  });
+
+  test('rejects an untracked session whose last assistant message errored', async () => {
+    const { tool } = createTool();
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: {
+            role: 'assistant',
+            time: { completed: 100 },
+            error: { name: 'MessageAbortedError', data: {} },
+          },
+          parts: [{ type: 'text', text: 'partial findings' }],
+        },
+      ],
+    });
+
+    await expect(
+      tool.execute({ task_id: 'ses_child1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('no terminal evidence');
+  });
+
+  test('returns an untracked session result when terminal evidence exists', async () => {
+    const { tool, messages } = createTool();
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant', time: { completed: 100 } },
+          parts: [
+            { type: 'reasoning', text: 'private work' },
+            { type: 'text', text: 'final findings' },
+          ],
+        },
+      ],
+    });
+
+    const output = await tool.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toBe('final findings');
+    expect(messages).toHaveBeenCalledTimes(1);
   });
 
   test('returns a tracked result through the v2 client shim', async () => {

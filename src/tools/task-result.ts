@@ -3,6 +3,7 @@ import {
   type ToolDefinition,
   tool,
 } from '@opencode-ai/plugin';
+import type { BackgroundJobRecord } from '../utils/background-job-board';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
@@ -16,6 +17,41 @@ const z = tool.schema;
 interface TaskResultToolOptions {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
+}
+
+/**
+ * Gate tracked task retrieval on the tracked terminal outcome. Only a
+ * `completed` state (or a reconciled job whose terminal outcome was
+ * `completed`) may yield a successful result; running, errored and cancelled
+ * jobs are rejected explicitly and accurately instead of leaking partial
+ * output as a final result.
+ */
+function assertRetrievableState(
+  requested: string,
+  job: BackgroundJobRecord,
+): void {
+  const terminalState =
+    job.state === 'reconciled' ? job.terminalState : job.state;
+
+  if (terminalState === 'running') {
+    throw new Error(
+      `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
+    );
+  }
+  if (terminalState === 'error') {
+    throw new Error(
+      `Task ${requested} ended in error: ${job.lastStatusError ?? job.resultSummary ?? 'no error details available'}`,
+    );
+  }
+  if (terminalState === 'cancelled') {
+    const reason = job.resultSummary?.replace(/^cancelled:\s*/i, '');
+    throw new Error(
+      `Task ${requested} was cancelled${reason ? `: ${reason}` : ''}`,
+    );
+  }
+  if (terminalState !== 'completed') {
+    throw new Error(`Task ${requested} has no confirmed completed result`);
+  }
 }
 
 export function createTaskResultTool(
@@ -40,10 +76,8 @@ Use this when the user asks to see a prior task's full result, or before retryin
         parentSessionID,
         requested,
       );
-      if (tracked?.state === 'running') {
-        throw new Error(
-          `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
-        );
+      if (tracked) {
+        assertRetrievableState(requested, tracked);
       }
 
       const taskID = tracked?.taskID ?? requested;
@@ -99,6 +133,11 @@ Use this when the user asks to see a prior task's full result, or before retryin
       });
       if (result.empty) {
         throw new Error(`Task ${requested} has no completed text result`);
+      }
+      if (!tracked && result.terminal !== true) {
+        throw new Error(
+          `Task ${requested} shows no terminal evidence of completion; refusing to present partial output as its final result`,
+        );
       }
 
       options.backgroundJobBoard.markUsed(parentSessionID, taskID);
