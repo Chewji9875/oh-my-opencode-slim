@@ -336,6 +336,43 @@ describe('waitForSessionReady', () => {
     expect(check).toHaveBeenCalledTimes(8);
   });
 
+  test('absolute deadline bounds the total wait even with hanging probes', async () => {
+    const { waitForSessionReady } = await importShared();
+    let clock = 0;
+    const now = () => clock;
+    const check = mock(() => new Promise<boolean>(() => {}));
+    const delays: number[] = [];
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async (ms) => {
+        delays.push(ms);
+        clock += ms;
+      },
+      readinessAttemptTimeoutMs: 5,
+      readinessDeadlineMs: 500,
+      now,
+    });
+    expect(ready).toBe(false);
+    // The deadline, not the 8-attempt schedule, stopped the wait.
+    expect(check.mock.calls.length).toBeLessThan(8);
+    // Cumulative delay never exceeds the deadline.
+    expect(delays.reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(500);
+  });
+
+  test('an abort signal ends the wait promptly with false', async () => {
+    const { waitForSessionReady } = await importShared();
+    const controller = new AbortController();
+    const check = mock(() => new Promise<boolean>(() => {}));
+    const readyPromise = waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+      readinessAttemptTimeoutMs: 10_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(readyPromise).resolves.toBe(false);
+  });
+
   test('default probe parses the target status from /session/status', async () => {
     const originalFetch = globalThis.fetch;
     const requested: string[] = [];

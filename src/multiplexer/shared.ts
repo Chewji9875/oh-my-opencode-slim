@@ -257,18 +257,40 @@ export interface SessionReadinessOptions {
   delay?: (milliseconds: number) => Promise<void>;
   /** Per-attempt abort timeout in milliseconds (default 1000). */
   readinessAttemptTimeoutMs?: number;
+  /**
+   * Absolute deadline for the whole wait in milliseconds (default 2000).
+   * The wait stops once `now()` passes `deadlineMs` after the first probe,
+   * regardless of how many attempts remain, so a hanging probe can never
+   * stretch the total beyond the deadline.
+   */
+  readinessDeadlineMs?: number;
+  /** Injectable clock for deterministic deadline tests (default Date.now). */
+  now?: () => number;
+  /**
+   * Abort the whole wait (e.g. manager cleanup/disposal). Resolves false;
+   * in-flight probes are aborted through this signal.
+   */
+  signal?: AbortSignal;
 }
 
+const SESSION_READINESS_DEADLINE_MS = 2_000;
 const SESSION_READINESS_DELAYS_MS = [50, 100, 200, 400, 500, 500, 250] as const;
 
 /**
  * Poll the OpenCode `/session/status` endpoint until the child session is
- * attachable, with a bounded retry schedule and a per-attempt abort timeout.
+ * attachable, bounded by an absolute deadline (default 2s) rather than a
+ * fixed number of independently-timed attempts.
+ *
+ * Adapter contract: this gate is used by the generic pane adapters (tmux,
+ * zellij, herdr, kitty). The cmux adapter is explicitly excluded: cmux
+ * sessions are managed by CmuxSessionLifecycle, which has its own spawn
+ * machinery (server health check plus deferred spawn retry with a TTL) and
+ * never calls this function.
  *
  * Prevents the attach-before-ready race where `opencode attach --session
  * <id>` launches before the server has published the session and falls back
  * to the new-session picker TUI. Returns false when the session never became
- * ready within the bounded window.
+ * ready within the deadline or when the caller's abort signal fires.
  */
 export async function waitForSessionReady(
   serverUrl: string,
@@ -278,20 +300,43 @@ export async function waitForSessionReady(
   const check = options.checkSessionReady ?? defaultSessionReady;
   const delay = options.delay ?? defaultDelay;
   const attemptTimeoutMs = options.readinessAttemptTimeoutMs ?? 1_000;
+  const deadlineMs =
+    options.readinessDeadlineMs ?? SESSION_READINESS_DEADLINE_MS;
+  const now = options.now ?? Date.now;
+  const signal = options.signal;
+  const deadlineAt = now() + deadlineMs;
   const url = new URL('/session/status', serverUrl);
 
-  for (
-    let attempt = 0;
-    attempt <= SESSION_READINESS_DELAYS_MS.length;
-    attempt++
-  ) {
+  const abortedPromise = signal
+    ? new Promise<false>((resolve) => {
+        if (signal.aborted) resolve(false);
+        else
+          signal.addEventListener('abort', () => resolve(false), {
+            once: true,
+          });
+      })
+    : null;
+  const neverPromise = new Promise<never>(() => {});
+
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) return false;
+    const remaining = deadlineAt - now();
+    if (remaining <= 0) return false;
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.min(attemptTimeoutMs, remaining),
+    );
     timeout.unref?.();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     let ready = false;
     try {
       ready = await Promise.race([
         check(url, sessionId, controller.signal),
+        abortedPromise ?? neverPromise,
         new Promise<boolean>((resolve) =>
           controller.signal.addEventListener('abort', () => resolve(false), {
             once: true,
@@ -302,14 +347,22 @@ export async function waitForSessionReady(
       // A session can briefly be unreachable while OpenCode publishes it.
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
     }
     if (ready) return true;
+    if (signal?.aborted) return false;
 
+    // Recompute against the deadline so a slow probe can never push the
+    // total delay past it.
+    const remainingAfterProbe = deadlineAt - now();
+    if (remainingAfterProbe <= 0) return false;
     const delayMs = SESSION_READINESS_DELAYS_MS[attempt];
     if (delayMs === undefined) return false;
-    await delay(delayMs);
+    await Promise.race([
+      delay(Math.min(delayMs, remainingAfterProbe)),
+      abortedPromise ?? neverPromise,
+    ]);
   }
-  return false;
 }
 
 async function defaultSessionReady(
