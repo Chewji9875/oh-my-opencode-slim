@@ -4,9 +4,9 @@ import {
   tool,
 } from '@opencode-ai/plugin';
 import type { BackgroundJobStore } from '../utils/background-job-store';
-import { isRecord } from '../utils/guards';
-import { getClient } from '../utils/opencode-client';
+import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { TaskActivityTracker } from './task-activity';
+import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
 
 const z = tool.schema;
 
@@ -15,6 +15,7 @@ export function createTaskStatusTool(options: {
   backgroundJobBoard: BackgroundJobStore;
   activityTracker?: TaskActivityTracker;
   now?: () => number;
+  statusTimeoutMs?: number;
 }): Record<'task_status', ToolDefinition> {
   const task_status = tool({
     description:
@@ -28,31 +29,40 @@ export function createTaskStatusTool(options: {
       const requested = args.task_id.trim();
       if (!requested) throw new Error('task_status requires task_id');
 
-      const job = options.backgroundJobBoard.resolve(parentSessionID, requested);
+      const job = options.backgroundJobBoard.resolve(
+        parentSessionID,
+        requested,
+      );
       if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
 
-      const statuses = await getClient(options.input).session.status({
-        query: { directory: options.input.directory },
+      // Bounded live read: a failed, malformed, or timed-out host status
+      // response surfaces as explicit uncertainty instead of a confident
+      // board-state fallback.
+      const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+        timeoutMs: options.statusTimeoutMs,
       });
-      const live = isRecord(statuses.data) ? statuses.data[job.taskID] : undefined;
-      const liveState = isRecord(live) && typeof live.type === 'string'
-        ? live.type
-        : undefined;
-      const status = liveState ?? job.state;
+      const observation = observationFromSnapshot(snapshot, job.taskID);
       const now = options.now?.() ?? Date.now();
-      const lastActivityAt = options.activityTracker?.lastActivityAt(job.taskID) ?? job.lastLiveBusyAt ?? job.runStartedAt;
-      const idleSeconds = Math.max(0, Math.floor((now - lastActivityAt) / 1000));
-      const possiblyStuck = (status === 'busy' || status === 'retry') && idleSeconds >= 120;
+      const lastActivityAt =
+        options.activityTracker?.lastActivityAt(job.taskID) ??
+        job.lastLiveBusyAt ??
+        job.runStartedAt;
+      const report = summarizeTaskStatus(job, observation, lastActivityAt, now);
+
       const details = [
         `Task ${job.alias} (${job.taskID})`,
-        `state: ${status}`,
+        `state: ${report.state}${report.uncertain ? ' (unconfirmed)' : ''}`,
         `agent: ${job.agent}`,
         `last_activity_at: ${new Date(lastActivityAt).toISOString()}`,
-        `idle_for_seconds: ${idleSeconds}`,
-        `possibly_stuck: ${possiblyStuck}`,
+        `idle_for_seconds: ${report.idleSeconds}`,
+        `possibly_stuck: ${report.possiblyStuck}`,
       ];
-      if (job.statusUncertain) details.push('status_uncertain: true');
-      if (job.lastStatusError) details.push(`last_status_error: ${job.lastStatusError}`);
+      if (report.uncertain) {
+        details.push('status_uncertain: true');
+        if (report.lastStatusError) {
+          details.push(`last_status_error: ${report.lastStatusError}`);
+        }
+      }
       return details.join('\n');
     },
   });

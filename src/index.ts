@@ -51,8 +51,12 @@ import {
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
-import { TaskActivityTracker } from './tools/task-activity';
 import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
+import {
+  applyActivityEvent,
+  resolveEventSessionID,
+  TaskActivityTracker,
+} from './tools/task-activity';
 import { recordTuiAgentModel, recordTuiAgentModels } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -454,6 +458,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskNudgeTools = createTaskNudgeTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      activityTracker: taskActivityTracker,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -907,19 +912,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
       };
 
-      const eventSessionID =
-        event.properties?.info?.id ??
-        event.properties?.info?.sessionID ??
-        event.properties?.sessionID;
+      // Session-scoped events (session.*) carry the session id in info.id;
+      // message/step-scoped events (message.updated, step-finish) carry the
+      // message id in info.id and the session id in info.sessionID. Resolve
+      // by session so child activity refreshes the correct stuck timer.
+      const eventSessionID = resolveEventSessionID(event);
       const statusType = event.properties?.status?.type;
       if (eventSessionID) {
-        if (
-          event.type === 'message.updated' ||
-          event.type === 'step-finish' ||
-          (event.type === 'session.status' && (statusType === 'busy' || statusType === 'retry'))
-        ) {
-          taskActivityTracker.touch(eventSessionID);
-        }
+        applyActivityEvent(taskActivityTracker, event);
         if (
           event.type === 'session.status' &&
           (statusType === 'busy' || statusType === 'retry')
@@ -931,7 +931,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           event.type === 'session.deleted'
         ) {
           sessionMetadata.markOrchestratorIdle(eventSessionID);
-          if (event.type === 'session.deleted') taskActivityTracker.forget(eventSessionID);
         }
       }
 
