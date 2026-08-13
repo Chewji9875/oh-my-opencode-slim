@@ -47,6 +47,8 @@ Required behavior:
   `@oracle` to review the phase result before continuing;
 - after phase validation, run the normal Oracle gate review and an `@explorer`
   structure scan in parallel; reconcile both before continuing;
+- after a phase passes validation and its review findings are reconciled, create
+  a focused git commit before starting the next phase;
 - do not continue review or refinement merely because further improvement is
   possible; treat `impact × confidence ÷ cost`, discounted after each pass,
   only as a qualitative reminder that additional cycles must earn their delay
