@@ -56,6 +56,14 @@ Required behavior:
   remediation pass, then validate it with focused evidence; request a follow-up
   Oracle review only if that remediation changes the reviewed decision/risk or
   the original concern cannot otherwise be verified;
+- each Oracle gate permits at most two re-reviews after its initial review;
+- include the gate and review-attempt number in every Oracle prompt, including
+  remaining re-reviews; on re-review, direct Oracle to prioritize unresolved
+  material findings, risks introduced by remediation, and verification of prior
+  findings without reopening accepted, unchanged, or resolved concerns;
+- once a gate's re-review limit is reached, record any remaining material risk
+  or blocker in the deepwork file and ask the user whether to accept the risk,
+  change scope, or authorize an exceptional additional review;
 - when a phase includes `@designer`, preserve designer intent across later
   phases. Use `@fixer` only for mechanical follow-up that does not alter the
   UI/UX;
@@ -74,6 +82,25 @@ complex tasks can have broader phases, broader patches, and correspondingly
 broader phase reviews. The goal is a sensible number of predictable review
 gates, not the smallest possible review scope. Never add an extra Oracle review
 merely to re-confirm a mechanical fixer change.
+
+## Oracle Re-Reviews
+
+Every planned Oracle gate has one initial review and may have at most two
+re-reviews. Request a re-review only when the remediation materially changes
+the reviewed decision or risk, or when the original concern cannot be verified
+with focused evidence. Do not spend a re-review on a mechanical or
+already-verified change.
+
+State the attempt in every Oracle prompt, for example:
+
+```text
+Gate 2 — review attempt 2 of 3 (1 re-review remaining)
+```
+
+For re-reviews, tell Oracle to prioritize unresolved material findings, risks
+introduced by remediation, and whether prior findings are resolved. It must not
+reopen accepted, unchanged, or resolved concerns. When the two re-reviews are
+exhausted, do not continue the review loop without explicit user authorization.
 
 ## Designer Handoff Guardrail
 
