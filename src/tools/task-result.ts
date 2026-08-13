@@ -6,14 +6,16 @@ import {
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
-import { extractSessionResult, SESSION_ID_PATTERN } from '../utils/session';
+import {
+  extractFinalSessionResult,
+  SESSION_ID_PATTERN,
+} from '../utils/session';
 
 const z = tool.schema;
 
 interface TaskResultToolOptions {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
-  shouldManageSession: (sessionID: string) => boolean;
 }
 
 export function createTaskResultTool(
@@ -31,15 +33,6 @@ Use this when the user asks to see a prior task's full result, or before retryin
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_result requires sessionID');
-      if (toolContext.agent && toolContext.agent !== 'orchestrator') {
-        throw new Error('task_result can only be used by orchestrator');
-      }
-      if (!options.shouldManageSession(parentSessionID)) {
-        throw new Error(
-          'task_result can only be used in orchestrator sessions',
-        );
-      }
-
       const requested = args.task_id.trim();
       if (!requested) throw new Error('task_result requires task_id');
 
@@ -100,7 +93,7 @@ Use this when the user asks to see a prior task's full result, or before retryin
         return result;
       }
 
-      const result = await extractSessionResult(client, taskID, {
+      const result = await extractFinalSessionResult(client, taskID, {
         directory: options.input.directory,
         includeReasoning: false,
       });

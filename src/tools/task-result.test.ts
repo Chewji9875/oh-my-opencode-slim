@@ -29,7 +29,6 @@ function createTool() {
   const tools = createTaskResultTool({
     input: { directory: '/test/project' } as any,
     backgroundJobBoard: board,
-    shouldManageSession: (sessionID) => sessionID === 'parent-1',
   });
   return { board, get, messages, tool: tools.task_result };
 }
@@ -54,6 +53,36 @@ describe('task_result', () => {
     expect(messages).toHaveBeenCalledTimes(1);
     expect(mockClient.session.prompt).toBeUndefined();
     expect(mockClient.session.promptAsync).toBeUndefined();
+  });
+
+  test('returns only the final assistant response', async () => {
+    const { board, tool } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant' },
+          parts: [{ type: 'text', text: 'earlier progress' }],
+        },
+        {
+          info: { role: 'assistant' },
+          parts: [{ type: 'text', text: 'final findings' }],
+        },
+      ],
+    });
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'fixer',
+      } as any),
+    ).resolves.toBe('final findings');
   });
 
   test('rejects a still-running tracked task', async () => {

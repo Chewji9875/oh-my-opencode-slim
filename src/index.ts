@@ -433,8 +433,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
-      shouldManageSession: (sessionID) =>
-        sessionMetadata.getAgent(sessionID) === 'orchestrator',
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>

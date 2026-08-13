@@ -165,6 +165,35 @@ export interface SessionExtractionResult {
   empty: boolean;
 }
 
+/** Extract only the final assistant response to keep task retrieval bounded. */
+export async function extractFinalSessionResult(
+  client: OpencodeClient,
+  sessionId: string,
+  options?: { directory?: string; includeReasoning?: boolean },
+): Promise<SessionExtractionResult> {
+  const includeReasoning = options?.includeReasoning ?? true;
+  const messagesResult = await client.session.messages({
+    path: { id: sessionId },
+    ...(options?.directory ? { query: { directory: options.directory } } : {}),
+  });
+  const messages = (messagesResult.data ?? []) as Array<{
+    info?: { role: string };
+    parts?: Array<{ type: string; text?: string }>;
+  }>;
+  const message = messages.findLast((item) => item.info?.role === 'assistant');
+  const text = (message?.parts ?? [])
+    .filter(
+      (part) =>
+        (includeReasoning
+          ? part.type === 'text' || part.type === 'reasoning'
+          : part.type === 'text') && Boolean(part.text),
+    )
+    .map((part) => part.text!)
+    .join('\n\n');
+
+  return { text, empty: text.length === 0 };
+}
+
 /**
  * Extract the result text from a session.
  * Collects all assistant messages and concatenates their text parts.

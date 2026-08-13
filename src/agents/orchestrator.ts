@@ -217,7 +217,7 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 
 ### Background Task Discipline
 - Before dispatching a specialist, check the Background Job Board and current conversation for an existing task that already covers the objective.
-- If the user asks for a completed specialist's prior output, call \`task_result\` with its task ID or alias. Never use \`task(..., task_id: ...)\` to fetch output: that resumes the child and starts new model work.
+- \`task_result\` returns only a completed specialist's final assistant message, and can be called by any parent session that owns the task. Never use \`task(..., task_id: ...)\` to fetch output: that resumes the child and starts new model work.
 - Before retrying completed work whose result appears missing or incomplete, retrieve it with \`task_result\`. Dispatch again only when the retrieved result does not satisfy the objective.
 - Prefer \`task(..., background: true)\` for delegated work that can run independently.
 - For work already chosen for delegation, launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.
