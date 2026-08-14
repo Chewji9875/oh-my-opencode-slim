@@ -14,6 +14,8 @@ export {
   MultiplexerSessionManager,
   TmuxSessionManager,
 } from './session-manager';
+export type { SessionReadinessOptions } from './shared';
+export { waitForSessionReady } from './shared';
 export { TmuxMultiplexer } from './tmux';
 export type { Multiplexer, PaneResult } from './types';
 export { isServerRunning } from './types';

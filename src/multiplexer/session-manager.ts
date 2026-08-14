@@ -5,6 +5,8 @@ import {
   getMultiplexer,
   isServerRunning,
   type Multiplexer,
+  type SessionReadinessOptions,
+  waitForSessionReady,
 } from '../multiplexer';
 import type { BackgroundJobState } from '../utils/background-job-board';
 import type { BackgroundJobStore } from '../utils/background-job-store';
@@ -96,7 +98,8 @@ export function resetMultiplexerSessionManagerState(): void {
   new CmuxSessionStore().resetForTests();
 }
 
-export type MultiplexerSessionManagerOptions = CmuxSessionLifecycleOptions;
+export type MultiplexerSessionManagerOptions = CmuxSessionLifecycleOptions &
+  SessionReadinessOptions;
 
 function validServerUrl(value: unknown): string | null {
   if (typeof value !== 'string' && !(value instanceof URL)) return null;
@@ -161,6 +164,16 @@ export class MultiplexerSessionManager {
   private pollInterval?: ReturnType<typeof setInterval>;
   private enabled = false;
   private cmuxLifecycle?: CmuxSessionLifecycle;
+  private readonly readiness: SessionReadinessOptions;
+  /** Abort handle for the in-flight readiness wait; cleanup/disposal abort it. */
+  private readinessAbort?: AbortController;
+  /**
+   * Sessions that signaled `busy` while a spawn/readiness pass was in flight
+   * (the busy handler defers to the pending pass). Consumed after the pass:
+   * if the pass failed to attach a pane, the session is retried immediately
+   * instead of being silently orphaned.
+   */
+  private readonly busyDuringSpawn = new Set<string>();
 
   constructor(
     ctx: PluginInput,
@@ -174,6 +187,7 @@ export class MultiplexerSessionManager {
     this.spawningSessions = sharedState.spawningSessions;
     this.closingSessions = sharedState.closingSessions;
     this.permanentlyClosedSessions = sharedState.permanentlyClosedSessions;
+    this.readiness = options;
 
     this.directory = ctx.directory;
     this.resolveServerUrl = createServerUrlResolver(ctx);
@@ -184,6 +198,11 @@ export class MultiplexerSessionManager {
       this.multiplexer !== null &&
       this.multiplexer.isInsideSession();
     if (this.enabled && this.multiplexer?.type === 'cmux') {
+      // cmux exclusion contract: the cmux adapter is NOT subject to the
+      // generic readiness gate. All events are delegated to
+      // CmuxSessionLifecycle, which has its own spawn machinery (server
+      // health check plus deferred spawn retry with a TTL) and never calls
+      // waitForSessionReady.
       this.cmuxLifecycle = new CmuxSessionLifecycle(
         this.instanceId,
         this.multiplexer,
@@ -205,6 +224,23 @@ export class MultiplexerSessionManager {
       trackedSessions: this.sessions.size,
       knownSessions: this.knownSessions.size,
     });
+  }
+
+  /** Fresh options for a readiness wait; the manager owns the abort signal. */
+  private readinessOptions(): SessionReadinessOptions {
+    const controller = new AbortController();
+    this.readinessAbort = controller;
+    return { ...this.readiness, signal: controller.signal };
+  }
+
+  /**
+   * Abort any in-flight readiness wait so cleanup/disposal can never be
+   * stalled by a hanging probe. The aborted wait resolves false and the
+   * pending spawn is fenced off.
+   */
+  private abortInFlightReadiness(): void {
+    this.readinessAbort?.abort();
+    this.readinessAbort = undefined;
   }
 
   async onSessionCreated(event: SessionEvent): Promise<void> {
@@ -270,6 +306,27 @@ export class MultiplexerSessionManager {
           instanceId: this.instanceId,
           serverUrl,
         });
+        return;
+      }
+
+      // Attach-before-ready race: wait for the child session to appear on the
+      // status endpoint before launching `opencode attach`; otherwise the
+      // attach TUI falls back to the new-session picker.
+      const readinessOptions = this.readinessOptions();
+      const sessionReady = await waitForSessionReady(
+        serverUrl,
+        sessionId,
+        readinessOptions,
+      );
+      if (!sessionReady || readinessOptions.signal?.aborted) {
+        log(
+          '[multiplexer-session-manager] child session not ready, skipping spawn',
+          {
+            instanceId: this.instanceId,
+            sessionId,
+            parentId,
+          },
+        );
         return;
       }
 
@@ -340,6 +397,12 @@ export class MultiplexerSessionManager {
       this.startPolling();
     } finally {
       this.spawningSessions.delete(sessionId);
+      if (
+        this.busyDuringSpawn.delete(sessionId) &&
+        !this.sessions.has(sessionId)
+      ) {
+        await this.respawnIfKnown(sessionId);
+      }
     }
   }
 
@@ -621,6 +684,11 @@ export class MultiplexerSessionManager {
 
     if (this.permanentlyClosedSessions.has(sessionId)) return;
     if (this.isTrackedOrSpawning(sessionId)) {
+      // A busy signal while a spawn is in flight: remember it so the pending
+      // pass can recover if it fails to attach a pane.
+      if (this.spawningSessions.has(sessionId)) {
+        this.busyDuringSpawn.add(sessionId);
+      }
       return;
     }
 
@@ -649,6 +717,26 @@ export class MultiplexerSessionManager {
             instanceId: this.instanceId,
             serverUrl,
             sessionId,
+          },
+        );
+        return;
+      }
+
+      // Same attach-before-ready guard as the initial spawn: only respawn once
+      // the session is visible on the status endpoint.
+      const readinessOptions = this.readinessOptions();
+      const sessionReady = await waitForSessionReady(
+        serverUrl,
+        sessionId,
+        readinessOptions,
+      );
+      if (!sessionReady || readinessOptions.signal?.aborted) {
+        log(
+          '[multiplexer-session-manager] child session not ready, skipping respawn',
+          {
+            instanceId: this.instanceId,
+            sessionId,
+            parentId: known.parentId,
           },
         );
         return;
@@ -722,6 +810,12 @@ export class MultiplexerSessionManager {
       this.startPolling();
     } finally {
       this.spawningSessions.delete(sessionId);
+      if (
+        this.busyDuringSpawn.delete(sessionId) &&
+        !this.sessions.has(sessionId)
+      ) {
+        await this.respawnIfKnown(sessionId);
+      }
     }
   }
 
@@ -781,6 +875,9 @@ export class MultiplexerSessionManager {
       this.permanentlyClosedSessions.clear();
       return;
     }
+    // Fence: abort an in-flight readiness wait so cleanup is not stalled by
+    // a hanging probe; the aborted wait resolves false and skips the spawn.
+    this.abortInFlightReadiness();
     this.stopPolling();
 
     if (this.closingSessions.size > 0) {
@@ -816,6 +913,7 @@ export class MultiplexerSessionManager {
 
   async cleanupOnInstanceDisposed(): Promise<void> {
     if (this.cmuxLifecycle) await this.cmuxLifecycle.cleanup();
+    else this.abortInFlightReadiness();
   }
 }
 
