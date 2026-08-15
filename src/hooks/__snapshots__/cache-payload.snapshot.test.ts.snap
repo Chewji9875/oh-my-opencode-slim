@@ -154,6 +154,8 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - Before dispatching a specialist, check the Background Job Board and current conversation for an existing task that already covers the objective.
 - \`task_result\` returns only a completed specialist's final assistant message, and can be called by any parent session that owns the task. Never use \`task(..., task_id: ...)\` to fetch output: that resumes the child and starts new model work.
 - Before retrying completed work whose result appears missing or incomplete, retrieve it with \`task_result\`. Dispatch again only when the retrieved result does not satisfy the objective.
+- For a live child task, call \`task_status\` for read-only state inspection. There is no safe live-prompt channel: never use \`task(..., task_id: ...)\` as a progress check or instruction because it resumes model work.
+- If \`task_status\` reports \`possibly_stuck: true\`, use \`task_nudge\` once to admit a concise follow-up without resuming or aborting the child; never use it as a polling loop.
 - Prefer \`task(..., background: true)\` for delegated work that can run independently.
 - For work already chosen for delegation, launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.
 - Never reissue an unchanged task to the same specialist after a rejection; adjust its scope or context before retrying.

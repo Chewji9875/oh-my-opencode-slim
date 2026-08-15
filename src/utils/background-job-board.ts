@@ -979,6 +979,7 @@ function singleLine(value: string): string {
 
 function promptSafe(value: string): string {
   return singleLine(value)
+    .replaceAll('\\', '/')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');

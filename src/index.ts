@@ -45,11 +45,18 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createTaskNudgeTool,
   createTaskResultTool,
+  createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
 } from './tools';
 import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
+import {
+  applyActivityEvent,
+  resolveEventSessionID,
+  TaskActivityTracker,
+} from './tools/task-activity';
 import { recordTuiAgentModel, recordTuiAgentModels } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -169,6 +176,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let companionManager: CompanionManager;
   let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
   let taskResultTools: ReturnType<typeof createTaskResultTool>;
+  let taskStatusTools: ReturnType<typeof createTaskStatusTool>;
+  let taskNudgeTools: ReturnType<typeof createTaskNudgeTool>;
+  const taskActivityTracker = new TaskActivityTracker();
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool>;
@@ -440,6 +450,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
     });
+    taskStatusTools = createTaskStatusTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      activityTracker: taskActivityTracker,
+    });
+    taskNudgeTools = createTaskNudgeTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      activityTracker: taskActivityTracker,
+    });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
@@ -457,6 +477,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     tools = {
       ...cancelTaskTools,
       ...taskResultTools,
+      ...taskStatusTools,
+      ...taskNudgeTools,
       ...waitForUserTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch ? { webfetch } : {}),
@@ -890,10 +912,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
       };
 
-      const eventSessionID =
-        event.properties?.info?.id ?? event.properties?.sessionID;
+      // Session-scoped events (session.*) carry the session id in info.id;
+      // message/step-scoped events (message.updated, step-finish) carry the
+      // message id in info.id and the session id in info.sessionID. Resolve
+      // by session so child activity refreshes the correct stuck timer.
+      const eventSessionID = resolveEventSessionID(event);
       const statusType = event.properties?.status?.type;
       if (eventSessionID) {
+        applyActivityEvent(taskActivityTracker, event);
         if (
           event.type === 'session.status' &&
           (statusType === 'busy' || statusType === 'retry')
