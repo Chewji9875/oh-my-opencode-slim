@@ -260,6 +260,31 @@ describe('orchestrator agent', () => {
 });
 
 describe('per-model variant in array config', () => {
+  test('generic subagents propagate primary inline variants to SDK configs', () => {
+    const config: PluginConfig = {
+      agents: {
+        explorer: {
+          model: [
+            { id: 'google/gemini-3-flash', variant: 'low' },
+            'openai/gpt-4o-mini',
+          ],
+        },
+        librarian: {
+          model: [
+            { id: 'anthropic/claude-haiku-4-5', variant: 'fast' },
+            'openai/gpt-4o-mini',
+          ],
+        },
+      },
+    };
+    const configs = getAgentConfigs(runtimeFor(config));
+
+    expect(configs.explorer.model).toBe('google/gemini-3-flash');
+    expect(configs.explorer.variant).toBe('low');
+    expect(configs.librarian.model).toBe('anthropic/claude-haiku-4-5');
+    expect(configs.librarian.variant).toBe('fast');
+  });
+
   test('subagent stores model array with per-model variants', () => {
     const config: PluginConfig = {
       agents: {
@@ -278,6 +303,24 @@ describe('per-model variant in array config', () => {
       { id: 'openai/gpt-4o-mini' },
     ]);
     expect(explorer?.config.model).toBe('google/gemini-3-flash');
+  });
+
+  test('explicit agent-level variant overrides the primary inline variant', () => {
+    const configs = getAgentConfigs(
+      runtimeFor({
+        agents: {
+          librarian: {
+            model: [
+              { id: 'anthropic/claude-haiku-4-5', variant: 'fast' },
+              'openai/gpt-4o-mini',
+            ],
+            variant: 'high',
+          },
+        },
+      }),
+    );
+
+    expect(configs.librarian.variant).toBe('high');
   });
 
   test('top-level variant preserved alongside per-model variants', () => {
