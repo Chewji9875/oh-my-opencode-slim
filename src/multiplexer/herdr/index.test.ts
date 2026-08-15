@@ -61,10 +61,12 @@ function commands(): string[][] {
 describe('HerdrMultiplexer', () => {
   const originalHerdrEnv = process.env.HERDR_ENV;
   const originalHerdrPaneId = process.env.HERDR_PANE_ID;
+  const originalHerdrBinPath = process.env.HERDR_BIN_PATH;
 
   beforeEach(() => {
     process.env.HERDR_ENV = '1';
     process.env.HERDR_PANE_ID = 'w1:p1';
+    delete process.env.HERDR_BIN_PATH;
 
     crossSpawnMock.mockReset();
     crossSpawnMock.mockImplementation((command: string[]) => {
@@ -81,6 +83,50 @@ describe('HerdrMultiplexer', () => {
   afterEach(() => {
     process.env.HERDR_ENV = originalHerdrEnv;
     process.env.HERDR_PANE_ID = originalHerdrPaneId;
+    if (originalHerdrBinPath === undefined) {
+      delete process.env.HERDR_BIN_PATH;
+    } else {
+      process.env.HERDR_BIN_PATH = originalHerdrBinPath;
+    }
+  });
+
+  test('uses HERDR_BIN_PATH without discovering herdr on PATH', async () => {
+    const configuredBinaryPath = '/custom/bin/herdr';
+    process.env.HERDR_BIN_PATH = configuredBinaryPath;
+
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane(
+      'session-1',
+      'Herdr worker',
+      'http://localhost:4096',
+      '/repo',
+    );
+
+    expect(commands().some((command) => command[0] === 'which')).toBe(false);
+    expect(commands()[0]).toEqual([
+      configuredBinaryPath,
+      'pane',
+      'split',
+      'w1:p1',
+      '--direction',
+      'right',
+      '--cwd',
+      '/repo',
+      '--no-focus',
+    ]);
+  });
+
+  test('uses PATH discovery when HERDR_BIN_PATH is empty', async () => {
+    process.env.HERDR_BIN_PATH = '';
+
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.isAvailable();
+
+    expect(commands()).toEqual([['which', 'herdr']]);
   });
 
   test('spawns an opencode attach process in a herdr split pane', async () => {
