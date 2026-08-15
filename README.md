@@ -108,6 +108,25 @@ have Bun installed:
 npx oh-my-opencode-slim@latest install
 ```
 
+### Herdr
+
+The Herdr multiplexer adapter works with Herdr **0.8.0+**. Install Herdr's
+official OpenCode lifecycle integration separately:
+
+```bash
+herdr integration install opencode
+```
+
+For Marketplace discoverability, publish this repository with the required
+`herdr-plugin` repository topic, then install it with:
+
+```bash
+herdr plugin install alvinunreal/oh-my-opencode-slim
+```
+
+This Marketplace entry describes the OpenCode plugin's Herdr adapter; it does
+not install a standalone native Herdr runtime plugin or lifecycle reporter.
+
 ### Run from Master
 
 Use this if you want the latest code, easier bug fixes, or a local setup for

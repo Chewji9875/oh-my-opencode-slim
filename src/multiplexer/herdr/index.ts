@@ -58,7 +58,11 @@ export class HerdrMultiplexer implements Multiplexer {
       return this.binaryPath !== null;
     }
 
-    this.binaryPath = await findBinary('herdr');
+    const configuredBinaryPath = process.env.HERDR_BIN_PATH;
+    this.binaryPath =
+      configuredBinaryPath && configuredBinaryPath.length > 0
+        ? configuredBinaryPath
+        : await findBinary('herdr');
     this.hasChecked = true;
     return this.binaryPath !== null;
   }

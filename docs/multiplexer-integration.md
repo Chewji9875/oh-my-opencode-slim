@@ -131,6 +131,23 @@ Edit `~/.config/opencode/oh-my-opencode-slim.json` (or `.jsonc`):
 }
 ```
 
+The Herdr adapter works with Herdr **0.8.0+**. Install Herdr's official
+OpenCode lifecycle integration separately:
+
+```bash
+herdr integration install opencode
+```
+
+For Marketplace discoverability, publish this repository with the required
+`herdr-plugin` repository topic, then install it with:
+
+```bash
+herdr plugin install alvinunreal/oh-my-opencode-slim
+```
+
+The Marketplace entry describes this OpenCode plugin's Herdr adapter. It does
+not install a standalone native Herdr runtime plugin or lifecycle reporter.
+
 **cmux only:**
 
 ```jsonc
