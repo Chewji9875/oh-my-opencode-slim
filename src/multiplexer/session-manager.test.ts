@@ -534,6 +534,92 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
     });
 
+    test('retains a false close and retries it through polling', async () => {
+      mockMultiplexer.spawnPane.mockResolvedValue({
+        success: true,
+        paneId: 'p-false-retry',
+      });
+      mockMultiplexer.closePane
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0 },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'false-retry', parentID: 'parent' } },
+      });
+      await manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'false-retry' },
+      });
+
+      const state = manager as unknown as {
+        sessions: Map<
+          string,
+          { paneId: string; closeState?: Record<string, unknown> }
+        >;
+      };
+      expect(state.sessions.get('false-retry')).toMatchObject({
+        paneId: 'p-false-retry',
+        closeState: { phase: 'retrying', attempts: 1 },
+      });
+
+      await (manager as any).pollSessions();
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has('false-retry')).toBe(false);
+    });
+
+    test('retains a thrown close and retries it through polling', async () => {
+      mockMultiplexer.spawnPane.mockResolvedValue({
+        success: true,
+        paneId: 'p-throw-retry',
+      });
+      mockMultiplexer.closePane
+        .mockRejectedValueOnce(new Error('socket closed'))
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0 },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'throw-retry', parentID: 'parent' } },
+      });
+      await manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'throw-retry' },
+      });
+
+      const state = manager as unknown as {
+        sessions: Map<
+          string,
+          { paneId: string; closeState?: Record<string, unknown> }
+        >;
+      };
+      expect(state.sessions.get('throw-retry')).toMatchObject({
+        paneId: 'p-throw-retry',
+        closeState: {
+          phase: 'retrying',
+          attempts: 1,
+          lastError: 'Error: socket closed',
+        },
+      });
+
+      await (manager as any).pollSessions();
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has('throw-retry')).toBe(false);
+    });
+
     test('closes pane immediately on session.idle event', async () => {
       const ctx = createMockContext();
       mockMultiplexer.spawnPane.mockResolvedValue({
@@ -1332,7 +1418,7 @@ describe('MultiplexerSessionManager', () => {
       );
     });
 
-    test('does not close on transient status absence', async () => {
+    test('retains pane when status remains absent', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(
         ctx,
@@ -1345,9 +1431,11 @@ describe('MultiplexerSessionManager', () => {
       });
 
       setMockSessionStatuses({});
-      await (manager as any).pollSessions();
+      for (let index = 0; index < 5; index++)
+        await (manager as any).pollSessions();
 
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
+      expect((manager as any).sessions.has('c1')).toBe(true);
     });
 
     test('keeps background child pane open while status is running until deleted', async () => {
@@ -2541,38 +2629,26 @@ describe('MultiplexerSessionManager', () => {
       await Promise.all([first, second]);
     });
 
-    test('missing resets idle streak and closes after grace expires', async () => {
+    test('missing status never confirms close', async () => {
       mockMultiplexerType = 'cmux';
       let now = 0;
       const manager = new MultiplexerSessionManager(
         createMockContext(),
         cmuxConfig,
         undefined,
-        { now: () => now, missingGraceMs: 30 },
+        { now: () => now },
       );
       await manager.onSessionCreated({
         type: 'session.created',
         properties: { info: { id: 'missing', parentID: 'parent' } },
       });
       now = 10_000;
-      setMockSessionStatuses({ missing: { type: 'idle' } });
-      await (manager as any).pollSessions();
       setMockSessionStatuses({});
-      await (manager as any).pollSessions();
-      now += 29;
-      await (manager as any).pollSessions();
+      for (let index = 0; index < 6; index++) {
+        await (manager as any).pollSessions();
+        now += 30_000;
+      }
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
-      setMockSessionStatuses({ missing: { type: 'idle' } });
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
-      setMockSessionStatuses({});
-      await (manager as any).pollSessions();
-      now += 30;
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
     });
 
     test('background job policy still gates stable cmux idle close', async () => {
@@ -2915,6 +2991,7 @@ describe('MultiplexerSessionManager', () => {
       await manager.onSessionCreated(event);
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      await manager.cleanup();
     });
   });
 });

@@ -37,21 +37,48 @@ import {
 export { BACKGROUND_JOB_BOARD_METADATA_KEY } from './board-injection';
 
 /**
- * Delay before reconciling idle sessions.
- * Gives late injected completions time to arrive within this window.
- * Completions arriving after the window are still dropped (the race is reduced, not eliminated).
- * ponytail: fixed timeout — event-driven confirmation would fully close the race but adds
- * significant complexity for a case that rarely exceeds this window in practice.
+ * Delay before recording an idle observation on a child job. The observation
+ * remains provisional; terminal task output is the only path that establishes
+ * completed/error/cancelled state.
  */
 const IDLE_RECONCILE_DELAY_MS = 2_000;
 
 const RECOVERED_TASK_AGENT_FALLBACK = 'unknown';
+const MAX_REHYDRATE_TOMBSTONES = 512;
+
+interface RehydrateTombstoneState {
+  tombstones: Set<string>;
+  deletionEpochs: Map<string, number>;
+  nextEpoch: number;
+}
+
+// Board instances can outlive a hook instance. Keep deletion guards alongside
+// the board so a recreated hook does not rehydrate an invalidated running part.
+const rehydrateTombstonesByBoard = new WeakMap<
+  BackgroundJobStore,
+  RehydrateTombstoneState
+>();
+
+function rehydrateTombstonesFor(
+  backgroundJobBoard: BackgroundJobStore,
+): RehydrateTombstoneState {
+  const existing = rehydrateTombstonesByBoard.get(backgroundJobBoard);
+  if (existing) return existing;
+  const state: RehydrateTombstoneState = {
+    tombstones: new Set<string>(),
+    deletionEpochs: new Map<string, number>(),
+    nextEpoch: 0,
+  };
+  rehydrateTombstonesByBoard.set(backgroundJobBoard, state);
+  return state;
+}
 
 function rehydrateHistoricalRunningTasks(
   messages: unknown[],
   backgroundJobBoard: BackgroundJobStore,
   shouldManageSession: (sessionID: string) => boolean,
   registerSessionAsOrchestrator?: (sessionID: string) => void,
+  rehydrateTombstones?: ReadonlySet<string>,
 ): number {
   let rehydrated = 0;
   const managedOrchestratorSessionIDs = new Set<string>();
@@ -92,6 +119,11 @@ function rehydrateHistoricalRunningTasks(
 
       const taskID = parseTaskIdFromTaskOutput(state.output);
       if (!taskID || parseTaskStateFromOutput(state.output) !== 'running') {
+        continue;
+      }
+      if (rehydrateTombstones?.has(taskID)) {
+        // A real session.deleted already invalidated this run. Do not turn its
+        // persisted running tool part into a fresh alias on the next request.
         continue;
       }
       if (backgroundJobBoard.get(taskID)) continue;
@@ -172,6 +204,30 @@ export function createTaskSessionManagerHook(
       readContextMinLines: options.readContextMinLines,
       readContextMaxFiles: options.readContextMaxFiles,
     });
+  const rehydrateState = rehydrateTombstonesFor(backgroundJobBoard);
+  const rehydrateTombstones = rehydrateState.tombstones;
+
+  const rememberDeletedSession = (sessionID: string): void => {
+    const remember = (taskID: string): void => {
+      if (rehydrateTombstones.has(taskID)) return;
+      if (rehydrateTombstones.size >= MAX_REHYDRATE_TOMBSTONES) {
+        const oldest = rehydrateTombstones.values().next().value;
+        if (oldest) {
+          rehydrateTombstones.delete(oldest);
+          rehydrateState.deletionEpochs.delete(oldest);
+        }
+      }
+      rehydrateTombstones.add(taskID);
+      rehydrateState.deletionEpochs.set(taskID, ++rehydrateState.nextEpoch);
+    };
+
+    // The delete event itself is the lifecycle boundary. Keep a tombstone
+    // even if an earlier cleanup already removed the board record.
+    remember(sessionID);
+    for (const job of backgroundJobBoard.list(sessionID)) {
+      remember(job.taskID);
+    }
+  };
 
   const pendingCallTracker = createPendingCallTracker();
   const taskContextTracker = createTaskContextTracker();
@@ -259,7 +315,10 @@ export function createTaskSessionManagerHook(
         const hardTimedOut =
           backgroundJobBoard.field(sessionId, 'deadlineExceededAt') !==
           undefined;
-        if (!hardTimedOut) backgroundJobBoard.drop(sessionId);
+        if (!hardTimedOut) {
+          rememberDeletedSession(sessionId);
+          backgroundJobBoard.drop(sessionId);
+        }
         options.backgroundJobSupervisor?.clearParent(sessionId);
         backgroundJobBoard.clearParent(sessionId);
         if (!hardTimedOut) options.backgroundJobSupervisor?.drop(sessionId);
@@ -359,6 +418,7 @@ export function createTaskSessionManagerHook(
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         pendingCallTracker,
         taskContextTracker,
+        getLifecycleEpoch: () => rehydrateState.nextEpoch,
       }),
 
     'tool.execute.after': async (
@@ -371,6 +431,13 @@ export function createTaskSessionManagerHook(
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         pendingCallTracker,
         taskContextTracker,
+        clearRehydrateTombstone: (taskID) => {
+          rehydrateTombstones.delete(taskID);
+        },
+        isStaleDeletedTaskOutput: (taskID, lifecycleEpoch) => {
+          const deletionEpoch = rehydrateState.deletionEpochs.get(taskID);
+          return deletionEpoch !== undefined && lifecycleEpoch < deletionEpoch;
+        },
       });
       runtimeStatusReconciler.schedule();
     },
@@ -391,6 +458,7 @@ export function createTaskSessionManagerHook(
         backgroundJobBoard,
         options.shouldManageSession,
         options.registerSessionAsOrchestrator,
+        rehydrateTombstones,
       );
 
       for (const [messageIndex, message] of messages.entries()) {
@@ -449,6 +517,12 @@ export function createTaskSessionManagerHook(
           input.event.properties?.info?.id ?? input.event.properties?.sessionID;
         if (sessionID) {
           deferredInlineErrors.delete(sessionID);
+          if (!options.isFallbackInProgress?.(sessionID)) {
+            const hardTimedOut =
+              backgroundJobBoard.field(sessionID, 'deadlineExceededAt') !==
+              undefined;
+            if (!hardTimedOut) rememberDeletedSession(sessionID);
+          }
         }
       }
 

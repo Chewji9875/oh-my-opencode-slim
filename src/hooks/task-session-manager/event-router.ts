@@ -67,7 +67,11 @@ export async function handleEvent(
         idleObservedAt: number,
         observedGeneration: number,
       ): void;
-      scheduleErrorTerminalize(sessionID: string, idleObservedAt: number): void;
+      scheduleErrorTerminalize(
+        sessionID: string,
+        idleObservedAt: number,
+        observedGeneration: number,
+      ): void;
       clearIdleTimers(sessionID: string): void;
       clearAllTimers(): string[];
     };
@@ -209,7 +213,11 @@ export async function handleEvent(
         // A persistent 401/410 was deferred for fallback recovery but the
         // session ended without one: terminalize as error instead of the
         // false completion the child-idle path would record.
-        deps.idleReconciler.scheduleErrorTerminalize(sessionId, Date.now());
+        deps.idleReconciler.scheduleErrorTerminalize(
+          sessionId,
+          Date.now(),
+          job.generation,
+        );
       } else {
         deps.idleReconciler.scheduleChildIdleReconciliation(
           sessionId,

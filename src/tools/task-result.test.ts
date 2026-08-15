@@ -103,6 +103,39 @@ describe('task_result', () => {
     expect(messages).not.toHaveBeenCalled();
   });
 
+  test('self-heals a stopped board record when the live child is busy', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    const generation = board.get('ses_child1')?.generation;
+    board.markStopped(
+      'ses_child1',
+      'provisional idle observation',
+      1,
+      generation,
+    );
+    mockClient.session.status.mockResolvedValue({
+      data: { ses_child1: { type: 'busy' } },
+    });
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('still running');
+
+    expect(board.get('ses_child1')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+    });
+    expect(messages).not.toHaveBeenCalled();
+  });
+
   test('rejects a tracked task that ended in error', async () => {
     const { board, tool, messages } = createTool();
     board.registerLaunch({

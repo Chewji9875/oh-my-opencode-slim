@@ -56,6 +56,103 @@ describe('CmuxSessionLifecycle races', () => {
     await lifecycle.cleanup();
   });
 
+  test('status absence never confirms deletion or closes a cmux pane', async () => {
+    const mux = multiplexer();
+    let now = 0;
+    const lifecycle = new CmuxSessionLifecycle(
+      'owner',
+      mux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      {
+        now: () => now,
+        isServerRunning: async () => true,
+        fetchStatuses: async () => ({}),
+      },
+    );
+
+    await lifecycle.onSessionCreated({
+      type: 'session.created',
+      properties: { info: { id: 'missing', parentID: 'p' } },
+    });
+    for (let index = 0; index < 5; index++) {
+      now += 60_000;
+      await lifecycle.pollOnce();
+    }
+
+    expect(mux.closePane).not.toHaveBeenCalled();
+    await lifecycle.cleanup();
+  });
+
+  test('false cmux close keeps the record and retries after settlement', async () => {
+    const mux = multiplexer();
+    const retry = deferred<void>();
+    mux.closePane.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const lifecycle = new CmuxSessionLifecycle(
+      'owner',
+      mux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      {
+        delay: () => retry.promise,
+        isServerRunning: async () => true,
+      },
+    );
+
+    await lifecycle.onSessionCreated({
+      type: 'session.created',
+      properties: { info: { id: 'false-close', parentID: 'p' } },
+    });
+    await lifecycle.onSessionDeleted({
+      type: 'session.deleted',
+      properties: { sessionID: 'false-close' },
+    });
+
+    expect(mux.closePane).toHaveBeenCalledTimes(1);
+    expect(store.get('false-close')?.paneId).toBe('pane');
+    retry.resolve();
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(mux.closePane).toHaveBeenCalledTimes(2);
+    expect(store.get('false-close')).toBeUndefined();
+  });
+
+  test('thrown cmux close keeps the record and retries after settlement', async () => {
+    const mux = multiplexer();
+    const retry = deferred<void>();
+    mux.closePane
+      .mockRejectedValueOnce(new Error('socket'))
+      .mockResolvedValueOnce(true);
+    const lifecycle = new CmuxSessionLifecycle(
+      'owner',
+      mux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      {
+        delay: () => retry.promise,
+        isServerRunning: async () => true,
+      },
+    );
+
+    await lifecycle.onSessionCreated({
+      type: 'session.created',
+      properties: { info: { id: 'thrown-close', parentID: 'p' } },
+    });
+    await lifecycle.onSessionDeleted({
+      type: 'session.deleted',
+      properties: { sessionID: 'thrown-close' },
+    });
+
+    expect(mux.closePane).toHaveBeenCalledTimes(1);
+    expect(store.get('thrown-close')?.paneId).toBe('pane');
+    retry.resolve();
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(mux.closePane).toHaveBeenCalledTimes(2);
+    expect(store.get('thrown-close')).toBeUndefined();
+  });
+
   test('dispose gate closes a late successful spawn and never marks it active', async () => {
     const mux = multiplexer();
     const spawn = deferred<{ success: true; paneId: string }>();

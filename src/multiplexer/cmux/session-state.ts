@@ -24,9 +24,12 @@ export interface CmuxSessionRecord {
   activityVersion: number;
   idleConsecutive: number;
   statusMissingSince?: number;
+  /** Set only by a coordinator terminal outcome, not by status absence. */
+  terminalConfirmed?: boolean;
   deferredSpawn?: CmuxDeferredSpawn;
   closeIntent?: CmuxCloseIntent;
   closeTimer?: { cancel(): void };
+  closePromise?: Promise<void>;
   spawnPromise?: Promise<PaneResult>;
 }
 
@@ -49,6 +52,12 @@ export class CmuxSessionStore {
         (existing.lifecycle !== 'orphaned' && existing.lifecycle !== 'deleted')
       )
         return false;
+      // Transfer ownership without replacing the record while an adapter
+      // close is in flight. The old operation must settle before any retry.
+      if (existing.closePromise) {
+        existing.owner = record.owner;
+        return false;
+      }
       existing.closeTimer?.cancel();
       Object.assign(record, existing, {
         owner: record.owner,

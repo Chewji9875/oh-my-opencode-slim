@@ -295,7 +295,13 @@ async function deleteAndVerifySession(
         `Session delete failed and task is still busy: ${taskID}`,
       );
     }
-    if (status.status !== 'idle') throw error;
+    // A successful/not-found delete may legitimately remove the session from
+    // the active status map. Treat that as quiescent only in the context of
+    // the explicit delete verification; it never becomes a generic terminal
+    // board transition.
+    if (status.status !== 'idle' && status.source !== 'missing-from-map') {
+      throw error;
+    }
   }
 
   const deadline = Date.now() + (options.deleteVerifyMs ?? 1_500);
@@ -321,7 +327,9 @@ async function deleteAndVerifySession(
       statusKeys: status.keys,
       stableStoppedSince,
     });
-    if (status.status !== 'idle') {
+    const quiescent =
+      status.status === 'idle' || status.source === 'missing-from-map';
+    if (!quiescent) {
       stableStoppedSince = undefined;
       await delay(retryIntervalMs);
       continue;
@@ -350,9 +358,11 @@ async function getSessionStatus(
     status: runtimeSessionStatus(snapshot, taskID),
     source: snapshot.error
       ? 'lookup-error'
-      : snapshot.statuses.has(taskID)
-        ? 'task-map-entry'
-        : 'missing-from-map',
+      : snapshot.malformedSessionIDs.has(taskID)
+        ? 'malformed-entry'
+        : snapshot.statuses.has(taskID)
+          ? 'task-map-entry'
+          : 'missing-from-map',
     keys: [...snapshot.statuses.keys()].slice(0, 20),
   };
 }

@@ -13,15 +13,20 @@ export interface RuntimeSessionStatusSnapshot {
 
 /**
  * Reads OpenCode's single live session-status map. An absent session in a
- * valid response is idle; an invalid response or failed request is unknown.
+ * valid response is unknown: the endpoint only describes currently active
+ * runners and does not prove that a background task has terminated.
  */
 export async function getRuntimeSessionStatusSnapshot(
   input: PluginInput,
   options: { timeoutMs?: number } = {},
 ): Promise<RuntimeSessionStatusSnapshot> {
   try {
+    const client =
+      typeof input.client?.session?.status === 'function'
+        ? input.client
+        : getClient(input);
     const response = await withTimeout(
-      getClient(input).session.status({
+      client.session.status({
         query: { directory: input.directory },
       }),
       options.timeoutMs ?? DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
@@ -74,9 +79,7 @@ export function runtimeSessionStatus(
 ): RuntimeSessionStatus | undefined {
   if (snapshot.error) return undefined;
   if (snapshot.malformedSessionIDs.has(sessionID)) return undefined;
-  const status = snapshot.statuses.get(sessionID);
-  if (status === undefined) return 'idle';
-  return status;
+  return snapshot.statuses.get(sessionID);
 }
 
 async function withTimeout<T>(

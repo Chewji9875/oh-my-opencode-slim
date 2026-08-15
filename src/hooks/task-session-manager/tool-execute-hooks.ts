@@ -45,6 +45,7 @@ export async function handleToolExecuteBefore(
     };
     taskContextTracker: { pendingManagedTaskIds: Set<string> };
     backgroundJobSupervisor?: BackgroundJobSupervisor;
+    getLifecycleEpoch?: () => number;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -93,6 +94,7 @@ export async function handleToolExecuteBefore(
     agentType,
     label,
     background,
+    lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
   };
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
@@ -164,6 +166,12 @@ export async function handleToolExecuteAfter(
       prune(board: { taskIDs(): Set<string> }): void;
     };
     backgroundJobSupervisor?: BackgroundJobSupervisor;
+    /** Clear a deletion guard when a new native task output proves a run exists. */
+    clearRehydrateTombstone?: (taskID: string) => void;
+    isStaleDeletedTaskOutput?: (
+      taskID: string,
+      lifecycleEpoch: number,
+    ) => boolean;
   },
 ): Promise<void> {
   if (input.tool.toLowerCase() === 'read') {
@@ -207,6 +215,17 @@ export async function handleToolExecuteAfter(
   if (!pending || typeof output.output !== 'string') return;
   const launch = parseTaskLaunchOutput(output.output);
   if (launch && !launch.result?.match(/Timed out after \d+ms/i)) {
+    if (
+      deps.isStaleDeletedTaskOutput?.(launch.taskID, pending.lifecycleEpoch)
+    ) {
+      log('[task-session-manager] ignored stale task launch after deletion', {
+        taskID: launch.taskID,
+        callID: pending.callId,
+        lifecycleEpoch: pending.lifecycleEpoch,
+      });
+      return;
+    }
+    deps.clearRehydrateTombstone?.(launch.taskID);
     const record = deps.backgroundJobBoard.registerLaunch({
       taskID: launch.taskID,
       parentSessionID: pending.parentSessionId,
@@ -236,6 +255,18 @@ export async function handleToolExecuteAfter(
   normalizeLateCancelledTaskOutput(output, deps.backgroundJobBoard);
   const status = parseTaskStatusOutput(output.output);
   if (status) {
+    if (
+      deps.isStaleDeletedTaskOutput?.(status.taskID, pending.lifecycleEpoch)
+    ) {
+      log('[task-session-manager] ignored stale task status after deletion', {
+        taskID: status.taskID,
+        callID: pending.callId,
+        lifecycleEpoch: pending.lifecycleEpoch,
+        state: status.state,
+      });
+      return;
+    }
+    deps.clearRehydrateTombstone?.(status.taskID);
     const existing = deps.backgroundJobBoard.get(status.taskID);
     const record =
       existing ??

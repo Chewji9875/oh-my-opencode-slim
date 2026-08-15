@@ -273,7 +273,7 @@ describe('task-session-manager hook', () => {
     );
   });
 
-  test('rehydrates historical background tasks and reconciles stopped children immediately', async () => {
+  test('rehydrates historical background tasks and keeps absent children provisional', async () => {
     const board = new BackgroundJobBoard();
     const status = mock(async () => ({ data: {} }));
     const { hook } = createHook({
@@ -297,15 +297,15 @@ describe('task-session-manager hook', () => {
     await transformMessages(hook, messages as never);
 
     expect(board.get('historical-child')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
       background: true,
       agent: 'explorer',
       description: 'recover scheduler task',
       objective: 'recover scheduler task',
     });
     expect(boardText(messages)).toContain(
-      'historical-child / explorer / stopped, unreconciled',
+      'historical-child / explorer / running, status uncertain',
     );
   });
 
@@ -331,8 +331,8 @@ describe('task-session-manager hook', () => {
     await transformMessages(hook, messages as never);
 
     expect(board.get('completed-call-child')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -498,7 +498,8 @@ describe('task-session-manager hook', () => {
     expect(second).toMatchObject({
       alias: first?.alias,
       generation: first?.generation,
-      state: 'stopped',
+      state: 'running',
+      statusUncertain: true,
     });
     expect(status).toHaveBeenCalledTimes(1);
   });
@@ -4540,7 +4541,7 @@ describe('task-session-manager hook', () => {
     expect(messages.messages[0].parts[0].text).toBe('do something');
   });
 
-  test('marks a running child as stopped when idle has no terminal task result', async () => {
+  test('keeps a running child provisional when idle has no terminal task result', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4562,10 +4563,53 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
-      resultSummary:
-        'Background session stopped before a terminal task result was received.',
+      state: 'running',
+      statusUncertain: true,
+      lastStatusError:
+        'Runtime session is idle; task termination is unconfirmed.',
+    });
+  });
+
+  test('idle timer does not notify terminal listeners before a late completion', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-late',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'late completion',
+    });
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: (id) => id === 'parent-1',
+      idleReconcileDelayMs: 0,
+    });
+
+    await hook.event({
+      event: {
+        type: 'session.idle',
+        properties: { sessionID: 'child-late' },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-late')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(listener).not.toHaveBeenCalled();
+
+    board.updateStatus({
+      taskID: 'child-late',
+      state: 'completed',
+      resultSummary: 'late completion won',
+    });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(board.get('child-late')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'late completion won',
     });
   });
 
@@ -4625,8 +4669,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4729,7 +4773,123 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-2')).toBeUndefined();
   });
 
-  test('marks stopped from idle when fallback guard passes', async () => {
+  test('does not rehydrate a deleted historical running task as a new alias', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-deleted',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'deleted task',
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    coordinator.dispatchSessionDeleted('child-deleted');
+    expect(board.get('child-deleted')).toBeUndefined();
+
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-deleted')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('child-deleted')).toBeUndefined();
+    expect(board.list()).toHaveLength(0);
+  });
+
+  test('clears a delete tombstone for a legitimate subsequent launch', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-relaunched',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'first run',
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'old-call' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'old run',
+        },
+      },
+    );
+    coordinator.dispatchSessionDeleted('child-relaunched');
+    expect(board.get('child-relaunched')).toBeUndefined();
+
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'old-call' },
+      { output: taskLaunchOutput('child-relaunched') },
+    );
+    expect(board.get('child-relaunched')).toBeUndefined();
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { output: taskLaunchOutput('child-relaunched') },
+    );
+
+    expect(board.get('child-relaunched')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-relaunched')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('child-relaunched')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+    expect(board.list()).toHaveLength(1);
+  });
+
+  test('marks idle as provisional when fallback guard passes', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4753,8 +4913,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4794,7 +4954,7 @@ describe('task-session-manager hook', () => {
     });
     expect(board.get('child-1')).toMatchObject({ state: 'running' });
 
-    // Second idle stops the child without an explicit task result.
+    // Second idle remains provisional without an explicit task result.
     const hook2 = createHook({
       backgroundJobBoard: board,
       shouldManageSession: () => false,
@@ -4806,8 +4966,8 @@ describe('task-session-manager hook', () => {
     });
     await flushChildIdleReconcile();
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4925,15 +5085,15 @@ describe('task-session-manager hook', () => {
     });
 
     // Simulate parent tool never firing tool.execute.after (cancelled).
-    // Child goes idle without task output — board must stop waiting.
+    // Child goes idle without task output — board remains provisional.
     await hook.event({
       event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
     });
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -5285,7 +5445,7 @@ describe('task-session-manager hook', () => {
     expect(job?.state).toBe('cancelled');
   });
 
-  test('idle via session.status path marks the job stopped', async () => {
+  test('idle via session.status path remains provisional', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -5310,8 +5470,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
   });
 

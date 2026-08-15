@@ -60,21 +60,66 @@ describe('runtime status reconciliation', () => {
     });
   });
 
-  test('marks an absent runtime session stopped instead of completed', async () => {
+  test('keeps an absent runtime session provisional instead of stopping it', async () => {
     const { board, reconciler, contextFilesForPrompt, prune } =
       createReconciler(async () => ({ data: {} }));
 
     await reconciler.reconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
-      resultSummary:
-        'Background session stopped before a terminal task result was received.',
+      state: 'running',
+      statusUncertain: true,
+      lastStatusError:
+        'Runtime status response did not contain a live session state; task termination is unconfirmed.',
     });
     expect(board.resolveReusable('parent-1', 'fix-1', 'fixer')).toBeUndefined();
-    expect(contextFilesForPrompt).toHaveBeenCalledWith('child-1');
-    expect(prune).toHaveBeenCalledWith(board);
+    expect(contextFilesForPrompt).not.toHaveBeenCalled();
+    expect(prune).not.toHaveBeenCalled();
+  });
+
+  test('does not let idle runtime observation win over a late completion', async () => {
+    const { board, reconciler } = createReconciler(async () => ({
+      data: { 'child-1': { type: 'idle' } },
+    }));
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'late result',
+    });
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'late result',
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test('clears provisional uncertainty when a missing session becomes busy', async () => {
+    let liveStatus: unknown = { data: {} };
+    const { board, reconciler } = createReconciler(async () => liveStatus);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+
+    liveStatus = { data: { 'child-1': { type: 'busy' } } };
+    await reconciler.reconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+    });
   });
 
   test('keeps the board running but explicitly uncertain when lookup fails', async () => {
@@ -182,8 +227,8 @@ describe('runtime status reconciliation', () => {
 
     expect(status).toHaveBeenCalledTimes(2);
     expect(board.get('child-2')).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      statusUncertain: true,
     });
     reconciler.dispose();
   });

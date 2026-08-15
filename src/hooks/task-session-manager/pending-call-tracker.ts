@@ -4,6 +4,8 @@ export interface PendingTaskCall {
   agentType: string;
   label: string;
   background: boolean;
+  /** Deletion epoch observed when this native task call started. */
+  lifecycleEpoch: number;
   resumedTaskId?: string;
 }
 

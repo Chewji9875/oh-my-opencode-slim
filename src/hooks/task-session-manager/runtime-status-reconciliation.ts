@@ -51,7 +51,6 @@ export function createRuntimeStatusReconciler(options: {
       .filter((job) => job.state === 'running');
     if (running.length === 0) return;
 
-    const requestStartedAt = Date.now();
     const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
       timeoutMs: options.statusTimeoutMs,
     });
@@ -85,7 +84,9 @@ export function createRuntimeStatusReconciler(options: {
       if (status === undefined) {
         options.backgroundJobBoard.markStatusUncertain(
           job.taskID,
-          'Runtime status response did not contain a recognized session state.',
+          snapshot.malformedSessionIDs.has(job.taskID)
+            ? 'Runtime status response did not contain a recognized session state.'
+            : 'Runtime status response did not contain a live session state; task termination is unconfirmed.',
           job.generation,
         );
         continue;
@@ -99,24 +100,21 @@ export function createRuntimeStatusReconciler(options: {
         continue;
       }
 
-      const stopped = options.backgroundJobBoard.markStopped(
+      // Idle only says that the runner is currently quiescent. It is not
+      // terminal evidence for a background task: a task result can arrive
+      // after this observation.
+      options.backgroundJobBoard.markStatusUncertain(
         job.taskID,
-        'Background session stopped before a terminal task result was received.',
-        requestStartedAt,
+        'Runtime session is idle; task termination is unconfirmed.',
         job.generation,
       );
-      if (stopped?.state !== 'stopped') continue;
-      options.taskContextTracker.pendingManagedTaskIds.delete(job.taskID);
-      options.backgroundJobBoard.addContext(
-        job.taskID,
-        options.taskContextTracker.contextFilesForPrompt(job.taskID),
+      log(
+        '[task-session-manager] runtime session quiescent; terminal result pending',
+        {
+          taskID: job.taskID,
+          generation: job.generation,
+        },
       );
-      options.taskContextTracker.prune(options.backgroundJobBoard);
-      log('[task-session-manager] reconciled runtime-stopped job', {
-        taskID: stopped.taskID,
-        alias: stopped.alias,
-        parentSessionID: stopped.parentSessionID,
-      });
     }
   }
 

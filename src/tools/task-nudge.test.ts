@@ -186,7 +186,7 @@ describe('task_nudge', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
-  test('refuses to nudge an idle or absent child session', async () => {
+  test('refuses to nudge an absent child session as unknown', async () => {
     const board = new BackgroundJobBoard();
     registerStuckChild(board);
     const prompt = mock(async () => ({}));
@@ -200,7 +200,33 @@ describe('task_nudge', () => {
       task_nudge.execute({ task_id: 'ses_child1', message: 'Nudge' }, {
         sessionID: 'parent-1',
       } as any),
-    ).rejects.toThrow('child session is idle');
+    ).rejects.toThrow('child session status unknown');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('keeps malformed live status distinct from an absent session', async () => {
+    const board = new BackgroundJobBoard();
+    registerStuckChild(board);
+    const prompt = mock(async () => ({}));
+    client = {
+      session: {
+        status: mock(async () => ({
+          data: { ses_child1: { type: 'suspended' } },
+        })),
+        prompt,
+      },
+    };
+    const { task_nudge } = createTaskNudgeTool({
+      input: { directory: '/test' } as any,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    await expect(
+      task_nudge.execute({ task_id: 'ses_child1', message: 'Nudge' }, {
+        sessionID: 'parent-1',
+      } as any),
+    ).rejects.toThrow('child session status malformed');
     expect(prompt).not.toHaveBeenCalled();
   });
 
