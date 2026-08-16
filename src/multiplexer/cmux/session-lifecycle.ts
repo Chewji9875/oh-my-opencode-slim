@@ -397,7 +397,8 @@ export class CmuxSessionLifecycle {
       this.disposed ||
       this.store.get(record.session) !== record ||
       record.owner !== this.owner ||
-      record.lifecycle !== 'orphaned'
+      record.lifecycle !== 'orphaned' ||
+      record.closePromise
     )
       return;
     record.closeTimer?.cancel();
@@ -412,6 +413,11 @@ export class CmuxSessionLifecycle {
   private activity(session: string): void {
     const record = this.store.get(session);
     if (!record || record.owner !== this.owner || this.disposed) return;
+    if (record.closePromise) {
+      this.store.markActivity(session, this.now());
+      record.terminalConfirmed = false;
+      return;
+    }
     this.store.markActivity(session, this.now());
     record.terminalConfirmed = false;
     const next = this.policy.activity(record.closeIntent);
@@ -435,6 +441,10 @@ export class CmuxSessionLifecycle {
       !(this.backgroundJobs?.deferIfRunning(record.session) ?? true)
     )
       return;
+    if (record.closePromise) {
+      await record.closePromise;
+      return;
+    }
     const previous = record.closeIntent;
     record.closeIntent = this.policy.request(
       reason,
@@ -516,16 +526,15 @@ export class CmuxSessionLifecycle {
       record.paneId !== paneId
     )
       return;
-    if (
-      !intentStillCurrent ||
-      !idleStillCurrent ||
-      (this.disposed &&
-        !(record.lifecycle === 'orphaned' && intent.reason === 'cleanup'))
-    ) {
+    if (!intentStillCurrent || !idleStillCurrent) {
       if (closed) await this.settleClosedPane(record, paneId);
       return;
     }
     if (closed) {
+      if (this.disposed) {
+        await this.settleClosedPane(record, paneId);
+        return;
+      }
       record.closeTimer?.cancel();
       record.closeTimer = undefined;
       if (record.lifecycle !== 'active') {
@@ -545,7 +554,19 @@ export class CmuxSessionLifecycle {
       this.updatePolling();
       return;
     }
-    if (!intentStillCurrent || !idleStillCurrent) return;
+    if (this.disposed) {
+      record.closeIntent = this.policy.failed(intent, this.now());
+      if (record.closeIntent.phase === 'cooldown') {
+        this.scheduleCooldown(record);
+      } else {
+        record.closeTimer?.cancel();
+        record.closeTimer = this.timer(
+          () => this.attemptClose(record),
+          this.closeRetryMs,
+        );
+      }
+      return;
+    }
     record.closeIntent = this.policy.failed(intent, this.now());
     if (record.closeIntent.phase === 'cooldown') {
       if (!Number.isFinite(record.closeIntent.nextAttemptAt))
@@ -719,31 +740,42 @@ export class CmuxSessionLifecycle {
     }
   }
 
-  private async waitForSpawnSettlement(
+  private async waitForSettlements(
     pending: Promise<unknown>[],
-  ): Promise<void> {
-    if (pending.length === 0) return;
-    await new Promise<void>((resolve) => {
+    deadlineAt: number,
+  ): Promise<boolean> {
+    if (pending.length === 0) return true;
+    const settled = Promise.allSettled(pending).then(() => true);
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      void settled;
+      return false;
+    }
+    return new Promise<boolean>((resolve) => {
       let finished = false;
       let nativeTimer: ReturnType<typeof setTimeout> | undefined;
       let injectedTimer: { cancel(): void } | undefined;
-      const finish = () => {
+      const finish = (completed: boolean) => {
         if (finished) return;
         finished = true;
         if (nativeTimer) clearTimeout(nativeTimer);
         injectedTimer?.cancel();
-        resolve();
+        resolve(completed);
       };
 
-      nativeTimer = setTimeout(finish, this.shutdownTimeoutMs);
+      nativeTimer = setTimeout(() => finish(false), remaining);
       nativeTimer.unref?.();
       if (this.injectedDelay)
-        injectedTimer = this.timer(finish, this.shutdownTimeoutMs);
-      void Promise.allSettled(pending).then(finish, finish);
+        injectedTimer = this.timer(() => finish(false), Math.max(0, remaining));
+      void settled.then(
+        () => finish(true),
+        () => finish(true),
+      );
     });
   }
 
   private async runCleanup(): Promise<void> {
+    const deadlineAt = Date.now() + Math.max(0, this.shutdownTimeoutMs);
     this.disposed = true;
     this.removeLatePaneObserver();
     this.spawnGeneration += 1;
@@ -754,33 +786,51 @@ export class CmuxSessionLifecycle {
     const pending = records.flatMap((record) =>
       record.spawnPromise ? [record.spawnPromise] : [],
     );
-    await this.waitForSpawnSettlement(pending);
-    const pendingCloses = this.store
+    await this.waitForSettlements(pending, deadlineAt);
+    const closeWork = this.store
       .ownedBy(this.owner)
-      .flatMap((record) => (record.closePromise ? [record.closePromise] : []));
-    if (pendingCloses.length) await Promise.all(pendingCloses);
-    for (const record of this.store.ownedBy(this.owner)) {
+      .map((record) => this.cleanupRecordUntil(record, deadlineAt));
+    await Promise.allSettled(closeWork);
+  }
+
+  private async cleanupRecordUntil(
+    record: CmuxSessionRecord,
+    deadlineAt: number,
+  ): Promise<void> {
+    try {
       if (!record.paneId) {
         if (!record.spawnPromise) this.store.removeWithoutPane(record.session);
-        continue;
+        return;
       }
-      if (this.applyCloseSettlement(record)) continue;
+      if (this.applyCloseSettlement(record)) return;
       record.closeTimer?.cancel();
       record.closeTimer = undefined;
-      record.closeIntent = this.policy.request(
-        'cleanup',
-        record.activityVersion,
-        this.now(),
-      );
+      if (!record.closePromise || !record.closeIntent)
+        record.closeIntent = this.policy.request(
+          'cleanup',
+          record.activityVersion,
+          this.now(),
+        );
       while (
         record.closeIntent?.phase === 'pending' &&
         this.store.get(record.session) === record &&
         record.owner === this.owner
       ) {
-        await this.attemptCloseWithoutTimer(record);
-        if (record.closeIntent?.phase === 'pending')
-          await this.delay(this.closeRetryMs);
+        const attempt = this.attemptCloseWithoutTimer(record);
+        if (!(await this.waitForSettlements([attempt], deadlineAt))) {
+          void attempt.then(
+            () => this.scheduleRetryAfterCleanupTimeout(record),
+            () => this.scheduleRetryAfterCleanupTimeout(record),
+          );
+          return;
+        }
+        if (record.closeIntent?.phase !== 'pending') return;
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) return;
+        const retryDelay = this.delay(Math.min(this.closeRetryMs, remaining));
+        if (!(await this.waitForSettlements([retryDelay], deadlineAt))) return;
       }
+    } finally {
       if (
         record.closeIntent &&
         this.store.get(record.session) === record &&
@@ -788,6 +838,22 @@ export class CmuxSessionLifecycle {
       )
         this.store.markOrphaned(record.session);
     }
+  }
+
+  private scheduleRetryAfterCleanupTimeout(record: CmuxSessionRecord): void {
+    const intent = record.closeIntent;
+    if (
+      intent?.phase !== 'pending' ||
+      !record.paneId ||
+      record.owner !== this.owner ||
+      this.store.get(record.session) !== record
+    )
+      return;
+    record.closeTimer?.cancel();
+    record.closeTimer = this.timer(
+      () => this.attemptClose(record),
+      this.closeRetryMs,
+    );
   }
 
   private async attemptCloseWithoutTimer(

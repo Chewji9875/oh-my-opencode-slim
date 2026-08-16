@@ -177,6 +177,7 @@ export class MultiplexerSessionManager {
   private readonly now: () => number;
   private readonly closeRetryMs: number;
   private readonly closeRetryMaxAttempts: number;
+  private readonly shutdownTimeoutMs: number;
   private readinessAbort?: AbortController;
   private cleanupInProgress = false;
   /**
@@ -207,6 +208,9 @@ export class MultiplexerSessionManager {
     this.closeRetryMaxAttempts = Number.isFinite(options.closeRetryMaxAttempts)
       ? Math.max(1, Math.floor(options.closeRetryMaxAttempts ?? 4))
       : 4;
+    this.shutdownTimeoutMs = Number.isFinite(options.shutdownTimeoutMs)
+      ? Math.max(0, options.shutdownTimeoutMs ?? 5_000)
+      : 5_000;
 
     this.directory = ctx.directory;
     this.resolveServerUrl = createServerUrlResolver(ctx);
@@ -730,6 +734,7 @@ export class MultiplexerSessionManager {
       closeState,
       this.multiplexer,
     ).finally(() => {
+      if (this.closingSessions.get(sessionId) !== closePromise) return;
       this.closingSessions.delete(sessionId);
       this.updatePolling();
     });
@@ -1005,6 +1010,7 @@ export class MultiplexerSessionManager {
   private isPollableSession(tracked: TrackedSession): boolean {
     return (
       tracked.ownerInstanceId === this.instanceId &&
+      !this.closingSessions.has(tracked.sessionId) &&
       tracked.closeState?.phase !== 'exhausted'
     );
   }
@@ -1055,21 +1061,17 @@ export class MultiplexerSessionManager {
     this.cleanupInProgress = true;
     this.abortInFlightReadiness();
     this.stopPolling();
+    const deadlineAt = Date.now() + this.shutdownTimeoutMs;
 
     try {
-      const pending = [...this.closingSessions.entries()]
-        .filter(([sessionId]) => {
-          const tracked = this.sessions.get(sessionId);
-          return tracked?.ownerInstanceId === this.instanceId;
-        })
-        .map(([, promise]) => promise);
-      if (pending.length > 0) await Promise.all(pending);
-
       const ownedSessionIds = [...this.sessions.entries()]
         .filter(([, tracked]) => tracked.ownerInstanceId === this.instanceId)
         .map(([sessionId]) => sessionId);
-      for (const sessionId of ownedSessionIds)
-        await this.closeSession(sessionId, 'deleted', true);
+      const closeWork = ownedSessionIds.map((sessionId) => {
+        const existing = this.closingSessions.get(sessionId);
+        return existing ?? this.closeSession(sessionId, 'deleted', true);
+      });
+      await this.waitForSettlements(closeWork, deadlineAt);
 
       this.knownSessions.clear();
       this.spawningSessions.clear();
@@ -1083,6 +1085,35 @@ export class MultiplexerSessionManager {
     }
 
     log('[multiplexer-session-manager] cleanup complete');
+  }
+
+  private async waitForSettlements(
+    pending: Promise<unknown>[],
+    deadlineAt: number,
+  ): Promise<boolean> {
+    if (pending.length === 0) return true;
+    const settled = Promise.allSettled(pending).then(() => true);
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      void settled;
+      return false;
+    }
+    return new Promise<boolean>((resolve) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (completed: boolean) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        resolve(completed);
+      };
+      timer = setTimeout(() => finish(false), remaining);
+      timer.unref?.();
+      void settled.then(
+        () => finish(true),
+        () => finish(true),
+      );
+    });
   }
 
   async cleanupOnInstanceDisposed(): Promise<void> {

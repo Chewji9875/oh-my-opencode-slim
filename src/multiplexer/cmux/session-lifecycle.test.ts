@@ -6,8 +6,12 @@ import { CmuxSessionStore } from './session-state';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => (resolve = done));
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 function multiplexer() {
@@ -931,7 +935,7 @@ describe('CmuxSessionLifecycle races', () => {
     await lifecycle.cleanup();
   });
 
-  test('busy reactivates a claimed exhausted orphan before close settles', async () => {
+  test('busy does not clear a claimed orphan close before it settles', async () => {
     const policy = new CmuxClosePolicy(1, 1);
     let exhausted = policy.request('cleanup', 0, 0);
     exhausted = policy.failed(exhausted, 1);
@@ -975,18 +979,194 @@ describe('CmuxSessionLifecycle races', () => {
     });
     expect(store.get('busy-orphan')).toMatchObject({
       owner: 'new',
-      lifecycle: 'active',
+      lifecycle: 'orphaned',
       paneId: 'busy-orphan-pane',
     });
-    expect(store.get('busy-orphan')?.closeIntent).toBeUndefined();
+    expect(store.get('busy-orphan')?.closeIntent).toMatchObject({
+      reason: 'cleanup',
+      phase: 'pending',
+    });
 
     close.resolve(false);
     for (let index = 0; index < 8; index++) await Promise.resolve();
     expect(mux.closePane).toHaveBeenCalledTimes(1);
     expect(store.get('busy-orphan')).toMatchObject({
-      lifecycle: 'active',
+      lifecycle: 'orphaned',
       paneId: 'busy-orphan-pane',
     });
     await lifecycle.cleanup();
   });
+
+  for (const result of [true, false]) {
+    test(`cleanup close timeout retains an existing close until ${result ? 'success' : 'retry'}`, async () => {
+      const mux = multiplexer();
+      const close = deferred<boolean>();
+      mux.closePane.mockImplementationOnce(() => close.promise);
+      const lifecycle = new CmuxSessionLifecycle(
+        'owner',
+        mux,
+        () => 'http://server',
+        '/repo',
+        undefined,
+        {
+          closeRetryMs: 0,
+          isServerRunning: async () => true,
+          shutdownTimeoutMs: 1,
+        },
+      );
+
+      await lifecycle.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'cleanup-existing', parentID: 'p' } },
+      });
+      const deleting = lifecycle.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'cleanup-existing' },
+      });
+      for (let index = 0; index < 8; index++) await Promise.resolve();
+
+      const beforeCleanup = store.get('cleanup-existing');
+      const closePromise = beforeCleanup?.closePromise;
+      expect(closePromise).toBeDefined();
+      expect(mux.closePane).toHaveBeenCalledTimes(1);
+
+      await lifecycle.cleanup();
+
+      const retained = store.get('cleanup-existing');
+      expect(retained).toBe(beforeCleanup);
+      expect(retained).toMatchObject({ paneId: 'pane' });
+      expect(retained?.closePromise).toBe(closePromise);
+      expect(mux.closePane).toHaveBeenCalledTimes(1);
+
+      close.resolve(result);
+      await deleting;
+      if (result) {
+        expect(store.get('cleanup-existing')).toBeUndefined();
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(mux.closePane).toHaveBeenCalledTimes(2);
+        expect(store.get('cleanup-existing')).toBeUndefined();
+      }
+    });
+  }
+
+  for (const settlement of ['false', 'reject'] as const) {
+    test(`cleanup timeout retries a cleanup-started close after ${settlement}`, async () => {
+      const mux = multiplexer();
+      const close = deferred<boolean>();
+      mux.closePane
+        .mockImplementationOnce(() => close.promise)
+        .mockResolvedValueOnce(true);
+      const lifecycle = new CmuxSessionLifecycle(
+        'owner',
+        mux,
+        () => 'http://server',
+        '/repo',
+        undefined,
+        {
+          closeRetryMs: 0,
+          isServerRunning: async () => true,
+          shutdownTimeoutMs: 1,
+        },
+      );
+      const session = `cleanup-pending-${settlement}`;
+
+      await lifecycle.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: session, parentID: 'p' } },
+      });
+      await lifecycle.cleanup();
+
+      const retained = store.get(session);
+      expect(mux.closePane).toHaveBeenCalledTimes(1);
+      expect(retained).toMatchObject({
+        paneId: 'pane',
+        lifecycle: 'orphaned',
+      });
+      expect(retained?.closePromise).toBeDefined();
+
+      if (settlement === 'false') close.resolve(false);
+      else close.reject(new Error('cleanup socket'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(mux.closePane).toHaveBeenCalledTimes(2);
+      expect(mux.closePane).toHaveBeenLastCalledWith('pane');
+      expect(store.get(session)).toBeUndefined();
+    });
+  }
+
+  for (const result of [true, false]) {
+    test(`late cleanup ${result ? 'success' : 'failure'} cannot close a new owner twice`, async () => {
+      store.claimCreated({
+        session: 'cleanup-handoff',
+        owner: 'old',
+        parent: 'p',
+        title: 'agent',
+        directory: '/repo',
+        serverUrl: 'http://server/',
+        paneId: 'shared-pane',
+        spawnState: 'attached',
+        lifecycle: 'active',
+        lastActivityAt: 0,
+        activityVersion: 0,
+        idleConsecutive: 0,
+      });
+      const oldMux = multiplexer();
+      const close = deferred<boolean>();
+      oldMux.closePane.mockImplementationOnce(() => close.promise);
+      const old = new CmuxSessionLifecycle(
+        'old',
+        oldMux,
+        () => 'http://server',
+        '/repo',
+        undefined,
+        { shutdownTimeoutMs: 1 },
+      );
+
+      await old.cleanup();
+      const pending = store.get('cleanup-handoff');
+      expect(pending).toMatchObject({
+        owner: 'old',
+        paneId: 'shared-pane',
+        lifecycle: 'orphaned',
+      });
+      expect(oldMux.closePane).toHaveBeenCalledTimes(1);
+
+      const newMux = multiplexer();
+      newMux.closePane.mockResolvedValue(true);
+      const next = new CmuxSessionLifecycle(
+        'new',
+        newMux,
+        () => 'http://server',
+        '/repo',
+      );
+      await next.onSessionStatus({ type: 'session.status' });
+      await next.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'cleanup-handoff', parentID: 'p' },
+        },
+      });
+
+      expect(store.get('cleanup-handoff')).toBe(pending);
+      expect(store.get('cleanup-handoff')).toMatchObject({
+        owner: 'new',
+        paneId: 'shared-pane',
+      });
+      expect(newMux.closePane).not.toHaveBeenCalled();
+
+      close.resolve(result);
+      for (let index = 0; index < 16; index++) await Promise.resolve();
+
+      expect(oldMux.closePane).toHaveBeenCalledTimes(1);
+      if (result) {
+        expect(store.get('cleanup-handoff')).toBeUndefined();
+      } else {
+        expect(newMux.closePane).toHaveBeenCalledTimes(1);
+        expect(newMux.closePane).toHaveBeenCalledWith('shared-pane');
+        expect(store.get('cleanup-handoff')).toBeUndefined();
+      }
+      await next.cleanup();
+    });
+  }
 });

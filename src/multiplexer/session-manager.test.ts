@@ -2971,6 +2971,140 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
     });
 
+    test('generic cleanup bounds a pending close and retries after false', async () => {
+      const close = createDeferred<boolean>();
+      mockMultiplexer.closePane
+        .mockImplementationOnce(() => close.promise)
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0, shutdownTimeoutMs: 1 },
+      );
+      const sessionId = 'generic-cleanup-pending';
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: sessionId, parentID: 'parent' } },
+      });
+      const deleting = manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: sessionId },
+      });
+      await flushPromises();
+
+      const state = manager as unknown as {
+        sessions: Map<string, { paneId: string; closeState?: unknown }>;
+        closingSessions: Map<string, Promise<void>>;
+      };
+      const tracked = state.sessions.get(sessionId);
+      const closing = state.closingSessions.get(sessionId);
+      expect(tracked).toMatchObject({ paneId: '%mock-pane' });
+      expect(closing).toBeDefined();
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      await manager.cleanup();
+
+      expect(state.sessions.get(sessionId)).toBe(tracked);
+      expect(state.sessions.get(sessionId)).toMatchObject({
+        paneId: '%mock-pane',
+        closeState: { phase: 'closing', attempts: 1 },
+      });
+      expect(state.closingSessions.get(sessionId)).toBe(closing);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      close.resolve(false);
+      await deleting;
+      await flushPromises();
+      expect(state.sessions.get(sessionId)).toMatchObject({
+        paneId: '%mock-pane',
+        closeState: { phase: 'retrying', attempts: 1 },
+      });
+      expect(state.closingSessions.has(sessionId)).toBe(false);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      await (manager as any).pollSessions();
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has(sessionId)).toBe(false);
+    });
+
+    for (const result of [true, false]) {
+      test(`generic cleanup ${result ? 'success' : 'failure'} cannot mutate a replacement record`, async () => {
+        const close = createDeferred<boolean>();
+        mockMultiplexer.closePane.mockImplementationOnce(() => close.promise);
+        const manager = new MultiplexerSessionManager(
+          createMockContext(),
+          defaultMultiplexerConfig,
+          undefined,
+          { shutdownTimeoutMs: 1 },
+        );
+        const sessionId = `generic-replacement-${result}`;
+
+        await manager.onSessionCreated({
+          type: 'session.created',
+          properties: { info: { id: sessionId, parentID: 'parent' } },
+        });
+        const deleting = manager.onSessionDeleted({
+          type: 'session.deleted',
+          properties: { sessionID: sessionId },
+        });
+        await flushPromises();
+
+        const state = manager as unknown as {
+          sessions: Map<
+            string,
+            {
+              sessionId: string;
+              paneId: string;
+              parentId: string;
+              title: string;
+              directory: string;
+              ownerInstanceId: string;
+            }
+          >;
+          closingSessions: Map<string, Promise<void>>;
+        };
+        await manager.cleanup();
+        const oldClosing = state.closingSessions.get(sessionId);
+        expect(oldClosing).toBeDefined();
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+        const next = new MultiplexerSessionManager(
+          createMockContext(),
+          defaultMultiplexerConfig,
+        );
+        const replacement = {
+          sessionId,
+          paneId: 'replacement-pane',
+          parentId: 'parent',
+          title: 'Replacement',
+          directory: '/test/directory',
+          ownerInstanceId: (next as any).instanceId as string,
+        };
+        state.sessions.set(sessionId, replacement);
+
+        close.resolve(result);
+        await deleting;
+        await flushPromises();
+
+        expect(state.sessions.get(sessionId)).toBe(replacement);
+        expect(state.closingSessions.has(sessionId)).toBe(false);
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+        await next.onSessionDeleted({
+          type: 'session.deleted',
+          properties: { sessionID: sessionId },
+        });
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+        expect(mockMultiplexer.closePane).toHaveBeenLastCalledWith(
+          'replacement-pane',
+        );
+        expect(state.sessions.has(sessionId)).toBe(false);
+        await next.cleanup();
+      });
+    }
+
     test('closes all tracked panes concurrently', async () => {
       const ctx = createMockContext();
       mockMultiplexer.spawnPane
