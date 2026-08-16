@@ -19,7 +19,8 @@ export type ConfigLoadWarningKind =
   | 'invalid-schema'
   | 'read-error'
   | 'missing-preset'
-  | 'deprecated-key';
+  | 'deprecated-key'
+  | 'normalized';
 
 /**
  * A warning emitted while loading plugin configuration.
@@ -66,6 +67,50 @@ const DISABLED_CONFIG_KEYS = [
   'disabled_mcps',
   'disabled_skills',
 ] as const;
+
+/**
+ * Normalize disabled_* config keys in place so a non-array value does not
+ * reject the whole config object during schema validation. A string value
+ * (e.g. "explorer") becomes a single-element array so the user's disable
+ * intent survives; any other non-array value (number, boolean, object, ...)
+ * is dropped. Array and undefined values are left untouched. Each
+ * normalization is reported through `warn` (if provided) with a plain
+ * message; callers wrap it in their own warning channel (loader uses
+ * onWarning + console.warn, doctor just reports the message).
+ *
+ * @param rawConfig - Parsed config to normalize (mutated in place)
+ * @param warn - Optional callback invoked with each warning message
+ */
+export function normalizeDisabledArrayKeys(
+  rawConfig: unknown,
+  warn?: (message: string) => void,
+): void {
+  if (
+    typeof rawConfig !== 'object' ||
+    rawConfig === null ||
+    Array.isArray(rawConfig)
+  ) {
+    return;
+  }
+
+  const configRecord = rawConfig as Record<string, unknown>;
+  for (const key of DISABLED_CONFIG_KEYS) {
+    const value = configRecord[key];
+    if (value === undefined || Array.isArray(value)) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      configRecord[key] = [value];
+      warn?.(
+        `Config key "${key}" should be an array; ` +
+          `normalized to ["${value}"].`,
+      );
+    } else {
+      delete configRecord[key];
+      warn?.(`Config key "${key}" must be an array; ignoring invalid value.`);
+    }
+  }
+}
 
 function retainExplicitInterviewFields(
   parsedConfig: PluginConfig,
@@ -215,49 +260,18 @@ function loadConfigFromPath(
 
     // Normalize disabled_* config keys before schema validation so a
     // non-array value does not reject the whole config object (which would
-    // silently discard every other user setting). A string value keeps the
-    // user's disable intent as a single-element array; any other non-array
-    // value (number, boolean, object, ...) is dropped.
-    if (
-      typeof rawConfig === 'object' &&
-      rawConfig !== null &&
-      !Array.isArray(rawConfig)
-    ) {
-      const configRecord = rawConfig as Record<string, unknown>;
-      for (const key of DISABLED_CONFIG_KEYS) {
-        const value = configRecord[key];
-        if (value === undefined || Array.isArray(value)) {
-          continue;
-        }
-        if (typeof value === 'string') {
-          configRecord[key] = [value];
-          const normalizedMsg =
-            `Config key "${key}" should be an array; ` +
-            `normalized to ["${value}"].`;
-          options?.onWarning?.({
-            path: configPath,
-            kind: 'invalid-schema',
-            message: normalizedMsg,
-          });
-          if (!options?.silent) {
-            console.warn(`[oh-my-opencode-slim] ${normalizedMsg}`);
-          }
-        } else {
-          delete configRecord[key];
-          const droppedMsg =
-            `Config key "${key}" must be an array; ` +
-            `ignoring invalid value.`;
-          options?.onWarning?.({
-            path: configPath,
-            kind: 'invalid-schema',
-            message: droppedMsg,
-          });
-          if (!options?.silent) {
-            console.warn(`[oh-my-opencode-slim] ${droppedMsg}`);
-          }
-        }
+    // silently discard every other user setting). Reported with the
+    // 'normalized' kind so TUI/doctor do not treat a fixed config as invalid.
+    normalizeDisabledArrayKeys(rawConfig, (message) => {
+      options?.onWarning?.({
+        path: configPath,
+        kind: 'normalized',
+        message,
+      });
+      if (!options?.silent) {
+        console.warn(`[oh-my-opencode-slim] ${message}`);
       }
-    }
+    });
 
     const result = PluginConfigSchema.safeParse(rawConfig);
 

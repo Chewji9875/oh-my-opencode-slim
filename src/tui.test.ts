@@ -149,6 +149,29 @@ describe('readConfigInvalid', () => {
     }
   });
 
+  test('returns false for config with normalized disabled_* string', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
+    try {
+      const projectDir = path.join(tempDir, 'project');
+      const configDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          disabled_agents: 'explorer',
+          agents: { oracle: { model: 'valid/model' } },
+        }),
+      );
+
+      // The string key is normalized to an array with a 'normalized' warning
+      // (not invalid-schema), so the config loads fine and the sidebar must
+      // NOT show "Config invalid".
+      expect(readConfigInvalid(projectDir)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('uses compact sidebar by default', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-'));
     try {

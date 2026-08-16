@@ -648,7 +648,7 @@ describe('onWarning callback', () => {
     expect(config.disabled_tools).toEqual(['not-an-array']);
     expect(config.agents?.oracle?.model).toBe('test/model');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain('should be an array; normalized');
   });
 
@@ -671,7 +671,7 @@ describe('onWarning callback', () => {
     // Non-array, non-string value is dropped; the config still loads
     expect(config.disabled_agents).toBeUndefined();
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain(
       'must be an array; ignoring invalid value',
     );
@@ -695,7 +695,7 @@ describe('onWarning callback', () => {
 
     expect(config.disabled_mcps).toBeUndefined();
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain(
       'must be an array; ignoring invalid value',
     );
@@ -719,7 +719,7 @@ describe('onWarning callback', () => {
 
     expect(config.disabled_skills).toBeUndefined();
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.kind).toBe('invalid-schema');
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain(
       'must be an array; ignoring invalid value',
     );
@@ -764,6 +764,7 @@ describe('disabled_* key normalization', () => {
     expect(config.autoUpdate).toBe(false);
     expect(config.agents?.oracle?.model).toBe('test/model');
     expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain('should be an array; normalized');
   });
 
@@ -813,6 +814,7 @@ describe('disabled_* key normalization', () => {
     expect(config.agents?.oracle?.model).toBe('fast-model');
     expect(config.agents?.oracle?.temperature).toBe(0.9);
     expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
     expect(warnings[0]?.message).toContain('should be an array; normalized');
   });
 
@@ -841,6 +843,7 @@ describe('disabled_* key normalization', () => {
     expect(config.agents?.oracle?.model).toBe('test/model');
     expect(warnings).toHaveLength(2);
     for (const warning of warnings) {
+      expect(warning.kind).toBe('normalized');
       expect(warning.message).toContain(
         'must be an array; ignoring invalid value',
       );
