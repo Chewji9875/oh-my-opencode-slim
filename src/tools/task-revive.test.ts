@@ -14,6 +14,14 @@ function createTool(overrides?: {
   abort?: () => Promise<unknown>;
   status?: () => Promise<unknown>;
   promptAsync?: () => Promise<unknown>;
+  revivedRunTracker?: {
+    captureBaseline: () => Promise<string | undefined>;
+    register: (input: unknown) => void;
+    isTracked: (taskID: string, generation: number) => boolean;
+    probe: (taskID: string, generation: number) => Promise<boolean>;
+    onTerminal: (record: unknown) => void;
+    dispose: () => void;
+  };
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -22,10 +30,12 @@ function createTool(overrides?: {
   );
   const promptAsync = mock(overrides?.promptAsync ?? (async () => ({})));
   mockClient = { session: { abort, status, promptAsync } };
-  const revivedRunTracker = createRevivedRunTracker({
-    input: { directory: '/test/project' } as any,
-    backgroundJobBoard: board,
-  });
+  const revivedRunTracker =
+    overrides?.revivedRunTracker ??
+    createRevivedRunTracker({
+      input: { directory: '/test/project' } as any,
+      backgroundJobBoard: board,
+    });
   const tools = createTaskReviveTool({
     input: { directory: '/test/project' } as any,
     backgroundJobBoard: board,
@@ -96,6 +106,43 @@ describe('task_revive tool', () => {
     const lease = board.acquireRelaunchLease('ses_1', 2);
     expect(lease).toBeDefined();
     if (lease) board.releaseLease(lease);
+  });
+
+  test('reports a fast terminal completion observed by the immediate probe', async () => {
+    let board: BackgroundJobBoard;
+    const tracker = {
+      captureBaseline: async () => undefined,
+      register: () => {},
+      isTracked: () => false,
+      probe: async (_taskID: string, generation: number) => {
+        board.updateStatus({
+          taskID: 'ses_1',
+          expectedGeneration: generation,
+          state: 'completed',
+          resultSummary: 'fast completion',
+        });
+        return true;
+      },
+      onTerminal: () => {},
+      dispose: () => {},
+    };
+    const tools = createTool({ revivedRunTracker: tracker });
+    board = tools.board;
+    acknowledgedCompleted(board);
+
+    const output = await tools.taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'finish quickly' },
+      context,
+    );
+
+    expect(String(output)).toContain('state: completed');
+    expect(String(output)).toContain('status: completed');
+    expect(String(output)).toContain('fast completion');
+    expect(String(output)).not.toContain('state: running');
+    expect(tools.board.get('ses_1')).toMatchObject({
+      generation: 2,
+      state: 'completed',
+    });
   });
 
   test('cancels a running generation and launches its replacement in order', async () => {

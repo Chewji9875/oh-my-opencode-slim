@@ -154,16 +154,33 @@ export function createTaskReviveTool(
           `Task ${requested} revive became stale before launch completed`,
         );
       }
-      return [
-        `task_id: ${latest.taskID}`,
-        `generation: ${latest.generation}`,
-        'state: running',
-        'status: started',
-      ].join('\n');
+      return renderReviveOutput(latest);
     },
   });
 
   return { task_revive };
+}
+
+function renderReviveOutput(
+  record: NonNullable<
+    ReturnType<TaskReviveToolOptions['backgroundJobBoard']['get']>
+  >,
+): string {
+  const state =
+    record.state === 'reconciled'
+      ? (record.terminalState ?? record.state)
+      : record.state;
+  const lines = [
+    `task_id: ${record.taskID}`,
+    `generation: ${record.generation}`,
+    `state: ${state}`,
+    `status: ${state === 'running' ? 'started' : state}`,
+  ];
+  if (record.resultSummary !== undefined) {
+    const tag = state === 'completed' ? 'task_result' : 'task_error';
+    lines.push('', `<${tag}>`, record.resultSummary, `</${tag}>`);
+  }
+  return lines.join('\n');
 }
 
 function getCurrentReviveJob(
