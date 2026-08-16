@@ -19,7 +19,8 @@ export type ConfigLoadWarningKind =
   | 'invalid-schema'
   | 'read-error'
   | 'missing-preset'
-  | 'deprecated-key';
+  | 'deprecated-key'
+  | 'normalized';
 
 /**
  * A warning emitted while loading plugin configuration.
@@ -55,6 +56,61 @@ const INTERVIEW_CONFIG_KEYS = [
   'port',
   'dashboard',
 ] as const;
+
+// Config keys that must be arrays. A string value (e.g. "explorer") is
+// normalized to a single-element array; any other non-array value is
+// dropped. Normalization happens before schema validation so a typo in one
+// key does not silently discard the user's entire config (issue #1027).
+const DISABLED_CONFIG_KEYS = [
+  'disabled_agents',
+  'disabled_tools',
+  'disabled_mcps',
+  'disabled_skills',
+] as const;
+
+/**
+ * Normalize disabled_* config keys in place so a non-array value does not
+ * reject the whole config object during schema validation. A string value
+ * (e.g. "explorer") becomes a single-element array so the user's disable
+ * intent survives; any other non-array value (number, boolean, object, ...)
+ * is dropped. Array and undefined values are left untouched. Each
+ * normalization is reported through `warn` (if provided) with a plain
+ * message; callers wrap it in their own warning channel (loader uses
+ * onWarning + console.warn, doctor just reports the message).
+ *
+ * @param rawConfig - Parsed config to normalize (mutated in place)
+ * @param warn - Optional callback invoked with each warning message
+ */
+export function normalizeDisabledArrayKeys(
+  rawConfig: unknown,
+  warn?: (message: string) => void,
+): void {
+  if (
+    typeof rawConfig !== 'object' ||
+    rawConfig === null ||
+    Array.isArray(rawConfig)
+  ) {
+    return;
+  }
+
+  const configRecord = rawConfig as Record<string, unknown>;
+  for (const key of DISABLED_CONFIG_KEYS) {
+    const value = configRecord[key];
+    if (value === undefined || Array.isArray(value)) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      configRecord[key] = [value];
+      warn?.(
+        `Config key "${key}" should be an array; ` +
+          `normalized to ["${value}"].`,
+      );
+    } else {
+      delete configRecord[key];
+      warn?.(`Config key "${key}" must be an array; ignoring invalid value.`);
+    }
+  }
+}
 
 function retainExplicitInterviewFields(
   parsedConfig: PluginConfig,
@@ -201,6 +257,21 @@ function loadConfigFromPath(
         }
       }
     }
+
+    // Normalize disabled_* config keys before schema validation so a
+    // non-array value does not reject the whole config object (which would
+    // silently discard every other user setting). Reported with the
+    // 'normalized' kind so TUI/doctor do not treat a fixed config as invalid.
+    normalizeDisabledArrayKeys(rawConfig, (message) => {
+      options?.onWarning?.({
+        path: configPath,
+        kind: 'normalized',
+        message,
+      });
+      if (!options?.silent) {
+        console.warn(`[oh-my-opencode-slim] ${message}`);
+      }
+    });
 
     const result = PluginConfigSchema.safeParse(rawConfig);
 
@@ -532,39 +603,6 @@ export function loadPluginConfig(
   // auto+observer-disabled case by returning true, which triggers the
   // debounced toast in index.ts. Overriding to 'direct' here would prevent
   // processImageAttachments from returning true and suppress the toast.
-
-  // Normalize disabled_* config keys to ensure they are arrays or undefined.
-  // This loop is currently unreachable via the normal file-loading path:
-  // PluginConfigSchema.safeParse() rejects the WHOLE config object if any
-  // disabled_* field is non-array (no .catch() on these fields), so
-  // loadConfigFromPath returns null and the file falls back to {} BEFORE this
-  // loop ever runs. Retained only as defense-in-depth against a future schema
-  // relaxation (e.g. adding .catch() to these fields) or a construction path
-  // that bypasses safeParse entirely — not as a proven/tested fix for the
-  // originally reported crash (root cause not reproduced).
-  const ARRAY_CONFIG_KEYS = [
-    'disabled_agents',
-    'disabled_tools',
-    'disabled_mcps',
-    'disabled_skills',
-  ] as const;
-
-  const configPathForWarning = projectConfigPath ?? userConfigPath ?? '';
-  for (const key of ARRAY_CONFIG_KEYS) {
-    const value = config[key as keyof PluginConfig];
-    if (value !== undefined && !Array.isArray(value)) {
-      const message = `Config key "${key}" must be an array; ignoring invalid value.`;
-      options?.onWarning?.({
-        path: configPathForWarning,
-        kind: 'invalid-schema',
-        message,
-      });
-      if (!options?.silent) {
-        console.warn(`[oh-my-opencode-slim] ${message}`);
-      }
-      delete config[key as keyof PluginConfig];
-    }
-  }
 
   return config;
 }
