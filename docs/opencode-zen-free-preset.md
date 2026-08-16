@@ -14,7 +14,7 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
   "presets": {
     "opencode-zen-free": {
       "orchestrator": {
-        "model": "opencode/longcat-2.0-free",
+        "model": "opencode/hy3-free",
         "temperature": 0.4,
         "skills": ["*"],
         "mcps": ["*", "!context7"]
@@ -27,7 +27,7 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
         "mcps": []
       },
       "explorer": {
-        "model": "opencode/north-mini-code-free",
+        "model": "opencode/deepseek-v4-flash-free",
         "temperature": 0.2,
         "skills": [],
         "mcps": []
