@@ -12,9 +12,9 @@ export const STUCK_IDLE_THRESHOLD_MS = 120_000;
  * Bounded, explicit observation of a tracked child's live session status.
  *
  * `ok` is true only when the host status map was read successfully (within
- * the bounded timeout). An absent session in a valid map is `status: 'idle'`;
- * a malformed entry is `status: undefined` with `error`; a failed or
- * timed-out read is `ok: false` with `error`.
+ * the bounded timeout). An absent session in a valid map is unknown;
+ * a malformed entry is also `status: undefined` but carries `error`; a
+ * failed or timed-out read is `ok: false` with `error`.
  */
 export interface LiveStatusObservation {
   ok: boolean;
@@ -42,8 +42,9 @@ export interface NudgeEligibility {
 /**
  * Converts a bounded snapshot into a single-session observation. A failed
  * read becomes `ok: false`; a malformed entry becomes `ok: true` with
- * `status: undefined` and an error; a valid map reports the entry's status
- * (absent means 'idle').
+ * `status: undefined` and an error; a valid map reports the entry's status.
+ * A valid map without the requested session is an unknown/quiescent
+ * observation, not an idle or terminal observation.
  */
 export function observationFromSnapshot(
   snapshot: RuntimeSessionStatusSnapshot,
@@ -140,7 +141,9 @@ export function evaluateNudgeEligibility(
   if (observation.status === undefined) {
     return {
       eligible: false,
-      reason: 'child session status malformed; refusing to nudge',
+      reason: observation.error
+        ? 'child session status malformed; refusing to nudge'
+        : 'child session status unknown; refusing to nudge without confirmed live activity',
     };
   }
   if (observation.status === 'idle') {

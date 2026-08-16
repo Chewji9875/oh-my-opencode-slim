@@ -29,6 +29,15 @@ interface TrackedSession {
   title: string;
   directory: string;
   ownerInstanceId: string;
+  closeState?: PaneCloseState;
+}
+
+interface PaneCloseState {
+  reason: CloseReason;
+  phase: 'closing' | 'retrying' | 'exhausted';
+  attempts: number;
+  nextAttemptAt: number;
+  lastError?: string;
 }
 
 interface KnownSession {
@@ -165,8 +174,12 @@ export class MultiplexerSessionManager {
   private enabled = false;
   private cmuxLifecycle?: CmuxSessionLifecycle;
   private readonly readiness: SessionReadinessOptions;
-  /** Abort handle for the in-flight readiness wait; cleanup/disposal abort it. */
+  private readonly now: () => number;
+  private readonly closeRetryMs: number;
+  private readonly closeRetryMaxAttempts: number;
+  private readonly shutdownTimeoutMs: number;
   private readinessAbort?: AbortController;
+  private cleanupInProgress = false;
   /**
    * Sessions that signaled `busy` while a spawn/readiness pass was in flight
    * (the busy handler defers to the pending pass). Consumed after the pass:
@@ -188,6 +201,16 @@ export class MultiplexerSessionManager {
     this.closingSessions = sharedState.closingSessions;
     this.permanentlyClosedSessions = sharedState.permanentlyClosedSessions;
     this.readiness = options;
+    this.now = options.now ?? Date.now;
+    this.closeRetryMs = Number.isFinite(options.closeRetryMs)
+      ? Math.max(0, options.closeRetryMs ?? 1_000)
+      : 1_000;
+    this.closeRetryMaxAttempts = Number.isFinite(options.closeRetryMaxAttempts)
+      ? Math.max(1, Math.floor(options.closeRetryMaxAttempts ?? 4))
+      : 4;
+    this.shutdownTimeoutMs = Number.isFinite(options.shutdownTimeoutMs)
+      ? Math.max(0, options.shutdownTimeoutMs ?? 5_000)
+      : 5_000;
 
     this.directory = ctx.directory;
     this.resolveServerUrl = createServerUrlResolver(ctx);
@@ -233,11 +256,7 @@ export class MultiplexerSessionManager {
     return { ...this.readiness, signal: controller.signal };
   }
 
-  /**
-   * Abort any in-flight readiness wait so cleanup/disposal can never be
-   * stalled by a hanging probe. The aborted wait resolves false and the
-   * pending spawn is fenced off.
-   */
+  /** Abort an in-flight readiness wait during cleanup or disposal. */
   private abortInFlightReadiness(): void {
     this.readinessAbort?.abort();
     this.readinessAbort = undefined;
@@ -249,9 +268,7 @@ export class MultiplexerSessionManager {
     if (event.type !== 'session.created') return;
 
     const info = event.properties?.info;
-    if (!info?.id || !info?.parentID) {
-      return;
-    }
+    if (!info?.id || !info?.parentID) return;
 
     const sessionId = info.id;
     const parentId = info.parentID;
@@ -293,10 +310,7 @@ export class MultiplexerSessionManager {
       if (!serverUrl) {
         log(
           '[multiplexer-session-manager] no valid server URL, skipping spawn',
-          {
-            instanceId: this.instanceId,
-            sessionId,
-          },
+          { instanceId: this.instanceId, sessionId },
         );
         return;
       }
@@ -309,9 +323,7 @@ export class MultiplexerSessionManager {
         return;
       }
 
-      // Attach-before-ready race: wait for the child session to appear on the
-      // status endpoint before launching `opencode attach`; otherwise the
-      // attach TUI falls back to the new-session picker.
+      // Attach only after the child session is visible to the server.
       const readinessOptions = this.readinessOptions();
       const sessionReady = await waitForSessionReady(
         serverUrl,
@@ -321,11 +333,7 @@ export class MultiplexerSessionManager {
       if (!sessionReady || readinessOptions.signal?.aborted) {
         log(
           '[multiplexer-session-manager] child session not ready, skipping spawn',
-          {
-            instanceId: this.instanceId,
-            sessionId,
-            parentId,
-          },
+          { instanceId: this.instanceId, sessionId, parentId },
         );
         return;
       }
@@ -334,19 +342,8 @@ export class MultiplexerSessionManager {
         this.permanentlyClosedSessions.has(sessionId) ||
         this.closingSessions.has(sessionId) ||
         this.sessions.has(sessionId)
-      ) {
+      )
         return;
-      }
-
-      log(
-        '[multiplexer-session-manager] child session created, spawning pane',
-        {
-          sessionId,
-          parentId,
-          title,
-          instanceId: this.instanceId,
-        },
-      );
 
       const paneResult = await this.multiplexer
         .spawnPane(sessionId, title, serverUrl, directory)
@@ -365,16 +362,12 @@ export class MultiplexerSessionManager {
         this.closingSessions.has(sessionId) ||
         this.permanentlyClosedSessions.has(sessionId)
       ) {
-        await this.multiplexer.closePane(paneResult.paneId).catch((err) =>
-          log(
-            '[multiplexer-session-manager] closing stale spawned pane failed',
-            {
-              sessionId,
-              paneId: paneResult.paneId,
-              instanceId: this.instanceId,
-              error: String(err),
-            },
-          ),
+        await this.trackAndCloseStalePane(
+          sessionId,
+          paneResult.paneId,
+          parentId,
+          title,
+          directory,
         );
         return;
       }
@@ -410,10 +403,18 @@ export class MultiplexerSessionManager {
     if (this.cmuxLifecycle) return this.cmuxLifecycle.onSessionStatus(event);
     if (!this.enabled) return;
 
-    if (event.type === 'session.idle') {
-      const sessionId = event.properties?.sessionID;
-      if (!sessionId) return;
+    const sessionId = this.getSessionId(event);
+    if (!sessionId) return;
 
+    const statusType =
+      event.type === 'session.idle'
+        ? 'idle'
+        : event.type === 'session.status'
+          ? event.properties?.status?.type
+          : undefined;
+    if (!statusType) return;
+
+    if (statusType === 'idle') {
       log('[multiplexer-session-manager] session idle event received', {
         instanceId: this.instanceId,
         sessionId,
@@ -422,47 +423,25 @@ export class MultiplexerSessionManager {
         ownerInstanceId: this.sessions.get(sessionId)?.ownerInstanceId,
         backgroundJobState: this.backgroundJobState(sessionId),
       });
-
       await this.closeSession(sessionId, 'idle');
       return;
     }
 
-    if (event.type !== 'session.status') return;
-
-    const sessionId = event.properties?.sessionID;
-    if (!sessionId) return;
-
-    const statusType = event.properties?.status?.type;
-
-    if (statusType === 'idle') {
-      log('[multiplexer-session-manager] session status idle received', {
-        instanceId: this.instanceId,
-        sessionId,
-        tracked: this.sessions.has(sessionId),
-        known: this.knownSessions.has(sessionId),
-        ownerInstanceId: this.sessions.get(sessionId)?.ownerInstanceId,
-        backgroundJobState: this.backgroundJobState(sessionId),
-      });
-      await this.closeSession(sessionId, 'idle');
+    if (statusType !== 'busy') {
+      this.backgroundJobBoard?.clearDeferredClose(sessionId);
+      this.cancelFailedIdleClose(sessionId);
       return;
     }
 
-    if (statusType) {
-      if (statusType !== 'busy') {
-        this.backgroundJobBoard?.clearDeferredClose(sessionId);
-        return;
-      }
-
-      log('[multiplexer-session-manager] session busy event received', {
-        instanceId: this.instanceId,
-        sessionId,
-        tracked: this.sessions.has(sessionId),
-        known: this.knownSessions.has(sessionId),
-        ownerInstanceId: this.sessions.get(sessionId)?.ownerInstanceId,
-        backgroundJobState: this.backgroundJobState(sessionId),
-      });
-      await this.respawnIfKnown(sessionId);
-    }
+    log('[multiplexer-session-manager] session busy event received', {
+      instanceId: this.instanceId,
+      sessionId,
+      tracked: this.sessions.has(sessionId),
+      known: this.knownSessions.has(sessionId),
+      ownerInstanceId: this.sessions.get(sessionId)?.ownerInstanceId,
+      backgroundJobState: this.backgroundJobState(sessionId),
+    });
+    await this.respawnIfKnown(sessionId);
   }
 
   async onSessionDeleted(event: SessionEvent): Promise<void> {
@@ -486,8 +465,7 @@ export class MultiplexerSessionManager {
   }
 
   private startPolling(): void {
-    if (this.pollInterval) return;
-
+    if (this.pollInterval || this.cleanupInProgress) return;
     this.pollInterval = setInterval(
       () => this.pollSessions(),
       POLL_INTERVAL_BACKGROUND_MS,
@@ -509,43 +487,100 @@ export class MultiplexerSessionManager {
 
   private async pollSessions(): Promise<void> {
     if (this.cmuxLifecycle) return this.cmuxLifecycle.pollOnce();
-    if (this.sessions.size === 0) {
+
+    const ownedSessions = () =>
+      [...this.sessions.entries()].filter(([, tracked]) =>
+        this.isPollableSession(tracked),
+      );
+    if (ownedSessions().length === 0) {
       this.stopPolling();
       return;
     }
 
+    let allStatuses: Record<string, { type: string }> | undefined;
     try {
-      const allStatuses = await this.fetchSessionStatuses();
+      allStatuses = await this.fetchSessionStatuses();
+    } catch (err) {
+      log('[multiplexer-session-manager] poll error', { error: String(err) });
+    }
 
-      const sessionsToClose: string[] = [];
+    await this.retryDueCloses(allStatuses);
+    if (ownedSessions().length === 0) {
+      this.stopPolling();
+      return;
+    }
+    if (!allStatuses) return;
 
-      for (const [sessionId, tracked] of this.sessions.entries()) {
+    const sessionsToClose: string[] = [];
+    for (const [sessionId, tracked] of ownedSessions()) {
+      if (tracked.closeState) continue;
+
+      const status = allStatuses[sessionId];
+      if (!status) {
+        // An absent map entry is only diagnostic; it is not deletion evidence.
+        log('[multiplexer-session-manager] status absent; retaining pane', {
+          instanceId: this.instanceId,
+          ownerInstanceId: tracked.ownerInstanceId,
+          sessionId,
+          paneId: tracked.paneId,
+          backgroundJobState: this.backgroundJobState(sessionId),
+        });
+        continue;
+      }
+
+      if (status.type !== 'idle') {
+        this.backgroundJobBoard?.clearDeferredClose(sessionId);
+        continue;
+      }
+
+      sessionsToClose.push(sessionId);
+    }
+
+    for (const sessionId of sessionsToClose)
+      await this.closeSession(sessionId, 'idle');
+  }
+
+  private async retryDueCloses(
+    allStatuses?: Record<string, { type: string }>,
+  ): Promise<void> {
+    const now = this.now();
+    const retryIds = [...this.sessions.entries()]
+      .filter(([sessionId, tracked]) => {
         if (tracked.ownerInstanceId !== this.instanceId) {
-          log('[multiplexer-session-manager] skipping non-owner poll close', {
+          log('[multiplexer-session-manager] skipping non-owner close retry', {
             instanceId: this.instanceId,
             ownerInstanceId: tracked.ownerInstanceId,
             sessionId,
             paneId: tracked.paneId,
           });
-          continue;
+          return false;
         }
-
-        const status = allStatuses[sessionId];
-        if (!status) continue;
-
-        if (status.type !== 'idle') {
-          this.backgroundJobBoard?.clearDeferredClose(sessionId);
-          continue;
+        const close = tracked.closeState;
+        if (close?.phase !== 'retrying') return false;
+        if (close.nextAttemptAt > now) return false;
+        if (
+          close.reason === 'idle' &&
+          allStatuses?.[sessionId] &&
+          allStatuses[sessionId].type !== 'idle'
+        ) {
+          tracked.closeState = undefined;
+          log(
+            '[multiplexer-session-manager] cancelled idle close after busy poll',
+            {
+              instanceId: this.instanceId,
+              sessionId,
+              paneId: tracked.paneId,
+            },
+          );
+          return false;
         }
+        return true;
+      })
+      .map(([sessionId]) => sessionId);
 
-        sessionsToClose.push(sessionId);
-      }
-
-      for (const sessionId of sessionsToClose) {
-        await this.closeSession(sessionId, 'idle');
-      }
-    } catch (err) {
-      log('[multiplexer-session-manager] poll error', { error: String(err) });
+    for (const sessionId of retryIds) {
+      const reason = this.sessions.get(sessionId)?.closeState?.reason;
+      if (reason) await this.closeSession(sessionId, reason, true);
     }
   }
 
@@ -562,22 +597,45 @@ export class MultiplexerSessionManager {
     const url = new URL('/session/status', serverUrl);
     const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
 
-    if (!response.ok) {
+    if (!response.ok)
       throw new Error(
         `session status request failed: ${response.status} ${response.statusText}`,
       );
-    }
 
     const body = await response.text();
-    if (body.trim() === '') {
+    if (body.trim() === '')
       throw new Error('session status response was empty');
-    }
 
     try {
       return JSON.parse(body) as Record<string, { type: string }>;
     } catch (err) {
       throw new Error(`session status response was not valid JSON: ${err}`);
     }
+  }
+
+  private async trackAndCloseStalePane(
+    sessionId: string,
+    paneId: string,
+    parentId: string,
+    title: string,
+    directory: string,
+  ): Promise<void> {
+    const trackingId = `${sessionId}\0stale\0${paneId}`;
+    this.sessions.set(trackingId, {
+      sessionId: trackingId,
+      paneId,
+      parentId,
+      title,
+      directory,
+      ownerInstanceId: this.instanceId,
+    });
+    log('[multiplexer-session-manager] tracking stale spawned pane', {
+      instanceId: this.instanceId,
+      sessionId,
+      trackingId,
+      paneId,
+    });
+    await this.closeSession(trackingId, 'deleted', true);
   }
 
   private async closeSession(
@@ -589,9 +647,6 @@ export class MultiplexerSessionManager {
       this.knownSessions.delete(sessionId);
       this.backgroundJobBoard?.clearDeferredClose(sessionId);
     }
-
-    const existingClose = this.closingSessions.get(sessionId);
-    if (existingClose) return existingClose;
 
     const tracked = this.sessions.get(sessionId);
     if (!tracked || !this.multiplexer) {
@@ -605,7 +660,10 @@ export class MultiplexerSessionManager {
       return;
     }
 
-    if (reason !== 'deleted' && tracked.ownerInstanceId !== this.instanceId) {
+    // A session.deleted event is global deletion evidence and keeps the
+    // existing behavior of closing the known pane. Idle/retry work is owner
+    // scoped so another manager cannot close a shared record.
+    if (reason === 'idle' && tracked.ownerInstanceId !== this.instanceId) {
       log('[multiplexer-session-manager] close skipped; non-owner instance', {
         instanceId: this.instanceId,
         ownerInstanceId: tracked.ownerInstanceId,
@@ -615,14 +673,12 @@ export class MultiplexerSessionManager {
       });
       return;
     }
-    if (reason === 'deleted' && tracked.ownerInstanceId !== this.instanceId) {
-      log('[multiplexer-session-manager] closing deleted pane as non-owner', {
-        instanceId: this.instanceId,
-        ownerInstanceId: tracked.ownerInstanceId,
-        sessionId,
-        paneId: tracked.paneId,
-        reason,
-      });
+
+    const existingClose = this.closingSessions.get(sessionId);
+    if (existingClose) {
+      if (reason === 'deleted' && tracked.closeState)
+        tracked.closeState.reason = 'deleted';
+      return existingClose;
     }
 
     if (
@@ -643,52 +699,200 @@ export class MultiplexerSessionManager {
       return;
     }
 
-    this.sessions.delete(sessionId);
+    const closeState = this.getOrCreateCloseState(tracked, reason);
+    if (closeState.phase === 'exhausted') {
+      log('[multiplexer-session-manager] close retry budget exhausted', {
+        instanceId: this.instanceId,
+        sessionId,
+        paneId: tracked.paneId,
+        reason: closeState.reason,
+        attempts: closeState.attempts,
+        lastError: closeState.lastError,
+      });
+      return;
+    }
+    if (closeState.nextAttemptAt > this.now()) return;
 
+    closeState.phase = 'closing';
+    closeState.attempts += 1;
+    const paneId = tracked.paneId;
     log('[multiplexer-session-manager] closing session pane', {
       instanceId: this.instanceId,
       sessionId,
-      paneId: tracked.paneId,
-      reason,
+      paneId,
+      reason: closeState.reason,
+      attempt: closeState.attempts,
       backgroundJobState: this.backgroundJobState(sessionId),
       parentId: tracked.parentId,
       title: tracked.title,
     });
 
-    const closePromise: Promise<void> = this.multiplexer
-      .closePane(tracked.paneId)
-      .then(() => undefined)
-      .catch((err) =>
-        log('[multiplexer-session-manager] failed to close session pane', {
-          instanceId: this.instanceId,
-          sessionId,
-          paneId: tracked.paneId,
-          reason,
-          error: String(err),
-        }),
-      )
-      .finally(() => {
-        this.closingSessions.delete(sessionId);
-        this.updatePolling();
-      });
-
+    const closePromise = this.performClose(
+      sessionId,
+      tracked,
+      paneId,
+      closeState,
+      this.multiplexer,
+    ).finally(() => {
+      if (this.closingSessions.get(sessionId) !== closePromise) return;
+      this.closingSessions.delete(sessionId);
+      this.updatePolling();
+    });
     this.closingSessions.set(sessionId, closePromise);
     await closePromise;
+  }
+
+  private async performClose(
+    sessionId: string,
+    tracked: TrackedSession,
+    paneId: string,
+    closeState: PaneCloseState,
+    multiplexer: Multiplexer,
+  ): Promise<void> {
+    let closed = false;
+    let error: string | undefined;
+    try {
+      // Await the adapter operation. A later retry cannot reuse this pane ID
+      // until this promise has settled.
+      closed = await multiplexer.closePane(paneId);
+    } catch (err) {
+      error = String(err);
+    }
+
+    const current = this.sessions.get(sessionId);
+    const deletionClose = closeState.reason === 'deleted';
+    if (
+      !current ||
+      current !== tracked ||
+      current.paneId !== paneId ||
+      (current.ownerInstanceId !== this.instanceId && !deletionClose)
+    ) {
+      log('[multiplexer-session-manager] ignoring stale pane close result', {
+        instanceId: this.instanceId,
+        sessionId,
+        paneId,
+        closed,
+        error,
+      });
+      return;
+    }
+
+    if (closed) {
+      current.closeState = undefined;
+      this.sessions.delete(sessionId);
+      log('[multiplexer-session-manager] session pane close confirmed', {
+        instanceId: this.instanceId,
+        sessionId,
+        paneId,
+        attempt: closeState.attempts,
+      });
+      return;
+    }
+
+    closeState.lastError = error ?? 'closePane returned false';
+    if (closeState.attempts >= this.closeRetryMaxAttempts) {
+      closeState.phase = 'exhausted';
+      closeState.nextAttemptAt = Number.POSITIVE_INFINITY;
+    } else {
+      closeState.phase = 'retrying';
+      closeState.nextAttemptAt = this.now() + this.closeRetryMs;
+    }
+    log(
+      '[multiplexer-session-manager] failed to close session pane; retained',
+      {
+        instanceId: this.instanceId,
+        sessionId,
+        paneId,
+        reason: closeState.reason,
+        attempt: closeState.attempts,
+        phase: closeState.phase,
+        nextAttemptAt: closeState.nextAttemptAt,
+        error: closeState.lastError,
+      },
+    );
+  }
+
+  private getOrCreateCloseState(
+    tracked: TrackedSession,
+    reason: CloseReason,
+  ): PaneCloseState {
+    const existing = tracked.closeState;
+    if (!existing) {
+      const state: PaneCloseState = {
+        reason,
+        phase: 'retrying',
+        attempts: 0,
+        nextAttemptAt: this.now(),
+      };
+      tracked.closeState = state;
+      return state;
+    }
+
+    if (reason === 'deleted' && existing.reason !== 'deleted') {
+      existing.reason = 'deleted';
+      if (existing.phase !== 'closing') {
+        existing.phase = 'retrying';
+        existing.attempts = 0;
+        existing.nextAttemptAt = this.now();
+        existing.lastError = undefined;
+      }
+    }
+    return existing;
+  }
+
+  private cancelFailedIdleClose(sessionId: string): void {
+    const tracked = this.sessions.get(sessionId);
+    if (
+      tracked?.ownerInstanceId === this.instanceId &&
+      tracked.closeState?.reason === 'idle' &&
+      !this.closingSessions.has(sessionId)
+    ) {
+      tracked.closeState = undefined;
+      this.updatePolling();
+    }
   }
 
   private async respawnIfKnown(sessionId: string): Promise<void> {
     if (!this.enabled || !this.multiplexer) return;
     if (this.permanentlyClosedSessions.has(sessionId)) return;
+
+    const trackedBeforeClose = this.sessions.get(sessionId);
+    if (
+      trackedBeforeClose &&
+      trackedBeforeClose.ownerInstanceId !== this.instanceId
+    ) {
+      log('[multiplexer-session-manager] respawn skipped; non-owner instance', {
+        instanceId: this.instanceId,
+        ownerInstanceId: trackedBeforeClose.ownerInstanceId,
+        sessionId,
+        paneId: trackedBeforeClose.paneId,
+      });
+      return;
+    }
+
     const closing = this.closingSessions.get(sessionId);
     if (closing) await closing;
 
     if (this.permanentlyClosedSessions.has(sessionId)) return;
-    if (this.isTrackedOrSpawning(sessionId)) {
-      // A busy signal while a spawn is in flight: remember it so the pending
-      // pass can recover if it fails to attach a pane.
-      if (this.spawningSessions.has(sessionId)) {
-        this.busyDuringSpawn.add(sessionId);
+    const tracked = this.sessions.get(sessionId);
+    if (tracked) {
+      if (tracked.closeState?.reason === 'idle') {
+        // A failed idle close leaves the pane attached; busy activity can use
+        // it without spawning a second pane.
+        tracked.closeState = undefined;
+        this.updatePolling();
+        log('[multiplexer-session-manager] retained pane after close failure', {
+          instanceId: this.instanceId,
+          sessionId,
+          paneId: tracked.paneId,
+        });
       }
+      return;
+    }
+
+    if (this.isTrackedOrSpawning(sessionId)) {
+      if (this.spawningSessions.has(sessionId))
+        this.busyDuringSpawn.add(sessionId);
       return;
     }
 
@@ -696,16 +900,12 @@ export class MultiplexerSessionManager {
     if (!known) return;
 
     this.spawningSessions.add(sessionId);
-
     try {
       const serverUrl = this.resolveServerUrl();
       if (!serverUrl) {
         log(
           '[multiplexer-session-manager] no valid server URL, skipping respawn',
-          {
-            instanceId: this.instanceId,
-            sessionId,
-          },
+          { instanceId: this.instanceId, sessionId },
         );
         return;
       }
@@ -713,17 +913,11 @@ export class MultiplexerSessionManager {
       if (!serverRunning) {
         log(
           '[multiplexer-session-manager] server not running, skipping busy respawn',
-          {
-            instanceId: this.instanceId,
-            serverUrl,
-            sessionId,
-          },
+          { instanceId: this.instanceId, serverUrl, sessionId },
         );
         return;
       }
 
-      // Same attach-before-ready guard as the initial spawn: only respawn once
-      // the session is visible on the status endpoint.
       const readinessOptions = this.readinessOptions();
       const sessionReady = await waitForSessionReady(
         serverUrl,
@@ -733,11 +927,7 @@ export class MultiplexerSessionManager {
       if (!sessionReady || readinessOptions.signal?.aborted) {
         log(
           '[multiplexer-session-manager] child session not ready, skipping respawn',
-          {
-            instanceId: this.instanceId,
-            sessionId,
-            parentId: known.parentId,
-          },
+          { instanceId: this.instanceId, sessionId, parentId: known.parentId },
         );
         return;
       }
@@ -746,19 +936,8 @@ export class MultiplexerSessionManager {
         this.permanentlyClosedSessions.has(sessionId) ||
         this.sessions.has(sessionId) ||
         this.closingSessions.has(sessionId)
-      ) {
+      )
         return;
-      }
-
-      log(
-        '[multiplexer-session-manager] child session busy again, respawning pane',
-        {
-          instanceId: this.instanceId,
-          sessionId,
-          parentId: known.parentId,
-          title: known.title,
-        },
-      );
 
       const paneResult = await this.multiplexer
         .spawnPane(sessionId, known.title, serverUrl, known.directory)
@@ -777,16 +956,12 @@ export class MultiplexerSessionManager {
         this.closingSessions.has(sessionId) ||
         this.permanentlyClosedSessions.has(sessionId)
       ) {
-        await this.multiplexer.closePane(paneResult.paneId).catch((err) =>
-          log(
-            '[multiplexer-session-manager] closing stale respawned pane failed',
-            {
-              instanceId: this.instanceId,
-              sessionId,
-              paneId: paneResult.paneId,
-              error: String(err),
-            },
-          ),
+        await this.trackAndCloseStalePane(
+          sessionId,
+          paneResult.paneId,
+          known.parentId,
+          known.title,
+          known.directory,
         );
         return;
       }
@@ -813,9 +988,8 @@ export class MultiplexerSessionManager {
       if (
         this.busyDuringSpawn.delete(sessionId) &&
         !this.sessions.has(sessionId)
-      ) {
+      )
         await this.respawnIfKnown(sessionId);
-      }
     }
   }
 
@@ -824,11 +998,21 @@ export class MultiplexerSessionManager {
   }
 
   private updatePolling(): void {
-    if (this.sessions.size > 0 || this.closingSessions.size > 0) {
+    if (
+      [...this.sessions.values()].some((tracked) =>
+        this.isPollableSession(tracked),
+      )
+    )
       this.startPolling();
-    } else {
-      this.stopPolling();
-    }
+    else this.stopPolling();
+  }
+
+  private isPollableSession(tracked: TrackedSession): boolean {
+    return (
+      tracked.ownerInstanceId === this.instanceId &&
+      !this.closingSessions.has(tracked.sessionId) &&
+      tracked.closeState?.phase !== 'exhausted'
+    );
   }
 
   private getSessionId(event: SessionEvent): string | undefined {
@@ -849,9 +1033,7 @@ export class MultiplexerSessionManager {
     if (this.cmuxLifecycle)
       return this.cmuxLifecycle.closeSessionFromCoordinator(sessionId);
     if (!this.enabled) return;
-    // Coordinator already vetted lifecycle policy; skip re-check
-    // ponytail: theoretical race if new job starts between coordinator's
-    // retryDeferredClose() and this call, but session IDs are unique per launch
+    // The coordinator already checked lifecycle policy; skip the second check.
     await this.closeSession(sessionId, 'idle', true);
   }
 
@@ -875,40 +1057,63 @@ export class MultiplexerSessionManager {
       this.permanentlyClosedSessions.clear();
       return;
     }
-    // Fence: abort an in-flight readiness wait so cleanup is not stalled by
-    // a hanging probe; the aborted wait resolves false and skips the spawn.
+
+    this.cleanupInProgress = true;
     this.abortInFlightReadiness();
     this.stopPolling();
+    const deadlineAt = Date.now() + this.shutdownTimeoutMs;
 
-    if (this.closingSessions.size > 0) {
-      await Promise.all(this.closingSessions.values());
-    }
-
-    if (this.sessions.size > 0 && this.multiplexer) {
-      log('[multiplexer-session-manager] closing all panes', {
-        count: this.sessions.size,
+    try {
+      const ownedSessionIds = [...this.sessions.entries()]
+        .filter(([, tracked]) => tracked.ownerInstanceId === this.instanceId)
+        .map(([sessionId]) => sessionId);
+      const closeWork = ownedSessionIds.map((sessionId) => {
+        const existing = this.closingSessions.get(sessionId);
+        return existing ?? this.closeSession(sessionId, 'deleted', true);
       });
-      const multiplexer = this.multiplexer;
-      const closePromises = Array.from(this.sessions.values()).map((s) =>
-        multiplexer.closePane(s.paneId).catch((err) =>
-          log('[multiplexer-session-manager] cleanup error for pane', {
-            paneId: s.paneId,
-            error: String(err),
-          }),
-        ),
-      );
-      await Promise.all(closePromises);
-      this.sessions.clear();
-    }
+      await this.waitForSettlements(closeWork, deadlineAt);
 
-    this.knownSessions.clear();
-    this.spawningSessions.clear();
-    this.closingSessions.clear();
-    this.permanentlyClosedSessions.clear();
-    // ponytail: deferred state lives in coordinator, not here
-    // Note: coordinator has same lifetime as plugin, so no explicit cleanup needed
+      this.knownSessions.clear();
+      this.spawningSessions.clear();
+      this.permanentlyClosedSessions.clear();
+      this.busyDuringSpawn.clear();
+    } finally {
+      this.cleanupInProgress = false;
+      // A failed close remains in `sessions` with a retry record. Re-enable
+      // the shared polling executor after cleanup has stopped blocking it.
+      this.updatePolling();
+    }
 
     log('[multiplexer-session-manager] cleanup complete');
+  }
+
+  private async waitForSettlements(
+    pending: Promise<unknown>[],
+    deadlineAt: number,
+  ): Promise<boolean> {
+    if (pending.length === 0) return true;
+    const settled = Promise.allSettled(pending).then(() => true);
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      void settled;
+      return false;
+    }
+    return new Promise<boolean>((resolve) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (completed: boolean) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        resolve(completed);
+      };
+      timer = setTimeout(() => finish(false), remaining);
+      timer.unref?.();
+      void settled.then(
+        () => finish(true),
+        () => finish(true),
+      );
+    });
   }
 
   async cleanupOnInstanceDisposed(): Promise<void> {

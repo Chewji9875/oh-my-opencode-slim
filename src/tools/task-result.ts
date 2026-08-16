@@ -5,12 +5,16 @@ import {
 } from '@opencode-ai/plugin';
 import type { BackgroundJobRecord } from '../utils/background-job-board';
 import type { BackgroundJobStore } from '../utils/background-job-store';
-import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import {
   extractFinalSessionResult,
   SESSION_ID_PATTERN,
 } from '../utils/session';
+import {
+  getRuntimeSessionStatusSnapshot,
+  type RuntimeSessionStatusSnapshot,
+  runtimeSessionStatus,
+} from '../utils/session-runtime-status';
 
 const z = tool.schema;
 
@@ -54,6 +58,29 @@ function assertRetrievableState(
   }
 }
 
+function assertStableTrackedGeneration(
+  requested: string,
+  parentSessionID: string,
+  expectedTaskID: string,
+  expectedGeneration: number,
+  backgroundJobBoard: BackgroundJobStore,
+): BackgroundJobRecord {
+  const current = backgroundJobBoard.resolve(parentSessionID, requested);
+  if (
+    !current ||
+    current.taskID !== expectedTaskID ||
+    current.generation !== expectedGeneration
+  ) {
+    if (current) assertRetrievableState(requested, current);
+    throw new Error(
+      `Task ${requested} changed generation while its result was being retrieved; wait for its current terminal result instead of retrieving it.`,
+    );
+  }
+
+  assertRetrievableState(requested, current);
+  return current;
+}
+
 export function createTaskResultTool(
   options: TaskResultToolOptions,
 ): Record<string, ToolDefinition> {
@@ -72,13 +99,48 @@ Use this when the user asks to see a prior task's full result, or before retryin
       const requested = args.task_id.trim();
       if (!requested) throw new Error('task_result requires task_id');
 
-      const tracked = options.backgroundJobBoard.resolve(
+      let tracked = options.backgroundJobBoard.resolve(
         parentSessionID,
         requested,
       );
-      if (tracked) {
-        assertRetrievableState(requested, tracked);
+      const trackedTaskID = tracked?.taskID;
+      const trackedGeneration = tracked?.generation;
+
+      const revalidateTracked = (): void => {
+        if (trackedTaskID === undefined || trackedGeneration === undefined) {
+          return;
+        }
+        tracked = assertStableTrackedGeneration(
+          requested,
+          parentSessionID,
+          trackedTaskID,
+          trackedGeneration,
+          options.backgroundJobBoard,
+        );
+      };
+
+      // A stopped board record is only a provisional observation. Re-check the
+      // live runner once, with the same bounded status path used elsewhere,
+      // before rejecting it. A busy/retry observation self-heals that record
+      // and prevents a stale stopped gate from hiding a still-live task.
+      let liveSnapshot: RuntimeSessionStatusSnapshot | undefined;
+      if (tracked?.state === 'stopped') {
+        liveSnapshot = await getRuntimeSessionStatusSnapshot(options.input);
+        const liveStatus = runtimeSessionStatus(liveSnapshot, tracked.taskID);
+        if (liveStatus === 'busy' || liveStatus === 'retry') {
+          options.backgroundJobBoard.markRunningFromLiveSession(
+            tracked.taskID,
+            Date.now(),
+            tracked.generation,
+          );
+          tracked = options.backgroundJobBoard.resolve(
+            parentSessionID,
+            requested,
+          );
+        }
       }
+
+      revalidateTracked();
 
       const taskID = tracked?.taskID ?? requested;
       if (!SESSION_ID_PATTERN.test(taskID)) {
@@ -104,14 +166,18 @@ Use this when the user asks to see a prior task's full result, or before retryin
         );
       }
 
-      const statuses = await client.session.status({
-        query: { directory: options.input.directory },
-      });
-      const statusMap = statuses.data;
-      const status = isRecord(statusMap) ? statusMap[taskID] : undefined;
+      revalidateTracked();
+      liveSnapshot ??= await getRuntimeSessionStatusSnapshot(options.input);
+      revalidateTracked();
+      const status = runtimeSessionStatus(liveSnapshot, taskID);
+      const trackedTerminalState = tracked
+        ? tracked.state === 'reconciled'
+          ? tracked.terminalState
+          : tracked.state
+        : undefined;
       if (
-        isRecord(status) &&
-        (status.type === 'busy' || status.type === 'retry')
+        (status === 'busy' || status === 'retry') &&
+        trackedTerminalState !== 'completed'
       ) {
         throw new Error(
           `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
@@ -127,10 +193,12 @@ Use this when the user asks to see a prior task's full result, or before retryin
         return result;
       }
 
+      revalidateTracked();
       const result = await extractFinalSessionResult(client, taskID, {
         directory: options.input.directory,
         includeReasoning: false,
       });
+      revalidateTracked();
       if (result.empty) {
         throw new Error(`Task ${requested} has no completed text result`);
       }

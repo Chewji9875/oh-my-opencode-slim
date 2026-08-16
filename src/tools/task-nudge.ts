@@ -66,13 +66,20 @@ export function createTaskNudgeTool(options: {
         const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
           timeoutMs: options.statusTimeoutMs,
         });
+        const currentJob = getCurrentNudgeJob(
+          options.backgroundJobBoard,
+          parentSessionID,
+          args.task_id.trim(),
+          job.taskID,
+          job.generation,
+        );
         const observation = observationFromSnapshot(snapshot, job.taskID);
         const lastActivityAt =
           options.activityTracker?.lastActivityAt(job.taskID) ??
-          job.lastLiveBusyAt ??
-          job.runStartedAt;
+          currentJob.lastLiveBusyAt ??
+          currentJob.runStartedAt;
         const eligibility = evaluateNudgeEligibility(
-          job,
+          currentJob,
           observation,
           lastActivityAt,
           at,
@@ -83,8 +90,22 @@ export function createTaskNudgeTool(options: {
           );
         }
 
-        await getClient(options.input).session.prompt({
-          path: { id: job.taskID },
+        // Resolve the transport before the final fence so no property access
+        // or client lookup remains between that fence and prompt invocation.
+        // OpenCode's prompt API has no expected-generation/CAS argument: a
+        // relaunch that races after this synchronous boundary is outside what
+        // this lane can prove, and is intentionally not described as atomic.
+        const session = getClient(options.input).session;
+        const prompt = session.prompt.bind(session);
+        const promptJob = getCurrentNudgeJob(
+          options.backgroundJobBoard,
+          parentSessionID,
+          args.task_id.trim(),
+          job.taskID,
+          job.generation,
+        );
+        await prompt({
+          path: { id: promptJob.taskID },
           body: {
             noReply: true,
             parts: [{ type: 'text', text: args.message.trim() }],
@@ -100,4 +121,40 @@ export function createTaskNudgeTool(options: {
     },
   });
   return { task_nudge };
+}
+
+function getCurrentNudgeJob(
+  backgroundJobBoard: BackgroundJobStore,
+  parentSessionID: string,
+  requested: string,
+  expectedTaskID: string,
+  expectedGeneration: number,
+): NonNullable<ReturnType<BackgroundJobStore['get']>> {
+  const current = backgroundJobBoard.get(expectedTaskID);
+  const resolved = backgroundJobBoard.resolve(parentSessionID, requested);
+  if (!current || !resolved || resolved.taskID !== expectedTaskID) {
+    throw new Error(
+      `Task ${requested} is no longer tracked; refusing to nudge stale execution`,
+    );
+  }
+  if (
+    current.taskID !== expectedTaskID ||
+    current.generation !== expectedGeneration ||
+    resolved.generation !== expectedGeneration
+  ) {
+    throw new Error(
+      `Task ${requested} run generation changed; refusing to nudge stale execution`,
+    );
+  }
+  if (current.state !== 'running') {
+    throw new Error(
+      `Task ${requested} cannot be nudged: board state is ${current.state}, not running`,
+    );
+  }
+  if (current.cancellationRequested) {
+    throw new Error(
+      `Task ${requested} cannot be nudged: cancellation was requested`,
+    );
+  }
+  return current;
 }

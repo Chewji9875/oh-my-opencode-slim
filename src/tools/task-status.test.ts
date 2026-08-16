@@ -154,7 +154,7 @@ describe('task_status', () => {
     expect(output).toContain('possibly_stuck: false');
   });
 
-  test('reports an absent session in a valid map as live idle', async () => {
+  test('reports an absent session in a valid map as uncertain', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_child1',
@@ -168,8 +168,11 @@ describe('task_status', () => {
     const output = await task_status.execute({ task_id: 'ses_child1' }, {
       sessionID: 'parent-1',
     } as any);
-    expect(output).toContain('state: idle');
-    expect(output).not.toContain('status_uncertain');
+    expect(output).toContain('state: running (unconfirmed)');
+    expect(output).toContain('status_uncertain: true');
+    expect(output).toContain(
+      'last_status_error: no live status entry for session',
+    );
     expect(output).toContain('possibly_stuck: false');
   });
 

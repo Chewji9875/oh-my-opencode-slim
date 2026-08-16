@@ -166,4 +166,39 @@ describe('BackgroundJobCoordinator', () => {
     expect(listener).toHaveBeenCalledWith('full-chain-test');
     expect(listener).toHaveBeenCalledTimes(1);
   });
+
+  test('forwards live lease acquisition, validation, release, and mark generation', () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const first = coordinator.registerLaunch({
+      taskID: 'ses_forwarded_lease',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const lease = coordinator.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+
+    expect(lease).toBeDefined();
+    if (!lease) throw new Error('cancellation lease was not acquired');
+    expect(coordinator.validateLease(lease)).toBe(true);
+    expect(
+      coordinator.markCancelled(first.taskID, 'wrong generation', Date.now(), {
+        force: true,
+        expectedGeneration: first.generation + 1,
+        cancellationLease: lease,
+      })?.state,
+    ).toBe('running');
+    expect(coordinator.releaseLease(lease)).toBe(true);
+    expect(coordinator.validateLease(lease)).toBe(false);
+    const relaunchLease = coordinator.acquireRelaunchLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not acquired');
+    expect(coordinator.validateLease(relaunchLease)).toBe(true);
+    expect(coordinator.releaseLease(relaunchLease)).toBe(true);
+  });
 });
