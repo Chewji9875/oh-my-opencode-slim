@@ -152,6 +152,20 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     return this.board.acquireRelaunchLease(taskID, generation);
   }
 
+  acquireMessageLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    return this.board.acquireMessageLease(taskID, generation);
+  }
+
+  acquireTerminalNotificationLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    return this.board.acquireTerminalNotificationLease(taskID, generation);
+  }
+
   validateLease(lease: BackgroundJobLease): boolean {
     return this.board.validateLease(lease);
   }

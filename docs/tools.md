@@ -44,13 +44,24 @@ Fast, structural code search and refactoring - more powerful than plain text gre
 
 | Tool | Description |
 |------|-------------|
-| `cancel_task` | Cancel a tracked background specialist task by native task ID or Background Job Board alias |
+| `task` | Start a specialist task and return its task ID |
+| `task_status` | Check the status of a task |
+| `task_result` | Retrieve a task's result |
+| `task_message` | Queue a non-interrupting message and return `queued` |
+| `task_cancel` | Stop a generation while retaining its session |
+| `task_revive` | Resume a retained session with a new instruction |
 | `wait_for_user` | Pause automatic orchestrator wake prompts until the next distinct external user message |
 
-`cancel_task` is orchestrator-only. It only cancels background tasks tracked for
-the current orchestrator session, and it does not roll back partial edits. After
-cancelling a write-capable task, inspect and reconcile file changes before
+The task controls use the task ID or Background Job Board alias for the task being
+managed. `task_message` does not interrupt the current generation. `task_cancel`
+stops the generation but retains its session; it does not roll back partial edits.
+After cancelling a write-capable task, inspect and reconcile file changes before
 launching replacement work.
+
+`task_revive` resumes a retained session with a new instruction. A cancelled or
+errored retained session may be revived immediately once its retained state has
+been verified safe. Acknowledgement controls parent and job-board consumption and
+reusable-pool display, not same-session revival.
 
 `wait_for_user` is also orchestrator-only. The orchestrator uses it as the final
 tool action after providing concrete instructions for external manual work. Its

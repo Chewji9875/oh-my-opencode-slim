@@ -18,6 +18,7 @@ import type {
   RetainedBoardSnapshotState,
 } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
+import type { RevivedRunTracker } from './revived-run-tracker';
 
 type BackgroundJobRecord = NonNullable<ReturnType<BackgroundJobStore['get']>>;
 
@@ -287,6 +288,7 @@ export async function handleEvent(
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     observeSyntheticTerminalPart?: (part: unknown) => void;
+    revivedRunTracker?: RevivedRunTracker;
   },
 ): Promise<void> {
   deps.inputWaits.trackInputWait(input.event);
@@ -379,6 +381,7 @@ export async function handleEvent(
 
   if (input.event.type === 'server.instance.disposed') {
     deps.backgroundJobSupervisor?.dispose();
+    deps.revivedRunTracker?.dispose();
     deps.pendingCallTracker.clearAll?.();
     deps.retainedBoardSnapshots.clear();
     eventFenceMap(deps.backgroundJobBoard).clear();
@@ -523,13 +526,15 @@ export async function handleEvent(
           ) {
             return;
           }
-          deps.backgroundJobBoard.updateStatus({
+          const updated = deps.backgroundJobBoard.updateStatus({
             taskID: sessionId,
             state: 'error',
+            expectedGeneration: observation?.generation,
             resultSummary:
               (props?.error as { message?: string } | undefined)?.message ??
               'Session error',
           });
+          if (updated) deps.revivedRunTracker?.onTerminal(updated);
         }
       } else if (isInlineFailoverError(props.error)) {
         // Recovery possible: defer. The idle backstop terminalizes this
@@ -555,13 +560,15 @@ export async function handleEvent(
         ) {
           return;
         }
-        deps.backgroundJobBoard.updateStatus({
+        const updated = deps.backgroundJobBoard.updateStatus({
           taskID: sessionId,
           state: 'error',
+          expectedGeneration: observation?.generation,
           resultSummary:
             (props?.error as { message?: string } | undefined)?.message ??
             'Session error',
         });
+        if (updated) deps.revivedRunTracker?.onTerminal(updated);
       }
     }
 

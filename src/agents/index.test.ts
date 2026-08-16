@@ -191,13 +191,22 @@ describe('orchestrator agent', () => {
     ).toBe('allow');
   });
 
-  test('orchestrator is allowed to invoke cancel_task', () => {
+  test('orchestrator is allowed to invoke task-control tools', () => {
     const agents = createAgents(runtimeFor());
     const orchestrator = agents.find((a) => a.name === 'orchestrator');
-    expect(
-      (orchestrator as { config: { permission: Record<string, unknown> } })
-        .config.permission.cancel_task,
-    ).toBe('allow');
+    const permission = (
+      orchestrator as { config: { permission: Record<string, unknown> } }
+    ).config.permission;
+
+    for (const toolName of [
+      'task_cancel',
+      'task_message',
+      'task_revive',
+      'task_status',
+      'task_result',
+    ]) {
+      expect(permission[toolName]).toBe('allow');
+    }
   });
 
   test('orchestrator is allowed to invoke wait_for_user', () => {
@@ -353,31 +362,39 @@ describe('tool permissions', () => {
     expect(agents.some((a) => a.name === 'alpha')).toBe(false);
   });
 
-  test('oracle is denied access to cancel_task', () => {
+  test('oracle is denied access to task-control tools by default', () => {
     const agents = createAgents(runtimeFor());
+    const oracle = agents.find((a) => a.name === 'oracle');
+    const permission = (
+      oracle as { config: { permission: Record<string, unknown> } }
+    ).config.permission;
+
+    for (const toolName of [
+      'task_cancel',
+      'task_message',
+      'task_revive',
+      'task_status',
+      'task_result',
+    ]) {
+      expect(permission[toolName]).toBe('deny');
+    }
+  });
+
+  test('explicit task_cancel permission overrides the default gate', () => {
+    const agents = createAgents(
+      runtimeFor({
+        agents: {
+          oracle: {
+            permission: { task_cancel: 'allow' },
+          },
+        },
+      }),
+    );
     const oracle = agents.find((a) => a.name === 'oracle');
     expect(
       (oracle as { config: { permission: Record<string, unknown> } }).config
-        .permission.cancel_task,
-    ).toBe('deny');
-  });
-
-  test('explorer is denied access to cancel_task', () => {
-    const agents = createAgents(runtimeFor());
-    const explorer = agents.find((a) => a.name === 'explorer');
-    expect(
-      (explorer as { config: { permission: Record<string, unknown> } }).config
-        .permission.cancel_task,
-    ).toBe('deny');
-  });
-
-  test('fixer is denied access to cancel_task', () => {
-    const agents = createAgents(runtimeFor());
-    const fixer = agents.find((a) => a.name === 'fixer');
-    expect(
-      (fixer as { config: { permission: Record<string, unknown> } }).config
-        .permission.cancel_task,
-    ).toBe('deny');
+        .permission.task_cancel,
+    ).toBe('allow');
   });
 
   test('subagents are denied access to wait_for_user', () => {

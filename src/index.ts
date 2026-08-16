@@ -31,6 +31,7 @@ import {
   SessionLifecycle,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
+import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import { isMessageWithParts, type MessageWithParts } from './hooks/types';
 import { handleTaskSessionEvent } from './index-event';
 import { createInterviewManager } from './interview';
@@ -45,8 +46,9 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
-  createTaskNudgeTool,
+  createTaskMessageTool,
   createTaskResultTool,
+  createTaskReviveTool,
   createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
@@ -65,6 +67,7 @@ import {
   createDisplayNameMentionRewriter,
   resolveRuntimeAgentName,
 } from './utils';
+import type { ContextFile } from './utils/background-job-board';
 import { isPluginDisabledByEnv } from './utils/env';
 import { initLogger, log } from './utils/logger';
 import { SessionMetadataStore } from './utils/session-metadata';
@@ -174,10 +177,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let backgroundJobSupervisor: BackgroundJobSupervisor;
   let interviewManager: ReturnType<typeof createInterviewManager>;
   let companionManager: CompanionManager;
-  let cancelTaskTools: ReturnType<typeof createCancelTaskTool>;
+  let taskCancelTools: ReturnType<typeof createCancelTaskTool>;
+  let taskMessageTools: ReturnType<typeof createTaskMessageTool>;
   let taskResultTools: ReturnType<typeof createTaskResultTool>;
+  let taskReviveTools: ReturnType<typeof createTaskReviveTool>;
+  let revivedRunTracker: ReturnType<typeof createRevivedRunTracker>;
+  let markRevivedRunPending: (taskID: string) => void = () => {};
+  let markRevivedRunSettled: (taskID: string) => void = () => {};
+  let getRevivedContextFiles = (_taskID: string): ContextFile[] => [];
+  let pruneRevivedContext = () => {};
   let taskStatusTools: ReturnType<typeof createTaskStatusTool>;
-  let taskNudgeTools: ReturnType<typeof createTaskNudgeTool>;
   const taskActivityTracker = new TaskActivityTracker();
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
@@ -296,6 +305,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       backgroundJobSupervisor.onTerminal(record);
     });
+    revivedRunTracker = createRevivedRunTracker({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      backgroundJobSupervisor,
+      onRegister: (taskID) => markRevivedRunPending(taskID),
+      onSettled: (taskID) => markRevivedRunSettled(taskID),
+      contextFilesForPrompt: (taskID) => getRevivedContextFiles(taskID),
+      pruneContext: () => pruneRevivedContext(),
+    });
+    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      revivedRunTracker.onTerminal(record);
+    });
 
     // Initialize MultiplexerSessionManager to handle OpenCode's built-in
     // Task tool sessions
@@ -356,7 +377,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       willAttemptFallback: (sessionID) =>
         foregroundFallback.willAttemptFallback(sessionID),
       coordinator: sessionLifecycle,
+      revivedRunTracker,
     });
+    markRevivedRunPending = taskSessionManagerHook.markRevivedRunPending;
+    markRevivedRunSettled = taskSessionManagerHook.clearRevivedRunPending;
+    getRevivedContextFiles = taskSessionManagerHook.contextFilesForTask;
+    pruneRevivedContext = taskSessionManagerHook.pruneTaskContext;
 
     orchestratorWakeScheduler = createOrchestratorWakeScheduler(ctx, {
       config: runtime.backgroundJobs.orchestratorWake,
@@ -440,22 +466,29 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ctx.directory,
       runtime.companion,
     );
-    cancelTaskTools = createCancelTaskTool({
+    taskCancelTools = createCancelTaskTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
     });
+    taskMessageTools = createTaskMessageTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+    });
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
     });
-    taskStatusTools = createTaskStatusTool({
+    taskReviveTools = createTaskReviveTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
-      activityTracker: taskActivityTracker,
+      shouldManageSession: (sessionID) =>
+        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+      backgroundJobSupervisor,
+      revivedRunTracker,
     });
-    taskNudgeTools = createTaskNudgeTool({
+    taskStatusTools = createTaskStatusTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
@@ -475,10 +508,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
     tools = {
-      ...cancelTaskTools,
+      ...taskCancelTools,
+      ...taskMessageTools,
       ...taskResultTools,
+      ...taskReviveTools,
       ...taskStatusTools,
-      ...taskNudgeTools,
       ...waitForUserTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch ? { webfetch } : {}),

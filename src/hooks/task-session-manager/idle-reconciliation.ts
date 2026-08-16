@@ -1,5 +1,6 @@
 import type { BackgroundJobStore, ContextFile } from '../../utils';
 import { log } from '../../utils/logger';
+import type { RevivedRunTracker } from './revived-run-tracker';
 
 export function createIdleReconciler(options: {
   backgroundJobBoard: BackgroundJobStore;
@@ -19,6 +20,7 @@ export function createIdleReconciler(options: {
     contextFilesForPrompt(taskId: string): ContextFile[];
     prune(board: { taskIDs(): Set<string> }): void;
   };
+  revivedRunTracker?: RevivedRunTracker;
 }) {
   const idleReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const childIdleReconcileTimers = new Map<
@@ -57,7 +59,7 @@ export function createIdleReconciler(options: {
     if (childIdleReconcileTimers.has(sessionID)) return;
     if (options.isFallbackInProgress?.(sessionID)) return;
 
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       childIdleReconcileTimers.delete(sessionID);
       if (options.isFallbackInProgress?.(sessionID)) return;
 
@@ -72,6 +74,14 @@ export function createIdleReconciler(options: {
         job.lastLiveBusyAt > idleObservedAt
       ) {
         return;
+      }
+
+      if (options.revivedRunTracker?.isTracked(sessionID, observedGeneration)) {
+        const terminalPublished = await options.revivedRunTracker.probe(
+          sessionID,
+          observedGeneration,
+        );
+        if (terminalPublished) return;
       }
 
       // Idle is a quiescent runner observation, not proof that the background

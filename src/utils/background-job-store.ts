@@ -130,6 +130,14 @@ export interface BackgroundJobStore {
     taskID: string,
     generation: number,
   ): BackgroundJobLease | undefined;
+  acquireMessageLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined;
+  acquireTerminalNotificationLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined;
   validateLease(lease: BackgroundJobLease): boolean;
   releaseLease(lease: BackgroundJobLease): boolean;
   updateStatus(
@@ -160,6 +168,10 @@ export interface BackgroundJobStore {
     expectedGeneration?: number,
     now?: number,
   ): BackgroundJobRecord | undefined;
+  /**
+   * Acknowledge the terminal notification delivered to the parent session.
+   * This is a prompt-lifecycle acknowledgement, not filesystem reconciliation.
+   */
   markReconciled(taskID: string, now?: number): BackgroundJobRecord | undefined;
   markCancelled(
     taskID: string,

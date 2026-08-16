@@ -1430,6 +1430,53 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain('Result: plan is sound');
   });
 
+  test('resumes acknowledged cancelled and errored sessions through task_id', async () => {
+    for (const state of ['cancelled', 'error'] as const) {
+      const board = new BackgroundJobBoard();
+      const original = board.registerLaunch({
+        taskID: `child-${state}`,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: `${state} review`,
+      });
+      board.updateStatus({ taskID: original.taskID, state });
+      const { hook } = createHook({ backgroundJobBoard: board });
+
+      const beforeAcknowledgement = {
+        args: { subagent_type: 'oracle', task_id: original.alias },
+      };
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-before-ack` },
+        beforeAcknowledgement,
+      );
+      expect(beforeAcknowledgement.args.task_id).toBeUndefined();
+
+      board.markReconciled(original.taskID);
+
+      const resume = {
+        args: { subagent_type: 'oracle', task_id: original.alias },
+      };
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-resume` },
+        resume,
+      );
+      expect(resume.args.task_id).toBe(original.taskID);
+
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-resume` },
+        {
+          output: [`task_id: ${original.taskID}`, 'state: running'].join('\n'),
+        },
+      );
+
+      expect(board.get(original.taskID)).toMatchObject({
+        generation: original.generation + 1,
+        state: 'running',
+        terminalUnreconciled: false,
+      });
+    }
+  });
+
   test('keeps task timeout as a running timed-out job', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -3161,9 +3208,9 @@ describe('task-session-manager hook', () => {
     await transformMessages(hook, messages);
 
     expect(messages.messages[0].parts.at(-1)?.text).toContain(
-      'state: cancelled',
+      'cancelled, reconciled',
     );
-    expect(messages.messages[0].parts.at(-1)?.text).toContain(
+    expect(board.get('child-1')?.resultSummary).toBe(
       'cancelled: user requested',
     );
     expect(messages.messages[0].parts[0].text).not.toContain(
@@ -4173,7 +4220,7 @@ describe('task-session-manager hook', () => {
     expect(resume.args.task_id).toBe('child-1');
   });
 
-  test('only reconciled completed jobs resolve as reusable task sessions', async () => {
+  test('only acknowledged terminal jobs resolve as reusable task sessions', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -4209,7 +4256,11 @@ describe('task-session-manager hook', () => {
       { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
       failed,
     );
-    expect(failed.args.task_id).toBeUndefined();
+    expect(failed.args.task_id).toBe('err-1');
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: err-1', 'state: running'].join('\n') },
+    );
 
     const completed = { args: { subagent_type: 'oracle', task_id: 'ora-1' } };
     await hook['tool.execute.before'](

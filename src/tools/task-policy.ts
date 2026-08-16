@@ -34,11 +34,6 @@ export interface TaskStatusReport {
   possiblyStuck: boolean;
 }
 
-export interface NudgeEligibility {
-  eligible: boolean;
-  reason: string;
-}
-
 /**
  * Converts a bounded snapshot into a single-session observation. A failed
  * read becomes `ok: false`; a malformed entry becomes `ok: true` with
@@ -100,7 +95,7 @@ export function summarizeTaskStatus(
     Math.floor((now - (lastActivityAt ?? now)) / 1000),
   );
   // possibly_stuck requires a live-confirmed busy/retry signal: an
-  // uncertain board fallback must never drive an automatic nudge admission.
+  // uncertain board fallback must never report a positive stuck state.
   const possiblyStuck =
     !uncertain &&
     (state === 'busy' || state === 'retry') &&
@@ -113,51 +108,4 @@ export function summarizeTaskStatus(
     idleSeconds,
     possiblyStuck,
   };
-}
-
-/**
- * Shared nudge admission policy used by task_nudge: the child must be
- * board-running, live-confirmed busy/retry, and reported possibly stuck by
- * the same status/activity policy task_status exposes.
- */
-export function evaluateNudgeEligibility(
-  job: BackgroundJobRecord,
-  observation: LiveStatusObservation,
-  lastActivityAt: number | undefined,
-  now: number,
-): NudgeEligibility {
-  if (job.state !== 'running') {
-    return {
-      eligible: false,
-      reason: `board state is ${job.state}, not running`,
-    };
-  }
-  if (!observation.ok) {
-    return {
-      eligible: false,
-      reason: `live status unavailable: ${observation.error ?? 'unknown error'}`,
-    };
-  }
-  if (observation.status === undefined) {
-    return {
-      eligible: false,
-      reason: observation.error
-        ? 'child session status malformed; refusing to nudge'
-        : 'child session status unknown; refusing to nudge without confirmed live activity',
-    };
-  }
-  if (observation.status === 'idle') {
-    return {
-      eligible: false,
-      reason: 'child session is idle, not live',
-    };
-  }
-  const report = summarizeTaskStatus(job, observation, lastActivityAt, now);
-  if (!report.possiblyStuck) {
-    return {
-      eligible: false,
-      reason: 'child is active and not possibly stuck; no nudge needed',
-    };
-  }
-  return { eligible: true, reason: 'confirmed live and possibly stuck' };
 }

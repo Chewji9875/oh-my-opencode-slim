@@ -145,7 +145,7 @@ export async function handleToolExecuteBefore(
       );
       if (knownManagedTask?.state === 'running') {
         throw new Error(
-          `Task ${requested} is still running and cannot be resumed or amended with task(). Do not spawn or cancel a duplicate for an additive request. Wait for its terminal result, then resume the automatically reconciled session if follow-up work is still needed.`,
+          `Task ${requested} is still running and cannot be resumed or amended with task(). Do not spawn or cancel a duplicate for an additive request. Wait for its terminal result, then resume the session after that terminal notification is acknowledged if follow-up work is still needed.`,
         );
       }
 

@@ -30,13 +30,17 @@ enabled:
 OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true opencode
 ```
 
-The required native/background-control tools are:
+The task API and background-control tools are:
 
 | Tool | Purpose |
 |------|---------|
 | `task(..., background: true)` | Start a specialist in the background and immediately return a task ID |
 | hook-driven completion | OpenCode injects terminal background task results automatically |
-| `cancel_task` | Plugin-provided tool to cancel a tracked background task by task ID or Background Job Board alias |
+| `task_status` | Check the status of a tracked task |
+| `task_result` | Retrieve a tracked task's result |
+| `task_message` | Queue a non-interrupting message and return `queued` |
+| `task_cancel` | Stop a generation while retaining its session |
+| `task_revive` | Resume a retained session with a new instruction |
 | `wait_for_user` | Plugin-provided orchestrator tool that pauses automatic orchestrator wakes while the user performs external manual work |
 
 If these are not available, the scheduler cannot use the default background
@@ -144,7 +148,7 @@ Rules:
 - Review tasks can run in parallel with read-only discovery, but not with edits
   they are supposed to review.
 
-### 4. Wait and cancel
+### 4. Wait, message, cancel, and revive
 
 Background tasks are not complete until OpenCode injects their terminal result or
 hook-driven completion marks them terminal.
@@ -156,10 +160,16 @@ The orchestrator should use background completion events to:
 - collect outputs before final response,
 - surface failures or blocked tasks clearly.
 
-The orchestrator should use `cancel_task` only when the user asks, or when a
-running lane is obsolete, wrong, or conflicts with a safer replacement plan.
-Cancellation is not rollback: if cancelling a writer, inspect its partial file
-changes before launching a replacement lane.
+Use `task_status` to inspect a task and `task_result` to collect its result.
+`task_message` queues a non-interrupting message and returns `queued`; it does
+not stop the current generation. Use `task_cancel` to stop a generation while
+retaining its session, then inspect and reconcile any partial file changes before
+launching replacement work. Use `task_revive` to resume a retained session with a
+new instruction.
+
+A cancelled or errored retained session may be revived immediately once its
+retained state has been verified safe. Acknowledgement controls parent and
+job-board consumption and reusable-pool display, not same-session revival.
 
 Terminal jobs are reconciled automatically after their result is injected into
 the orchestrator session. That lifecycle state is not proof the output was used;
@@ -311,6 +321,11 @@ The prompt/runtime treats background tasks as a small job board:
 | dependencies | Tasks that must complete first |
 | result | Final task output once terminal |
 | status certainty | `status uncertain` when the live status map is malformed or unavailable; it never implies completion |
+
+Cancelled and errored sessions can remain retained for a later `task_revive`.
+They may be revived immediately once their retained state has been verified safe.
+Acknowledgement controls parent and job-board consumption and reusable-pool
+display, not same-session revival.
 
 The current todo list can represent user-visible work, but task IDs and file
 ownership need to be explicit in the orchestrator's working context.

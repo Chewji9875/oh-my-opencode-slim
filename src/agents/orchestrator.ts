@@ -222,15 +222,16 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 - \`task_result\` returns only a completed specialist's final assistant message, and can be called by any parent session that owns the task. Never use \`task(..., task_id: ...)\` to fetch output: that resumes the child and starts new model work.
 - Before retrying completed work whose result appears missing or incomplete, retrieve it with \`task_result\`. Dispatch again only when the retrieved result does not satisfy the objective.
 - For a live child task, call \`task_status\` for read-only state inspection. There is no safe live-prompt channel: never use \`task(..., task_id: ...)\` as a progress check or instruction because it resumes model work.
-- If \`task_status\` reports \`possibly_stuck: true\`, use \`task_nudge\` once to admit a concise follow-up without resuming or aborting the child; never use it as a polling loop.
+- For a live child task, use \`task_message\` only to queue a concise, non-interrupting communication. It does not launch, resume, or interrupt the child and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it.
+- Use \`task_cancel\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan. Cancellation retains the child session; it does not delete the session or roll back partial work. Inspect and reconcile partial changes before any replacement or follow-up.
+- Use \`task_revive\` for the cancel-and-resume operation when the same retained child session should continue with a new prompt. It may cancel the current generation and then start a new generation in that existing session; do not use it as a status check or claim that the new prompt was seen until the child produces a result.
 - Prefer \`task(..., background: true)\` for delegated work that can run independently.
 - For work already chosen for delegation, launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.
 - Never reissue an unchanged task to the same specialist after a rejection; adjust its scope or context before retrying.
 - Continue orchestration only on non-overlapping work; otherwise briefly report what was launched and stop.
 - Before local edits or another writer task, compare against running task scopes.
 - Parallel background tasks are allowed only when their write scopes do not conflict.
-- Use \`cancel_task\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan.
-- Cancellation is not rollback: if cancelling a writer, inspect and reconcile partial file changes before launching a replacement lane.
+- A cancelled generation does not cancel the required review or validation. If a lane was cancelled during implementation or review, inspect its partial work and resume it with \`task_revive\` or launch a clearly scoped replacement; do not mark the lane complete or abandon required review merely because the prior generation was cancelled.
 
 ${
   wakeSchedulerEnabled
