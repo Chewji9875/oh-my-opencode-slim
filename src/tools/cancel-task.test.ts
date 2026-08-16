@@ -119,7 +119,7 @@ describe('cancel_task tool', () => {
     expect(String(output)).toContain('state: unknown');
   });
 
-  test('aborts tracked jobs regardless of current board state', async () => {
+  test('refuses tracked jobs that are no longer running', async () => {
     const { board, abort, cancelTask } = createTool();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -130,22 +130,23 @@ describe('cancel_task tool', () => {
 
     const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
 
-    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
-    expect(String(output)).toContain('state: cancelled');
-    expect(board.get('ses_1')).toMatchObject({ state: 'cancelled' });
+    expect(abort).not.toHaveBeenCalled();
+    expect(String(output)).toContain('stale/uncertain cancellation');
+    expect(board.get('ses_1')).toMatchObject({ state: 'completed' });
   });
 
-  test('aborts owned raw session IDs when job board lost the task', async () => {
-    const { abort, cancelTask } = createTool();
+  test('does not destructively cancel an owned raw session without a generation', async () => {
+    const { abort, deleteSession, cancelTask } = createTool();
 
     const output = await cancelTask.execute(
       { task_id: 'ses_lost', reason: 'stop ghost worker' },
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_lost' } });
-    expect(String(output)).toContain('state: cancelled');
-    expect(String(output)).toContain('cancelled: stop ghost worker');
+    expect(abort).not.toHaveBeenCalled();
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(String(output)).toContain('state: unknown');
+    expect(String(output)).toContain('best-effort/uncertain');
   });
 
   test('does not abort raw session ID without metadata ownership', async () => {
@@ -171,7 +172,7 @@ describe('cancel_task tool', () => {
     expect(String(output)).toContain('state: unknown');
   });
 
-  test('still aborts stale cancelled jobs', async () => {
+  test('refuses stale cancelled jobs without a running generation', async () => {
     const { board, abort, cancelTask } = createTool();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -185,11 +186,11 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
-    expect(String(output)).toContain('state: cancelled');
+    expect(abort).not.toHaveBeenCalled();
+    expect(String(output)).toContain('stale/uncertain cancellation');
   });
 
-  test('still aborts reconciled stale cancellations', async () => {
+  test('refuses reconciled stale cancellations without a running generation', async () => {
     const { board, abort, cancelTask } = createTool();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -204,8 +205,8 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
-    expect(String(output)).toContain('state: cancelled');
+    expect(abort).not.toHaveBeenCalled();
+    expect(String(output)).toContain('stale/uncertain cancellation');
   });
 
   test('does not terminalize board when abort fails without delete', async () => {
@@ -308,6 +309,97 @@ describe('cancel_task tool', () => {
     });
   });
 
+  test('does not confirm cancellation when abort/delete fail and status is absent', async () => {
+    const { board, abort, deleteSession, cancelTask } = createTool({
+      abort: async () => {
+        throw new Error('abort transport failed');
+      },
+      delete: async () => {
+        throw new Error('delete network failed');
+      },
+      status: async () => ({ data: {} }),
+    });
+    const terminalNotifications: string[] = [];
+    board.addTerminalStateListener((taskID) => {
+      terminalNotifications.push(taskID);
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const output = await cancelTask.execute({ task_id: 'ses_1' }, context);
+
+    expect(abort).toHaveBeenCalled();
+    expect(deleteSession).toHaveBeenCalled();
+    expect(String(output)).toContain('state: running');
+    expect(String(output)).toContain('delete network failed');
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalNotifications).toEqual([]);
+  });
+
+  test('does not cancel a relaunched generation after status verification awaits', async () => {
+    let releaseStatus!: () => void;
+    let signalStatusStarted!: () => void;
+    const statusStarted = new Promise<void>((resolve) => {
+      signalStatusStarted = resolve;
+    });
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    const { board, status, deleteSession, cancelTask } = createTool({
+      status: async () => {
+        signalStatusStarted();
+        await statusGate;
+        return { data: {} };
+      },
+    });
+    const terminalNotifications: string[] = [];
+    board.addTerminalStateListener((taskID) => {
+      terminalNotifications.push(taskID);
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+
+    const cancellation = cancelTask.execute({ task_id: 'ses_1' }, context);
+    await statusStarted;
+
+    expect(() =>
+      board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+        now: 200,
+      }),
+    ).toThrow('cancellation lease');
+    releaseStatus();
+
+    const output = await cancellation;
+
+    expect(status).toHaveBeenCalled();
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(String(output)).toContain('state: cancelled');
+    expect(parseTaskStatusOutput(String(output))).toMatchObject({
+      taskID: 'ses_1',
+      state: 'cancelled',
+    });
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 1,
+      state: 'cancelled',
+      cancellationRequested: true,
+    });
+    expect(terminalNotifications).toEqual(['ses_1']);
+  });
+
   test('keeps running/status uncertain when abort times out without delete', async () => {
     const { board, cancelTask } = createTool({
       abort: () => new Promise(() => {}),
@@ -335,6 +427,121 @@ describe('cancel_task tool', () => {
       terminalUnreconciled: false,
       statusUncertain: true,
     });
+  });
+
+  test('keeps the cancellation quarantine while the abort promise is pending', async () => {
+    let releaseAbort!: (value: unknown) => void;
+    const abortPending = new Promise<unknown>((resolve) => {
+      releaseAbort = resolve;
+    });
+    const { board, abort, deleteSession, cancelTask } = createTool({
+      abort: () => abortPending,
+      abortTimeoutMs: 1,
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const cancellation = cancelTask.execute({ task_id: 'ses_1' }, context);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(board.acquireRelaunchLease('ses_1', 1)).toBeUndefined();
+    expect(() =>
+      board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+      }),
+    ).toThrow('cancellation lease');
+    releaseAbort({});
+    await cancellation;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const relaunchLease = board.acquireRelaunchLease('ses_1', 1);
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not released');
+    board.releaseLease(relaunchLease);
+  });
+
+  test('keeps the cancellation quarantine while the delete promise is pending', async () => {
+    let releaseDelete!: (value: unknown) => void;
+    const deletePending = new Promise<unknown>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const { board, deleteSession, cancelTask } = createTool({
+      delete: () => deletePending,
+      deleteTimeoutMs: 1,
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const cancellation = cancelTask.execute({ task_id: 'ses_1' }, context);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(board.acquireRelaunchLease('ses_1', 1)).toBeUndefined();
+    expect(() =>
+      board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+      }),
+    ).toThrow('cancellation lease');
+    releaseDelete({});
+    await cancellation;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const relaunchLease = board.acquireRelaunchLease('ses_1', 1);
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not released');
+    board.releaseLease(relaunchLease);
+  });
+
+  test('keeps the cancellation quarantine while status verification is pending', async () => {
+    let releaseStatus!: (value: unknown) => void;
+    const statusPending = new Promise<unknown>((resolve) => {
+      releaseStatus = resolve;
+    });
+    const { board, deleteSession, cancelTask } = createTool({
+      status: () => statusPending,
+      deleteVerifyMs: 1,
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const cancellation = cancelTask.execute({ task_id: 'ses_1' }, context);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(board.acquireRelaunchLease('ses_1', 1)).toBeUndefined();
+    expect(() =>
+      board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+      }),
+    ).toThrow('cancellation lease');
+    releaseStatus({ data: {} });
+    await cancellation;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const relaunchLease = board.acquireRelaunchLease('ses_1', 1);
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not released');
+    board.releaseLease(relaunchLease);
   });
 
   test('deletes session when abort returns but session stays busy', async () => {
@@ -458,8 +665,8 @@ describe('cancel_task tool', () => {
     });
   });
 
-  test('cancelSessionByID returns state: error when abort throws non-SessionStillRunningError, even if board shows running', async () => {
-    const { board, abort, cancelTask } = createTool({
+  test('does not destructively cancel a raw session when the board lookup is unavailable', async () => {
+    const { board, abort, deleteSession, cancelTask } = createTool({
       abort: async () => {
         throw new Error('network timeout');
       },
@@ -475,8 +682,8 @@ describe('cancel_task tool', () => {
       parentSessionID: 'parent-1',
       agent: 'fixer',
     });
-    // Override resolve to return undefined, forcing the cancelSessionByID
-    // raw session path instead of the tracked task path.
+    // Override resolve to return undefined, forcing the untracked raw-session
+    // path instead of the tracked task path.
     board.resolve = mock(() => undefined);
 
     const output = await cancelTask.execute(
@@ -484,11 +691,10 @@ describe('cancel_task tool', () => {
       context,
     );
 
-    expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_running' } });
-    // cancelSessionByID must return state: error for non-SessionStillRunningError,
-    // NOT state: running (which would happen if || isRunning() were present).
-    expect(String(output)).toContain('state: error');
-    expect(String(output)).not.toContain('state: running');
+    expect(abort).not.toHaveBeenCalled();
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(String(output)).toContain('state: unknown');
+    expect(String(output)).toContain('best-effort/uncertain');
   });
 
   test('denies non-orchestrator agents', async () => {

@@ -10,9 +10,14 @@
 import { createHash } from 'node:crypto';
 import type {
   BackgroundJobExecution,
+  BackgroundJobInjectedCompletionFence,
+  BackgroundJobLifecycleLedger,
   BackgroundJobRecord,
   BackgroundJobStore,
+  BackgroundJobSyntheticTerminalOccurrence,
+  BackgroundJobSyntheticTerminalOccurrencePhase,
   ContextFile,
+  TaskStatusOutput,
 } from '../../utils';
 import {
   isInternalInitiatorPart,
@@ -48,8 +53,6 @@ export const BACKGROUND_JOB_BOARD_METADATA_KEY =
 
 const BACKGROUND_COMPLETION_COMPLETED = /^Background task completed: /;
 const BACKGROUND_COMPLETION_FAILED = /^Background task failed: /;
-
-export const MAX_PROCESSED_INJECTED_COMPLETIONS = 500;
 
 type RetainedBoardSnapshot = {
   anchorKey: string;
@@ -99,18 +102,40 @@ export type InjectedTerminalJobs = {
   promptShapeKey: string;
 };
 
+export type InjectedCompletionFence = BackgroundJobInjectedCompletionFence;
+
+export type SyntheticTerminalOccurrencePhase =
+  BackgroundJobSyntheticTerminalOccurrencePhase;
+
+export type SyntheticTerminalOccurrenceOrigin =
+  BackgroundJobSyntheticTerminalOccurrence;
+
 export interface InjectionState {
   backgroundJobBoard: BackgroundJobStore;
+  lifecycleLedger: BackgroundJobLifecycleLedger;
   maxRetainedSnapshots: number;
   strategy: 'latest' | 'checkpoint-compatible';
   processedInjectedCompletions: Set<string>;
   processedInjectedCompletionOrder: string[];
+  /**
+   * Completion occurrences persist with the board so a recreated hook cannot
+   * replay an old synthetic result into a newer task generation.
+   */
+  injectedCompletionFences?: Map<string, InjectedCompletionFence>;
+  /**
+   * Synthetic terminal parts observed by the runtime event stream. This is
+   * separate from processed fences because an event may arrive before the
+   * message transform that consumes the part.
+   */
+  syntheticTerminalOccurrences?: Map<string, SyntheticTerminalOccurrenceOrigin>;
+  syntheticTerminalOccurrenceOrder?: string[];
+  getLifecycleEpoch?: () => number;
+  getDeletionEpoch?: (taskID: string) => number | undefined;
   terminalJobsInjectedByParent: Map<string, InjectedTerminalJobs>;
   pendingInjectedTerminalJobsByParent: Map<
     string,
     Map<string, BackgroundJobExecution>
   >;
-  maxProcessedInjectedCompletions: number;
   metadataKey: string;
   shouldManageSession: (sessionID: string) => boolean;
   taskContextTracker: {
@@ -177,8 +202,9 @@ function createOccurrenceId(
   message: MessageWithParts,
   partIndex: number,
 ): string {
-  if (typeof part.id === 'string') {
-    return part.id;
+  const explicitOccurrenceID = getExplicitOccurrenceID(part);
+  if (explicitOccurrenceID) {
+    return explicitOccurrenceID;
   }
 
   if (typeof message.info.id === 'string') {
@@ -197,6 +223,256 @@ function createOccurrenceId(
 
   const hash = djb2Hash(`${sessionID}:${content}`);
   return `anon:${hash}`;
+}
+
+function injectedCompletionKey(taskID: string, occurrenceId: string): string {
+  return `${taskID}\u001f${occurrenceId}`;
+}
+
+function getExplicitOccurrenceID(part: MessagePart): string | undefined {
+  for (const key of ['occurrenceID', 'occurrenceId', 'id']) {
+    const value = part[key];
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  return undefined;
+}
+
+function isProcessableSyntheticTerminal(
+  text: string,
+  status: TaskStatusOutput,
+): boolean {
+  if (status.state !== 'completed' && status.state !== 'error') return false;
+
+  const summary = extractTaskSummary(text);
+  const isCompleted = summary
+    ? BACKGROUND_COMPLETION_COMPLETED.test(summary)
+    : status.state === 'completed';
+  const isFailed = summary
+    ? BACKGROUND_COMPLETION_FAILED.test(summary)
+    : status.state === 'error';
+  return (
+    (!summary || isCompleted || isFailed) &&
+    (!isCompleted || status.state === 'completed') &&
+    (!isFailed || status.state === 'error')
+  );
+}
+
+function observationOccurrenceID(
+  part: MessagePart,
+  status: TaskStatusOutput,
+): { occurrenceID: string; reliable: boolean } {
+  const explicitOccurrenceID = getExplicitOccurrenceID(part);
+  if (explicitOccurrenceID) {
+    return { occurrenceID: explicitOccurrenceID, reliable: true };
+  }
+
+  const messageID =
+    typeof part.messageID === 'string' ? part.messageID : 'unknown-message';
+  return {
+    occurrenceID: `ambiguous:${djb2Hash(
+      `${messageID}:${status.taskID}:${part.text ?? ''}`,
+    )}`,
+    reliable: false,
+  };
+}
+
+function rememberSyntheticTerminalOccurrence(
+  state: InjectionState,
+  origin: SyntheticTerminalOccurrenceOrigin,
+): void {
+  const occurrences = state.syntheticTerminalOccurrences;
+  const order = state.syntheticTerminalOccurrenceOrder;
+  if (!occurrences || !order) return;
+
+  const key = injectedCompletionKey(origin.taskID, origin.occurrenceID);
+  const existing = occurrences.get(key);
+  if (existing) {
+    // The first observation owns the lifecycle provenance. A later event for
+    // the same part must not refresh an old occurrence into a new generation.
+    if (existing.phase === 'processed') return;
+    if (existing.phase === 'observed') return;
+    // An ambiguous first observation is a permanent fail-closed decision. A
+    // late event can be an old part replayed after a same-ID relaunch, so it
+    // must never upgrade the occurrence with the current generation.
+    return;
+  }
+
+  occurrences.set(key, { ...origin });
+  order.push(key);
+}
+
+function findSyntheticTerminalOccurrence(
+  state: InjectionState,
+  taskID: string,
+  occurrenceID: string,
+): SyntheticTerminalOccurrenceOrigin | undefined {
+  const occurrences = state.syntheticTerminalOccurrences;
+  if (!occurrences) return undefined;
+
+  const direct = occurrences.get(injectedCompletionKey(taskID, occurrenceID));
+  if (direct) return direct;
+
+  // Older/runtime-derived parts may lack an id in the transform payload even
+  // though the event hook saw the same terminal text. Only use an ambiguous
+  // fallback when there is exactly one candidate for this task.
+  const candidates = [...occurrences.values()].filter(
+    (origin) =>
+      origin.taskID === taskID && origin.occurrenceID.startsWith('ambiguous:'),
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function rememberProcessedSyntheticTerminal(
+  state: InjectionState,
+  taskID: string,
+  occurrenceID: string,
+  origin: SyntheticTerminalOccurrenceOrigin | undefined,
+  generation: number | undefined,
+): void {
+  if (origin) {
+    origin.phase = 'processed';
+    return;
+  }
+
+  rememberSyntheticTerminalOccurrence(state, {
+    taskID,
+    occurrenceID,
+    generationAtObservation: generation,
+    lifecycleEpochAtObservation: state.getLifecycleEpoch?.() ?? 0,
+    phase: 'processed',
+  });
+}
+
+function failClosedSyntheticTerminal(
+  state: InjectionState,
+  status: TaskStatusOutput,
+  occurrenceID: string,
+  existing: BackgroundJobRecord | undefined,
+  reason: string,
+): void {
+  rememberSyntheticTerminalOccurrence(state, {
+    taskID: status.taskID,
+    occurrenceID,
+    generationAtObservation: existing?.generation,
+    lifecycleEpochAtObservation: state.getLifecycleEpoch?.() ?? 0,
+    phase: 'ambiguous',
+  });
+
+  if (existing?.state === 'running') {
+    markSyntheticTerminalUncertain(
+      state,
+      status.taskID,
+      existing,
+      `Synthetic terminal task output origin is ambiguous: ${reason}`,
+    );
+  }
+
+  log('[task-session-manager] skipped ambiguous synthetic completion', {
+    taskID: status.taskID,
+    occurrenceID,
+    generation: existing?.generation,
+    lifecycleEpoch: state.getLifecycleEpoch?.() ?? 0,
+    reason,
+  });
+}
+
+function markSyntheticTerminalUncertain(
+  state: InjectionState,
+  taskID: string,
+  existing: BackgroundJobRecord,
+  reason: string,
+): void {
+  state.backgroundJobBoard.markStatusUncertain(
+    taskID,
+    reason,
+    existing.generation,
+  );
+}
+
+/**
+ * Record a terminal synthetic task part at the runtime event boundary. The
+ * part can be transformed later, after deletion and a same-ID relaunch, so
+ * payload fields alone are not sufficient to recover its original generation.
+ */
+export function observeSyntheticTerminalPart(
+  state: InjectionState,
+  value: unknown,
+): void {
+  if (!isRecord(value)) return;
+  const part = value as MessagePart;
+  if (part.type !== 'text' || part.synthetic !== true) return;
+  if (typeof part.text !== 'string') return;
+
+  const status = parseTaskStatusOutput(part.text);
+  if (!status || !isProcessableSyntheticTerminal(part.text, status)) return;
+
+  const { occurrenceID, reliable } = observationOccurrenceID(part, status);
+  const existing = state.backgroundJobBoard.get(status.taskID);
+  const lifecycleEpoch = state.getLifecycleEpoch?.() ?? 0;
+  const deletionEpoch = state.getDeletionEpoch?.(status.taskID);
+  const occurrenceKey = injectedCompletionKey(status.taskID, occurrenceID);
+  const priorOccurrence =
+    state.syntheticTerminalOccurrences?.get(occurrenceKey);
+  const hasPreDeletionProvenance =
+    deletionEpoch === undefined ||
+    (priorOccurrence !== undefined &&
+      priorOccurrence.lifecycleEpochAtObservation < deletionEpoch &&
+      priorOccurrence.phase !== 'ambiguous');
+  const phase: SyntheticTerminalOccurrencePhase =
+    !reliable || !hasPreDeletionProvenance ? 'ambiguous' : 'observed';
+
+  rememberSyntheticTerminalOccurrence(state, {
+    taskID: status.taskID,
+    occurrenceID,
+    generationAtObservation: existing?.generation,
+    lifecycleEpochAtObservation: lifecycleEpoch,
+    phase,
+  });
+}
+
+function hasRememberedInjectedCompletion(
+  state: InjectionState,
+  taskID: string,
+  occurrenceId: string,
+  currentGeneration: number | undefined,
+): boolean {
+  const fence = state.injectedCompletionFences?.get(
+    injectedCompletionKey(taskID, occurrenceId),
+  );
+  if (!fence) return false;
+
+  const deletionEpoch = state.getDeletionEpoch?.(taskID);
+  const staleGeneration =
+    currentGeneration !== undefined && currentGeneration !== fence.generation;
+  const staleLifecycle =
+    deletionEpoch !== undefined && fence.lifecycleEpoch < deletionEpoch;
+  if (staleGeneration || staleLifecycle) {
+    log('[task-session-manager] skipped stale injected completion', {
+      taskID,
+      occurrenceId,
+      recordedGeneration: fence.generation,
+      currentGeneration,
+      recordedLifecycleEpoch: fence.lifecycleEpoch,
+      deletionEpoch,
+    });
+  }
+
+  // A known occurrence is either a duplicate in the same lifecycle or stale
+  // history from an older generation. Neither may update the current board.
+  return true;
+}
+
+function rememberInjectedCompletionFence(
+  state: InjectionState,
+  occurrenceId: string,
+  fence: InjectedCompletionFence,
+): void {
+  const fences = state.injectedCompletionFences;
+  if (!fences) return;
+
+  fences.set(injectedCompletionKey(fence.taskID, occurrenceId), {
+    ...fence,
+  });
 }
 
 // ── Exported functions ─────────────────────────────────────────────────
@@ -292,6 +568,79 @@ export function updateFromInjectedCompletion(
   const occurrenceId = createOccurrenceId(part, message, partIndex);
 
   const existing = state.backgroundJobBoard.get(status.taskID);
+  const origin = findSyntheticTerminalOccurrence(
+    state,
+    status.taskID,
+    occurrenceId,
+  );
+  const deletionEpoch = state.getDeletionEpoch?.(status.taskID);
+
+  if (origin?.phase === 'processed') return undefined;
+
+  if (origin?.phase === 'ambiguous') {
+    failClosedSyntheticTerminal(
+      state,
+      status,
+      occurrenceId,
+      existing,
+      'message.part.updated origin was permanently ambiguous',
+    );
+    return undefined;
+  }
+
+  if (origin?.phase === 'observed') {
+    const generationChanged =
+      origin.generationAtObservation !== undefined &&
+      existing?.generation !== origin.generationAtObservation;
+    const observationPredatesDeletion =
+      deletionEpoch !== undefined &&
+      origin.lifecycleEpochAtObservation < deletionEpoch;
+    if (generationChanged || observationPredatesDeletion) {
+      if (existing?.state === 'running') {
+        markSyntheticTerminalUncertain(
+          state,
+          status.taskID,
+          existing,
+          'Synthetic terminal task output belongs to an older lifecycle.',
+        );
+      }
+      log(
+        '[task-session-manager] skipped stale observed synthetic completion',
+        {
+          taskID: status.taskID,
+          occurrenceId,
+          observedGeneration: origin.generationAtObservation,
+          currentGeneration: existing?.generation,
+          observationEpoch: origin.lifecycleEpochAtObservation,
+          deletionEpoch,
+        },
+      );
+      return undefined;
+    }
+  }
+
+  if (deletionEpoch !== undefined && origin === undefined) {
+    failClosedSyntheticTerminal(
+      state,
+      status,
+      occurrenceId,
+      existing,
+      'no message.part.updated origin was observed',
+    );
+    return undefined;
+  }
+
+  if (
+    hasRememberedInjectedCompletion(
+      state,
+      status.taskID,
+      occurrenceId,
+      existing?.generation,
+    )
+  ) {
+    return undefined;
+  }
+
   if (isFailed && isLateCancelledTaskError(existing, status.state)) {
     part.text = formatCancelledTaskStatusOutput(
       status.taskID,
@@ -305,7 +654,18 @@ export function updateFromInjectedCompletion(
       terminalState: existing?.terminalState,
       result: status.result,
     });
-    rememberProcessedInjectedCompletion(state, occurrenceId);
+    rememberProcessedInjectedCompletion(state, status.taskID, occurrenceId, {
+      taskID: status.taskID,
+      generation: existing?.generation ?? 0,
+      lifecycleEpoch: state.getLifecycleEpoch?.() ?? 0,
+    });
+    rememberProcessedSyntheticTerminal(
+      state,
+      status.taskID,
+      occurrenceId,
+      origin,
+      existing?.generation,
+    );
     if (existing?.terminalUnreconciled && existing?.parentSessionID) {
       rememberPendingInjectedTerminalJob(state, existing.parentSessionID, {
         taskID: existing.taskID,
@@ -318,7 +678,13 @@ export function updateFromInjectedCompletion(
   if (isCompleted && status.state !== 'completed') return undefined;
   if (isFailed && status.state !== 'error') return undefined;
 
-  if (state.processedInjectedCompletions.has(occurrenceId)) return undefined;
+  const processedOccurrenceKey = injectedCompletionKey(
+    status.taskID,
+    occurrenceId,
+  );
+  if (state.processedInjectedCompletions.has(processedOccurrenceKey)) {
+    return undefined;
+  }
 
   const updated = updateBackgroundJobFromOutput(
     part.text,
@@ -342,24 +708,33 @@ export function updateFromInjectedCompletion(
     occurrenceId,
   });
 
-  rememberProcessedInjectedCompletion(state, occurrenceId);
+  rememberProcessedSyntheticTerminal(
+    state,
+    updated.taskID,
+    occurrenceId,
+    origin,
+    updated.generation,
+  );
+  rememberProcessedInjectedCompletion(state, status.taskID, occurrenceId, {
+    taskID: updated.taskID,
+    generation: updated.generation,
+    lifecycleEpoch: state.getLifecycleEpoch?.() ?? 0,
+  });
   return updated;
 }
 
 export function rememberProcessedInjectedCompletion(
   state: InjectionState,
-  signature: string,
+  taskID: string,
+  occurrenceId: string,
+  fence?: InjectedCompletionFence,
 ): void {
+  const signature = injectedCompletionKey(taskID, occurrenceId);
   state.processedInjectedCompletions.add(signature);
   state.processedInjectedCompletionOrder.push(signature);
 
-  while (
-    state.processedInjectedCompletionOrder.length >
-    state.maxProcessedInjectedCompletions
-  ) {
-    const evicted = state.processedInjectedCompletionOrder.shift();
-    if (!evicted) break;
-    state.processedInjectedCompletions.delete(evicted);
+  if (fence) {
+    rememberInjectedCompletionFence(state, occurrenceId, fence);
   }
 }
 

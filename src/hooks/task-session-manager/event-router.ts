@@ -30,6 +30,7 @@ export async function handleEvent(
         sessionID?: string;
         status?: { type?: string };
         error?: { name?: string };
+        part?: unknown;
       };
     };
   },
@@ -84,6 +85,7 @@ export async function handleEvent(
         agentHint?: string,
       ): PendingTaskCall | undefined;
       clearSession(sessionID: string): void;
+      clearAll?(): void;
     };
     taskContextTracker: {
       pendingManagedTaskIds: Set<string>;
@@ -97,9 +99,15 @@ export async function handleEvent(
     >;
     retainedBoardSnapshots: Map<string, RetainedBoardSnapshotState>;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
+    observeSyntheticTerminalPart?: (part: unknown) => void;
   },
 ): Promise<void> {
   deps.inputWaits.trackInputWait(input.event);
+
+  if (input.event.type === 'message.part.updated') {
+    deps.observeSyntheticTerminalPart?.(input.event.properties?.part);
+    return;
+  }
 
   if (input.event.type === 'session.created') {
     const info = input.event.properties?.info;
@@ -132,31 +140,48 @@ export async function handleEvent(
         info.parentID,
         info.agent,
       );
-      if (
-        pending &&
-        !pending.resumedTaskId &&
-        !deps.backgroundJobBoard.get(info.id)
-      ) {
-        const record = deps.backgroundJobBoard.registerLaunch({
-          taskID: info.id,
-          parentSessionID: pending.parentSessionId,
-          agent: pending.agentType,
-          description: pending.label,
-          objective: pending.label,
-          // session.created has no reliable call identity. Keep this
-          // registration tentative so an unrelated foreground call cannot
-          // accidentally arm wall-clock supervision.
-          background: false,
-        });
-        log(
-          '[task-session-manager] tentative early board registration from session.created',
-          {
-            taskID: record.taskID,
-            alias: record.alias,
-            parentSessionID: record.parentSessionID,
-            agent: record.agent,
-          },
-        );
+      if (pending && !pending.resumedTaskId && !pending.earlyRegisteredTaskID) {
+        if (deps.backgroundJobBoard.get(info.id)) {
+          pending.earlyRegistrationRejected = true;
+          log(
+            '[task-session-manager] refused early registration for an existing task ID',
+            { taskID: info.id, parentSessionID: info.parentID },
+          );
+        } else {
+          try {
+            const record = deps.backgroundJobBoard.registerLaunch({
+              taskID: info.id,
+              parentSessionID: pending.parentSessionId,
+              agent: pending.agentType,
+              description: pending.label,
+              objective: pending.label,
+              // session.created has no reliable call identity. Keep this
+              // registration tentative so an unrelated foreground call cannot
+              // accidentally arm wall-clock supervision.
+              background: false,
+            });
+            pending.earlyRegisteredTaskID = record.taskID;
+            log(
+              '[task-session-manager] tentative early board registration from session.created',
+              {
+                taskID: record.taskID,
+                alias: record.alias,
+                parentSessionID: record.parentSessionID,
+                agent: record.agent,
+              },
+            );
+          } catch (error) {
+            pending.earlyRegistrationRejected = true;
+            log(
+              '[task-session-manager] refused fenced early registration from session.created',
+              {
+                taskID: info.id,
+                parentSessionID: info.parentID,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            );
+          }
+        }
       }
     }
     return;
@@ -164,6 +189,7 @@ export async function handleEvent(
 
   if (input.event.type === 'server.instance.disposed') {
     deps.backgroundJobSupervisor?.dispose();
+    deps.pendingCallTracker.clearAll?.();
     deps.retainedBoardSnapshots.clear();
     const idleSessionIds = deps.idleReconciler.clearAllTimers();
     // Local-only: drop idle tokens. Process-global wait_for_user stays armed.
@@ -362,6 +388,7 @@ export async function handleEvent(
     deps.idleSessionTokens.clearSession(sessionId);
   }
   deps.inputWaits.clearInputWaits(sessionId);
+  deps.pendingCallTracker.clearSession(sessionId);
   deps.retainedBoardSnapshots.delete(sessionId);
   const fallbackInProgress =
     deps.options.isFallbackInProgress?.(sessionId) === true;

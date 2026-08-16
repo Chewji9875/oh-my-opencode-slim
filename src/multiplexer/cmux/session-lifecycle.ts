@@ -53,6 +53,15 @@ const ACTIVITY_EVENTS = new Set([
 const MIN_LIFETIME_MS = 10_000;
 const IDLE_CONFIRMATIONS = 3;
 
+function normalizeServerUrl(value: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value).toString();
+  } catch {
+    return value;
+  }
+}
+
 class ServerUrlUnavailableError extends Error {
   constructor() {
     super('OpenCode server URL is unavailable');
@@ -80,6 +89,7 @@ export class CmuxSessionLifecycle {
   private disposed = false;
   private spawnGeneration = 0;
   private readonly permanentlyClosedSessions?: Set<string>;
+  private readonly removeLatePaneObserver: () => void;
 
   constructor(
     private readonly owner: string,
@@ -106,22 +116,20 @@ export class CmuxSessionLifecycle {
     );
     this.serverCheck = options.isServerRunning ?? isServerRunning;
     this.fetchStatuses = options.fetchStatuses ?? (() => this.loadStatuses());
-    for (const orphan of this.store.claimOrphans(owner, defaultDirectory)) {
-      if (orphan.closePromise) continue;
-      if (
-        orphan.closeIntent?.phase === 'cooldown' &&
-        Number.isFinite(orphan.closeIntent.nextAttemptAt)
-      ) {
-        this.scheduleCooldown(orphan);
-      } else {
-        orphan.closeIntent = undefined;
-        void this.requestClose(orphan, 'cleanup');
-      }
-    }
+    const serverScope = () => normalizeServerUrl(this.resolveServerUrl());
+    this.removeLatePaneObserver = this.store.observeLatePaneOrphans(
+      defaultDirectory,
+      serverScope,
+      () => this.claimLatePaneOrphans(),
+    );
+    this.recoverOrphans(
+      this.store.claimOrphans(owner, defaultDirectory, serverScope),
+    );
   }
 
   async onSessionCreated(event: CmuxSessionEvent): Promise<void> {
     if (this.disposed) return;
+    this.claimLatePaneOrphans();
     if (event.type !== 'session.created') return;
     const info = event.properties?.info;
     if (!info?.id || !info.parentID) return;
@@ -139,7 +147,16 @@ export class CmuxSessionLifecycle {
       activityVersion: 0,
       idleConsecutive: 0,
     };
-    if (!this.store.claimCreated(record)) return;
+    if (!this.store.claimCreated(record)) {
+      const current = this.store.get(record.session);
+      if (
+        current?.owner === this.owner &&
+        current.paneId &&
+        (current.lifecycle === 'orphaned' || current.lifecycle === 'deleted')
+      )
+        this.recoverOrphans([current]);
+      return;
+    }
     if (record.paneId && record.lifecycle !== 'active') {
       record.closeIntent = undefined;
       await this.requestClose(record, 'cleanup');
@@ -150,6 +167,7 @@ export class CmuxSessionLifecycle {
 
   async onSessionStatus(event: CmuxSessionEvent): Promise<void> {
     if (this.disposed) return;
+    this.claimLatePaneOrphans();
     const session = this.eventSession(event);
     if (!session) return;
     const owned = this.store.get(session);
@@ -182,6 +200,8 @@ export class CmuxSessionLifecycle {
 
   async onSessionDeleted(event: CmuxSessionEvent): Promise<void> {
     if (event.type !== 'session.deleted') return;
+    if (this.disposed) return;
+    this.claimLatePaneOrphans();
     const session = this.eventSession(event);
     if (!session) return;
     const record = this.store.get(session);
@@ -199,6 +219,7 @@ export class CmuxSessionLifecycle {
 
   async closeSessionFromCoordinator(session: string): Promise<void> {
     if (this.disposed) return;
+    this.claimLatePaneOrphans();
     const record = this.store.get(session);
     if (record?.paneId && record.owner === this.owner) {
       // This is independent terminal evidence. It may permit an absent map
@@ -210,6 +231,7 @@ export class CmuxSessionLifecycle {
 
   async closeSessionPermanentlyFromCoordinator(session: string): Promise<void> {
     if (this.disposed) return;
+    this.claimLatePaneOrphans();
     this.permanentlyClosedSessions?.add(session);
     const record = this.store.get(session);
     if (!record || record.owner !== this.owner) return;
@@ -253,14 +275,16 @@ export class CmuxSessionLifecycle {
     const result = await operation;
     if (record.spawnPromise === operation) record.spawnPromise = undefined;
     const current = this.store.get(record.session);
+    const ownerChanged = current && current.owner !== this.owner;
     if (
       this.disposed ||
       generation !== this.spawnGeneration ||
-      this.permanentlyClosedSessions?.has(record.session)
+      this.permanentlyClosedSessions?.has(record.session) ||
+      ownerChanged
     ) {
       const latePane = result.paneId ?? result.orphanPaneId;
       if (latePane) await this.closeLatePane(record, latePane);
-      else if (current && !current.paneId)
+      if (current && current.owner === this.owner && !current.paneId)
         this.store.removeWithoutPane(record.session);
       return;
     }
@@ -310,6 +334,7 @@ export class CmuxSessionLifecycle {
       log('[cmux-session-lifecycle] no valid server URL; skipping spawn');
       return { success: false, error: 'unavailable' as const };
     }
+    record.serverUrl = normalizeServerUrl(serverUrl);
     if (!(await this.serverCheck(serverUrl)))
       return { success: false, error: 'unavailable' as const };
     if (this.permanentlyClosedSessions?.has(record.session))
@@ -399,8 +424,10 @@ export class CmuxSessionLifecycle {
     }
     const operation = this.performClose(record);
     const trackedOperation = operation.finally(() => {
-      if (record.closePromise === trackedOperation)
+      if (record.closePromise === trackedOperation) {
         record.closePromise = undefined;
+        this.store.notifyLatePaneOrphan(record);
+      }
     });
     record.closePromise = trackedOperation;
     await trackedOperation;
@@ -428,24 +455,34 @@ export class CmuxSessionLifecycle {
       record.closeIntent = this.policy.activity(intent);
       return;
     }
+    const paneId = record.paneId;
     let closed = false;
     try {
       // Await completion before any retry so the pane ID is never reused while
       // an older adapter kill may still be running.
-      closed = await this.multiplexer.closePane(record.paneId);
+      closed = await this.multiplexer.closePane(paneId);
     } catch (error) {
       log('[cmux-session-lifecycle] closePane failed; retaining pane', {
         owner: this.owner,
         session: record.session,
-        paneId: record.paneId,
+        paneId,
         error: String(error),
       });
     }
+    const current = this.store.get(record.session);
+    const ownerChanged =
+      current === record &&
+      record.owner !== this.owner &&
+      record.paneId === paneId;
+    if (ownerChanged) record.closeSettlement = { paneId, closed };
+    else record.closeSettlement = undefined;
     if (
-      this.disposed ||
-      this.store.get(record.session) !== record ||
+      (this.disposed &&
+        !(record.lifecycle === 'orphaned' && intent.reason === 'cleanup')) ||
+      current !== record ||
       record.owner !== this.owner ||
-      record.closeIntent !== intent
+      record.closeIntent !== intent ||
+      record.paneId !== paneId
     )
       return;
     const intentStillCurrent = record.closeIntent === intent;
@@ -500,7 +537,9 @@ export class CmuxSessionLifecycle {
   }
 
   private async poll(): Promise<void> {
-    if (this.polling || this.disposed) return;
+    if (this.disposed) return;
+    this.claimLatePaneOrphans();
+    if (this.polling) return;
     this.polling = true;
     try {
       const statuses = await this.fetchStatuses();
@@ -560,6 +599,31 @@ export class CmuxSessionLifecycle {
     }
   }
 
+  private resumeTransferredClose(record: CmuxSessionRecord): void {
+    const closePromise = record.closePromise;
+    if (!closePromise) return;
+    void closePromise.then(() => {
+      if (
+        this.disposed ||
+        this.store.get(record.session) !== record ||
+        record.owner !== this.owner ||
+        !record.paneId
+      )
+        return;
+      if (this.applyCloseSettlement(record)) return;
+      void this.requestClose(record, 'cleanup');
+    });
+  }
+
+  private applyCloseSettlement(record: CmuxSessionRecord): boolean {
+    const settlement = this.store.consumeCloseSettlement(record);
+    if (!settlement) return false;
+    if (!settlement.closed) return false;
+    this.store.removeAfterConfirmedClose(record.session);
+    this.updatePolling();
+    return true;
+  }
+
   private startPolling(): void {
     if (this.pollTimer || this.disposed) return;
     this.pollTimer = setInterval(
@@ -570,7 +634,11 @@ export class CmuxSessionLifecycle {
   }
 
   private updatePolling(): void {
-    if (this.store.ownedBy(this.owner).some((record) => record.paneId))
+    if (
+      this.store
+        .ownedBy(this.owner)
+        .some((record) => record.paneId && record.lifecycle === 'active')
+    )
       this.startPolling();
     else if (this.pollTimer) {
       clearInterval(this.pollTimer);
@@ -578,8 +646,33 @@ export class CmuxSessionLifecycle {
     }
   }
 
+  private async waitForSpawnSettlement(
+    pending: Promise<unknown>[],
+  ): Promise<void> {
+    if (pending.length === 0) return;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      let nativeTimer: ReturnType<typeof setTimeout> | undefined;
+      let injectedTimer: { cancel(): void } | undefined;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (nativeTimer) clearTimeout(nativeTimer);
+        injectedTimer?.cancel();
+        resolve();
+      };
+
+      nativeTimer = setTimeout(finish, this.shutdownTimeoutMs);
+      nativeTimer.unref?.();
+      if (this.injectedDelay)
+        injectedTimer = this.timer(finish, this.shutdownTimeoutMs);
+      void Promise.allSettled(pending).then(finish, finish);
+    });
+  }
+
   private async runCleanup(): Promise<void> {
     this.disposed = true;
+    this.removeLatePaneObserver();
     this.spawnGeneration += 1;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = undefined;
@@ -588,12 +681,7 @@ export class CmuxSessionLifecycle {
     const pending = records.flatMap((record) =>
       record.spawnPromise ? [record.spawnPromise] : [],
     );
-    if (pending.length) {
-      await Promise.race([
-        Promise.allSettled(pending),
-        this.delay(this.shutdownTimeoutMs),
-      ]);
-    }
+    await this.waitForSpawnSettlement(pending);
     const pendingCloses = this.store
       .ownedBy(this.owner)
       .flatMap((record) => (record.closePromise ? [record.closePromise] : []));
@@ -603,6 +691,7 @@ export class CmuxSessionLifecycle {
         if (!record.spawnPromise) this.store.removeWithoutPane(record.session);
         continue;
       }
+      if (this.applyCloseSettlement(record)) continue;
       record.closeTimer?.cancel();
       record.closeTimer = undefined;
       record.closeIntent = this.policy.request(
@@ -637,8 +726,10 @@ export class CmuxSessionLifecycle {
     }
     const operation = this.performCloseWithoutTimer(record);
     const trackedOperation = operation.finally(() => {
-      if (record.closePromise === trackedOperation)
+      if (record.closePromise === trackedOperation) {
         record.closePromise = undefined;
+        this.store.notifyLatePaneOrphan(record);
+      }
     });
     record.closePromise = trackedOperation;
     await trackedOperation;
@@ -661,8 +752,15 @@ export class CmuxSessionLifecycle {
         error: String(error),
       });
     }
+    const current = this.store.get(record.session);
+    const ownerChanged =
+      current === record &&
+      record.owner !== this.owner &&
+      record.paneId === paneId;
+    if (ownerChanged) record.closeSettlement = { paneId, closed };
+    else record.closeSettlement = undefined;
     if (
-      this.store.get(record.session) !== record ||
+      current !== record ||
       record.owner !== this.owner ||
       record.closeIntent !== intent ||
       record.paneId !== paneId
@@ -688,38 +786,67 @@ export class CmuxSessionLifecycle {
     source: CmuxSessionRecord,
     paneId: string,
   ): Promise<void> {
-    const existing = this.store.get(source.session);
-    if (existing && existing.owner !== this.owner) {
-      this.store.claimCreated({
-        session: `${source.session}\0late\0${paneId}`,
-        owner: this.owner,
-        parent: source.parent,
-        title: source.title,
-        directory: source.directory,
-        paneId,
-        spawnState: 'attached',
-        lifecycle: 'orphaned',
-        attachedAt: this.now(),
-        lastActivityAt: source.lastActivityAt,
-        activityVersion: source.activityVersion,
-        idleConsecutive: 0,
-      });
+    const session = `${source.session}\0late\0${paneId}`;
+    const existing = this.store.get(session);
+    if (existing) {
+      if (existing.owner !== this.owner || existing.paneId !== paneId) return;
+      await this.requestClose(existing, 'cleanup');
       return;
     }
-    const record = existing ?? source;
-    if (!existing) this.store.claimCreated(record);
-    record.paneId = paneId;
-    record.spawnState = 'attached';
-    record.lifecycle = 'orphaned';
-    record.closeIntent = this.policy.request(
-      'cleanup',
-      record.activityVersion,
-      this.now(),
+
+    const late: CmuxSessionRecord = {
+      session,
+      owner: this.owner,
+      parent: source.parent,
+      title: source.title,
+      directory: source.directory,
+      paneId,
+      spawnState: 'attached',
+      lifecycle: 'orphaned',
+      serverUrl: source.serverUrl,
+      attachedAt: this.now(),
+      lastActivityAt: source.lastActivityAt,
+      activityVersion: source.activityVersion,
+      idleConsecutive: 0,
+      latePaneCleanup: true,
+    };
+    if (!this.store.claimCreated(late)) return;
+    const current = this.store.get(session);
+    if (current !== late || current.owner !== this.owner) return;
+
+    // Keep this as a normal owner-scoped close intent. It may run after this
+    // lifecycle is disposed, and a later lifecycle can claim the record if a
+    // retry enters cooldown.
+    await this.requestClose(current, 'cleanup');
+  }
+
+  private claimLatePaneOrphans(): void {
+    const serverUrl = normalizeServerUrl(this.resolveServerUrl());
+    if (!serverUrl) return;
+    const claimed = this.store.claimLatePaneOrphans(
+      this.owner,
+      this.defaultDirectory,
+      serverUrl,
     );
-    while (record.closeIntent?.phase === 'pending') {
-      await this.attemptCloseWithoutTimer(record);
-      if (record.closeIntent?.phase === 'pending')
-        await this.delay(this.closeRetryMs);
+    this.recoverOrphans(claimed);
+  }
+
+  private recoverOrphans(orphaned: CmuxSessionRecord[]): void {
+    for (const orphan of orphaned) {
+      if (orphan.closePromise) {
+        this.resumeTransferredClose(orphan);
+        continue;
+      }
+      if (this.applyCloseSettlement(orphan)) continue;
+      if (
+        orphan.closeIntent?.phase === 'cooldown' &&
+        Number.isFinite(orphan.closeIntent.nextAttemptAt)
+      ) {
+        this.scheduleCooldown(orphan);
+      } else {
+        orphan.closeIntent = undefined;
+        void this.requestClose(orphan, 'cleanup');
+      }
     }
   }
 

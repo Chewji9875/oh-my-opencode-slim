@@ -25,6 +25,120 @@ describe('BackgroundJobBoard', () => {
     expect(board.hasRunning('parent-1')).toBe(true);
   });
 
+  test('cancellation lease fences a same-ID relaunch', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_lease',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+
+    expect(cancellationLease).toMatchObject({
+      taskID: first.taskID,
+      generation: first.generation,
+      kind: 'cancellation',
+    });
+    expect(
+      board.acquireRelaunchLease(first.taskID, first.generation),
+    ).toBeUndefined();
+    expect(() =>
+      board.registerLaunch({
+        taskID: first.taskID,
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+      }),
+    ).toThrow('cancellation lease');
+    expect(board.get(first.taskID)?.generation).toBe(first.generation);
+  });
+
+  test('relaunch lease fences cancellation and validates token/generation', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_lease',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const relaunchLease = board.acquireRelaunchLease(
+      first.taskID,
+      first.generation,
+    );
+
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not acquired');
+    expect(
+      board.acquireCancellationLease(first.taskID, first.generation),
+    ).toBeUndefined();
+    expect(
+      board.releaseLease({
+        ...relaunchLease,
+        token: 'wrong-token',
+      }),
+    ).toBe(false);
+    expect(
+      board.releaseLease({
+        ...relaunchLease,
+        generation: first.generation + 1,
+      }),
+    ).toBe(false);
+    expect(board.validateLease(relaunchLease)).toBe(true);
+
+    const second = board.registerLaunch({
+      taskID: first.taskID,
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      relaunchLease,
+    });
+    expect(second.generation).not.toBe(first.generation);
+    expect(board.releaseLease(relaunchLease)).toBe(true);
+  });
+
+  test('expected generation and cancellation token fence markCancelled', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_lease',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(cancellationLease).toBeDefined();
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+
+    expect(
+      board.markCancelled(first.taskID, 'wrong generation', Date.now(), {
+        force: true,
+        expectedGeneration: first.generation + 1,
+        cancellationLease,
+      })?.state,
+    ).toBe('running');
+    expect(
+      board.markCancelled(first.taskID, 'wrong token', Date.now(), {
+        force: true,
+        expectedGeneration: first.generation,
+        cancellationLease: {
+          ...cancellationLease,
+          token: 'wrong-token',
+        },
+      })?.state,
+    ).toBe('running');
+    expect(
+      board.markCancelled(first.taskID, 'cancelled', Date.now(), {
+        force: true,
+        expectedGeneration: first.generation,
+        cancellationLease,
+      })?.state,
+    ).toBe('cancelled');
+  });
+
   test('updates terminal task results as unreconciled', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
@@ -530,6 +644,43 @@ describe('BackgroundJobBoard', () => {
 
     expect(listener).toHaveBeenCalledWith('ses_1');
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not force-cancel a newer generation or notify terminal listeners', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    board.updateStatus({ taskID: 'ses_1', state: 'completed' });
+    listener.mockClear();
+    const relaunched = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+
+    const result = board.markCancelled(
+      'ses_1',
+      'stale cancellation',
+      Date.now(),
+      { force: true, expectedGeneration: relaunched.generation - 1 },
+    );
+
+    expect(result).toMatchObject({
+      generation: relaunched.generation,
+      state: 'running',
+      cancellationRequested: false,
+    });
+    expect(board.get('ses_1')).toMatchObject({
+      generation: relaunched.generation,
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(listener).not.toHaveBeenCalled();
   });
 
   test('does not notify terminal listener on forced markCancelled from terminal', () => {

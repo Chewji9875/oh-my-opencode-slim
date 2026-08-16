@@ -4,10 +4,13 @@ import {
   type BackgroundJobExecution,
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
+  clearBackgroundJobSuppression,
   deriveTaskSessionLabel,
+  getBackgroundJobLifecycleLedger,
   isInternalInitiatorPart,
   parseTaskIdFromTaskOutput,
   parseTaskStateFromOutput,
+  recordBackgroundJobSuppression,
 } from '../../utils';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import type { SessionLifecycle } from '../session-lifecycle';
@@ -17,7 +20,7 @@ import {
   type InjectedTerminalJobs,
   type InjectionState,
   injectBackgroundJobBoard,
-  MAX_PROCESSED_INJECTED_COMPLETIONS,
+  observeSyntheticTerminalPart,
   reconcileInjectedTerminalJobs,
   stabilizeRunningTaskParts,
   updateFromInjectedCompletion,
@@ -44,34 +47,6 @@ export { BACKGROUND_JOB_BOARD_METADATA_KEY } from './board-injection';
 const IDLE_RECONCILE_DELAY_MS = 2_000;
 
 const RECOVERED_TASK_AGENT_FALLBACK = 'unknown';
-const MAX_REHYDRATE_TOMBSTONES = 512;
-
-interface RehydrateTombstoneState {
-  tombstones: Set<string>;
-  deletionEpochs: Map<string, number>;
-  nextEpoch: number;
-}
-
-// Board instances can outlive a hook instance. Keep deletion guards alongside
-// the board so a recreated hook does not rehydrate an invalidated running part.
-const rehydrateTombstonesByBoard = new WeakMap<
-  BackgroundJobStore,
-  RehydrateTombstoneState
->();
-
-function rehydrateTombstonesFor(
-  backgroundJobBoard: BackgroundJobStore,
-): RehydrateTombstoneState {
-  const existing = rehydrateTombstonesByBoard.get(backgroundJobBoard);
-  if (existing) return existing;
-  const state: RehydrateTombstoneState = {
-    tombstones: new Set<string>(),
-    deletionEpochs: new Map<string, number>(),
-    nextEpoch: 0,
-  };
-  rehydrateTombstonesByBoard.set(backgroundJobBoard, state);
-  return state;
-}
 
 function rehydrateHistoricalRunningTasks(
   messages: unknown[],
@@ -204,21 +179,12 @@ export function createTaskSessionManagerHook(
       readContextMinLines: options.readContextMinLines,
       readContextMaxFiles: options.readContextMaxFiles,
     });
-  const rehydrateState = rehydrateTombstonesFor(backgroundJobBoard);
+  const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
 
   const rememberDeletedSession = (sessionID: string): void => {
     const remember = (taskID: string): void => {
-      if (rehydrateTombstones.has(taskID)) return;
-      if (rehydrateTombstones.size >= MAX_REHYDRATE_TOMBSTONES) {
-        const oldest = rehydrateTombstones.values().next().value;
-        if (oldest) {
-          rehydrateTombstones.delete(oldest);
-          rehydrateState.deletionEpochs.delete(oldest);
-        }
-      }
-      rehydrateTombstones.add(taskID);
-      rehydrateState.deletionEpochs.set(taskID, ++rehydrateState.nextEpoch);
+      recordBackgroundJobSuppression(backgroundJobBoard, taskID);
     };
 
     // The delete event itself is the lifecycle boundary. Keep a tombstone
@@ -229,11 +195,11 @@ export function createTaskSessionManagerHook(
     }
   };
 
-  const pendingCallTracker = createPendingCallTracker();
+  const pendingCallTracker = createPendingCallTracker({
+    releaseLease: (lease) => backgroundJobBoard.releaseLease(lease),
+  });
   const taskContextTracker = createTaskContextTracker();
 
-  const processedInjectedCompletions = new Set<string>();
-  const processedInjectedCompletionOrder: string[] = [];
   const terminalJobsInjectedByParent = new Map<string, InjectedTerminalJobs>();
   const pendingInjectedTerminalJobsByParent = new Map<
     string,
@@ -337,11 +303,18 @@ export function createTaskSessionManagerHook(
     backgroundJobBoard,
     maxRetainedSnapshots: options.maxRetainedSnapshots,
     strategy: options.strategy ?? 'latest',
-    processedInjectedCompletions,
-    processedInjectedCompletionOrder,
+    lifecycleLedger: rehydrateState,
+    processedInjectedCompletions: rehydrateState.processedInjectedCompletions,
+    processedInjectedCompletionOrder:
+      rehydrateState.processedInjectedCompletionOrder,
+    injectedCompletionFences: rehydrateState.injectedCompletionFences,
+    syntheticTerminalOccurrences: rehydrateState.syntheticTerminalOccurrences,
+    syntheticTerminalOccurrenceOrder:
+      rehydrateState.syntheticTerminalOccurrenceOrder,
+    getLifecycleEpoch: () => rehydrateState.nextEpoch,
+    getDeletionEpoch: (taskID) => rehydrateState.deletionEpochs.get(taskID),
     terminalJobsInjectedByParent,
     pendingInjectedTerminalJobsByParent,
-    maxProcessedInjectedCompletions: MAX_PROCESSED_INJECTED_COMPLETIONS,
     metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
     shouldManageSession: options.shouldManageSession,
     taskContextTracker,
@@ -429,10 +402,12 @@ export function createTaskSessionManagerHook(
         directory: _ctx.directory,
         backgroundJobBoard,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
+        recordLifecycleSuppression: (taskID) =>
+          recordBackgroundJobSuppression(backgroundJobBoard, taskID),
         pendingCallTracker,
         taskContextTracker,
         clearRehydrateTombstone: (taskID) => {
-          rehydrateTombstones.delete(taskID);
+          clearBackgroundJobSuppression(backgroundJobBoard, taskID);
         },
         isStaleDeletedTaskOutput: (taskID, lifecycleEpoch) => {
           const deletionEpoch = rehydrateState.deletionEpochs.get(taskID);
@@ -509,6 +484,7 @@ export function createTaskSessionManagerHook(
           sessionID?: string;
           status?: { type?: string };
           error?: { name?: string };
+          part?: unknown;
         };
       };
     }): Promise<void> => {
@@ -542,6 +518,8 @@ export function createTaskSessionManagerHook(
         pendingInjectedTerminalJobsByParent,
         retainedBoardSnapshots: injectionState.retainedBoardSnapshots,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
+        observeSyntheticTerminalPart: (part) =>
+          observeSyntheticTerminalPart(injectionState, part),
       }).then(() => runtimeStatusReconciler.schedule());
     },
   };

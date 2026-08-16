@@ -485,8 +485,8 @@ export class MultiplexerSessionManager {
     if (this.cmuxLifecycle) return this.cmuxLifecycle.pollOnce();
 
     const ownedSessions = () =>
-      [...this.sessions.entries()].filter(
-        ([, tracked]) => tracked.ownerInstanceId === this.instanceId,
+      [...this.sessions.entries()].filter(([, tracked]) =>
+        this.isPollableSession(tracked),
       );
     if (ownedSessions().length === 0) {
       this.stopPolling();
@@ -994,12 +994,19 @@ export class MultiplexerSessionManager {
 
   private updatePolling(): void {
     if (
-      [...this.sessions.values()].some(
-        (tracked) => tracked.ownerInstanceId === this.instanceId,
+      [...this.sessions.values()].some((tracked) =>
+        this.isPollableSession(tracked),
       )
     )
       this.startPolling();
     else this.stopPolling();
+  }
+
+  private isPollableSession(tracked: TrackedSession): boolean {
+    return (
+      tracked.ownerInstanceId === this.instanceId &&
+      tracked.closeState?.phase !== 'exhausted'
+    );
   }
 
   private getSessionId(event: SessionEvent): string | undefined {
@@ -1070,6 +1077,9 @@ export class MultiplexerSessionManager {
       this.busyDuringSpawn.clear();
     } finally {
       this.cleanupInProgress = false;
+      // A failed close remains in `sessions` with a retry record. Re-enable
+      // the shared polling executor after cleanup has stopped blocking it.
+      this.updatePolling();
     }
 
     log('[multiplexer-session-manager] cleanup complete');

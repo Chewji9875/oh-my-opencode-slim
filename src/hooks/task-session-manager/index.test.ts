@@ -5,6 +5,7 @@ import {
   BackgroundJobBoard,
   BackgroundJobSupervisor,
   createInternalAgentTextPart,
+  getBackgroundJobLifecycleLedger,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils';
 import {
@@ -1545,6 +1546,178 @@ describe('task-session-manager hook', () => {
       timedOut: false,
       recoverableAfterLiveBusy: true,
     });
+  });
+
+  test('holds a relaunch lease through after and releases it after registration', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.markReconciled('child-1');
+    const { hook } = createHook({ backgroundJobBoard: board });
+    const resume = {
+      args: { subagent_type: 'oracle', task_id: 'ora-1' },
+    };
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      resume,
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    const relaunched = board.get('child-1');
+    expect(resume.args.task_id).toBe('child-1');
+    expect(relaunched).toMatchObject({ generation: 2, state: 'running' });
+    const cancellationLease = board.acquireCancellationLease(
+      'child-1',
+      relaunched?.generation ?? -1,
+    );
+    expect(cancellationLease).toBeDefined();
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('session.created cannot early-register over a live cancellation lease', async () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+    });
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(cancellationLease).toBeDefined();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { args: { subagent_type: 'oracle', background: true } },
+    );
+    await hook.event({
+      event: {
+        type: 'session.created',
+        properties: {
+          info: { id: 'child-1', parentID: 'parent-1', agent: 'oracle' },
+        },
+      },
+    });
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    expect(board.get('child-1')).toMatchObject({
+      generation: first.generation,
+      state: 'running',
+    });
+    expect(board.acquireRelaunchLease('child-1', first.generation)).toBe(
+      undefined,
+    );
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('tool.execute.before refuses a relaunch while cancellation owns the generation', async () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    board.updateStatus({
+      taskID: first.taskID,
+      state: 'running',
+      timedOut: true,
+    });
+    board.markRunningFromLiveSession(
+      first.taskID,
+      Date.now(),
+      first.generation,
+    );
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(cancellationLease).toBeDefined();
+    const { hook } = createHook({ backgroundJobBoard: board });
+    const resume = { args: { subagent_type: 'fixer', task_id: 'fix-1' } };
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'blocked-resume' },
+        resume,
+      ),
+    ).rejects.toThrow('cannot be resumed safely');
+    expect(resume.args.task_id).toBe('fix-1');
+    expect(board.get(first.taskID)?.generation).toBe(first.generation);
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('after output errors still release a pending relaunch lease', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-error' },
+      { args: { subagent_type: 'oracle', task_id: 'ora-1' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-error' },
+      { output: undefined },
+    );
+
+    const secondLease = board.acquireRelaunchLease('child-1', 1);
+    expect(secondLease).toBeDefined();
+    if (!secondLease) throw new Error('relaunch lease was not released');
+    board.releaseLease(secondLease);
+  });
+
+  test('after handler exceptions release a pending relaunch lease', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.markReconciled('child-1');
+    board.addContext = () => {
+      throw new Error('context tracking failed');
+    };
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-throw' },
+      { args: { subagent_type: 'oracle', task_id: 'ora-1' } },
+    );
+    await expect(
+      hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'resume-throw' },
+        { output: ['task_id: child-1', 'state: running'].join('\n') },
+      ),
+    ).rejects.toThrow('context tracking failed');
+
+    const cancellationLease = board.acquireCancellationLease('child-1', 2);
+    expect(cancellationLease).toBeDefined();
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
   });
 
   test('does not bypass live busy recovery gate for known raw session ids', async () => {
@@ -4887,6 +5060,678 @@ describe('task-session-manager hook', () => {
       description: 'second run',
     });
     expect(board.list()).toHaveLength(1);
+  });
+
+  test('fences a re-injected generation-one completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    const oldCompletion = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              id: 'generation-one-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-relaunch" state="completed">',
+                '<summary>Background task completed: first run</summary>',
+                '<task_result>',
+                'old result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    await first.hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion.messages[0].parts[0] },
+      },
+    });
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+
+    // The runtime event observed P1, but its message has not reached the
+    // transform hook yet.
+    expect(terminalListener).not.toHaveBeenCalled();
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+    expect(board.get('child-relaunch')).toBeUndefined();
+
+    // A recreated hook shares the board's lifecycle fence, while its local
+    // processed-occurrence set is intentionally fresh.
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      { output: taskLaunchOutput('child-relaunch') },
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+    expect(terminalListener).not.toHaveBeenCalled();
+
+    const replayedCompletion = {
+      messages: JSON.parse(JSON.stringify(oldCompletion.messages)),
+    };
+    await hook['experimental.chat.messages.transform'](
+      {},
+      replayedCompletion as never,
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two-result' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run result',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two-result' },
+      {
+        output: [
+          'task_id: child-relaunch',
+          'state: completed',
+          '',
+          '<task_result>',
+          'new result',
+          '</task_result>',
+        ].join('\n'),
+      },
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'completed',
+      resultSummary: 'new result',
+      statusUncertain: false,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps an ambiguous old completion fail-closed after a late event', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    const oldCompletion = {
+      type: 'text',
+      id: 'generation-one-completion',
+      synthetic: true,
+      text: [
+        '<task id="child-relaunch" state="completed">',
+        '<summary>Background task completed: first run</summary>',
+        '<task_result>',
+        'old result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+    expect(board.get('child-relaunch')).toBeUndefined();
+
+    // The first event arrives after deletion, with no live board record to
+    // establish which generation produced the terminal part.
+    await first.hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion },
+      },
+    });
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      { output: taskLaunchOutput('child-relaunch') },
+    );
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+    });
+
+    // A late event for the old P1 part must not replace the ambiguous origin
+    // with G2 provenance.
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion },
+      },
+    });
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [oldCompletion],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('fails closed for a newly observed synthetic completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'second run',
+    });
+
+    const completion = {
+      type: 'text',
+      id: 'generation-two-completion',
+      synthetic: true,
+      sessionID: 'parent-1',
+      messageID: 'message-generation-two',
+      text: [
+        '<task id="child-relaunch" state="completed">',
+        '<summary>Background task completed: second run</summary>',
+        '<task_result>',
+        'new synthetic result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [completion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+  });
+
+  test('allows an observed synthetic completion in the same generation', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-same-generation',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'same generation',
+    });
+
+    const completion = {
+      type: 'text',
+      id: 'same-generation-completion',
+      synthetic: true,
+      text: [
+        '<task id="child-same-generation" state="completed">',
+        '<summary>Background task completed: same generation</summary>',
+        '<task_result>',
+        'same generation result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [completion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-same-generation')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'same generation result',
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails closed for an unobserved synthetic completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'second run',
+    });
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              id: 'unobserved-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-relaunch" state="completed">',
+                '<summary>Background task completed: unknown origin</summary>',
+                '<task_result>',
+                'ambiguous result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('does not upgrade an ambiguous occurrence without a deletion epoch', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-ambiguous',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'ambiguous observation',
+    });
+
+    const completion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'ambiguous-message',
+      text: [
+        '<task id="child-ambiguous" state="completed">',
+        '<summary>Background task completed: uncertain</summary>',
+        '<task_result>',
+        'uncertain result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [completion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-ambiguous')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('retains an old occurrence provenance after more than 500 later occurrences', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-occurrence-ledger',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'generation one',
+    });
+
+    const completion = (id: string, result: string) => ({
+      type: 'text',
+      id,
+      synthetic: true,
+      text: [
+        '<task id="child-occurrence-ledger" state="completed">',
+        '<summary>Background task completed: occurrence</summary>',
+        '<task_result>',
+        result,
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    });
+
+    const firstCompletion = completion('p1-occurrence', 'old result');
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: firstCompletion },
+      },
+    });
+
+    for (let index = 0; index < 501; index += 1) {
+      board.registerLaunch({
+        taskID: 'child-occurrence-ledger',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: `generation ${index + 2}`,
+      });
+      const laterCompletion = completion(
+        `later-occurrence-${index}`,
+        `result ${index}`,
+      );
+      await hook.event({
+        event: {
+          type: 'message.part.updated',
+          properties: { part: laterCompletion },
+        },
+      });
+      await hook['experimental.chat.messages.transform']({}, {
+        messages: [
+          {
+            info: {
+              role: 'user',
+              agent: 'orchestrator',
+              sessionID: 'parent-1',
+            },
+            parts: [laterCompletion],
+          },
+        ],
+      } as never);
+    }
+
+    terminalListener.mockClear();
+    const current = board.registerLaunch({
+      taskID: 'child-occurrence-ledger',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'current generation',
+    });
+    expect(current.generation).toBe(503);
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [JSON.parse(JSON.stringify(firstCompletion))],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-occurrence-ledger')).toMatchObject({
+      generation: current.generation,
+      state: 'running',
+      statusUncertain: true,
+      resultSummary: undefined,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('direct drop suppresses historical rehydrate until a new launch clears it', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-direct-drop',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'dropped run',
+    });
+
+    board.drop('child-direct-drop');
+    const ledger = getBackgroundJobLifecycleLedger(board);
+    expect(ledger.tombstones.has('child-direct-drop')).toBe(true);
+
+    const historical = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-direct-drop')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, historical as never);
+    expect(board.get('child-direct-drop')).toBeUndefined();
+
+    const relaunched = board.registerLaunch({
+      taskID: 'child-direct-drop',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'new run',
+    });
+    expect(relaunched.generation).toBe(2);
+    expect(ledger.tombstones.has('child-direct-drop')).toBe(false);
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-direct-drop')],
+        },
+        ...createMessages('parent-1', 'continue again').messages,
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-direct-drop')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      description: 'new run',
+    });
   });
 
   test('marks idle as provisional when fallback guard passes', async () => {

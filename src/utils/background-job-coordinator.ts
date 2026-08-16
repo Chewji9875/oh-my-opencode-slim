@@ -1,6 +1,7 @@
 import type {
   BackgroundJobBoard,
   BackgroundJobLaunchInput,
+  BackgroundJobLease,
   BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
@@ -137,6 +138,28 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     return this.board.registerLaunch(input);
   }
 
+  acquireCancellationLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    return this.board.acquireCancellationLease(taskID, generation);
+  }
+
+  acquireRelaunchLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    return this.board.acquireRelaunchLease(taskID, generation);
+  }
+
+  validateLease(lease: BackgroundJobLease): boolean {
+    return this.board.validateLease(lease);
+  }
+
+  releaseLease(lease: BackgroundJobLease): boolean {
+    return this.board.releaseLease(lease);
+  }
+
   updateStatus(
     input: BackgroundJobStatusInput,
   ): BackgroundJobRecord | undefined {
@@ -212,7 +235,11 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     taskID: string,
     reason?: string,
     now = Date.now(),
-    options: { force?: boolean } = {},
+    options: {
+      force?: boolean;
+      expectedGeneration?: number;
+      cancellationLease?: BackgroundJobLease;
+    } = {},
   ): BackgroundJobRecord | undefined {
     return this.board.markCancelled(taskID, reason, now, options);
   }

@@ -1,3 +1,5 @@
+import type { BackgroundJobLease } from '../../utils/background-job-board';
+
 export interface PendingTaskCall {
   callId: string;
   parentSessionId: string;
@@ -7,22 +9,35 @@ export interface PendingTaskCall {
   /** Deletion epoch observed when this native task call started. */
   lifecycleEpoch: number;
   resumedTaskId?: string;
+  relaunchLease?: BackgroundJobLease;
+  earlyRegisteredTaskID?: string;
+  earlyRegistrationRejected?: boolean;
 }
 
 const MAX_PENDING_TASK_CALLS = 100;
 
-export function createPendingCallTracker() {
+export function createPendingCallTracker(
+  options: { releaseLease?: (lease: BackgroundJobLease) => boolean } = {},
+) {
   const pendingCalls = new Map<string, PendingTaskCall>();
   let anonymousPendingCallId = 0;
 
+  const releaseCallLease = (call: PendingTaskCall): void => {
+    if (call.relaunchLease) options.releaseLease?.(call.relaunchLease);
+  };
+
   return {
     add(call: PendingTaskCall) {
+      const replaced = pendingCalls.get(call.callId);
+      if (replaced) releaseCallLease(replaced);
       pendingCalls.delete(call.callId);
       pendingCalls.set(call.callId, call);
       while (pendingCalls.size > MAX_PENDING_TASK_CALLS) {
         const firstKey = pendingCalls.keys().next().value;
         if (firstKey === undefined) break;
+        const evicted = pendingCalls.get(firstKey);
         pendingCalls.delete(firstKey);
+        if (evicted) releaseCallLease(evicted);
       }
     },
 
@@ -42,10 +57,20 @@ export function createPendingCallTracker() {
       return pending;
     },
 
+    release(call: PendingTaskCall) {
+      releaseCallLease(call);
+    },
+
     /** Peek oldest pending call for a parent without removing it. */
     peekByParent(parentSessionId: string) {
       for (const call of pendingCalls.values()) {
-        if (call.parentSessionId === parentSessionId) return call;
+        if (
+          call.parentSessionId === parentSessionId &&
+          !call.earlyRegisteredTaskID &&
+          !call.earlyRegistrationRejected
+        ) {
+          return call;
+        }
       }
       return undefined;
     },
@@ -65,6 +90,9 @@ export function createPendingCallTracker() {
       let fallback: PendingTaskCall | undefined;
       for (const call of pendingCalls.values()) {
         if (call.parentSessionId !== parentSessionId) continue;
+        if (call.earlyRegisteredTaskID || call.earlyRegistrationRejected) {
+          continue;
+        }
         if (!fallback) fallback = call;
         if (call.agentType === agentHint) return call;
       }
@@ -75,8 +103,14 @@ export function createPendingCallTracker() {
       for (const [callId, pending] of pendingCalls.entries()) {
         if (pending.parentSessionId === sessionId) {
           pendingCalls.delete(callId);
+          releaseCallLease(pending);
         }
       }
+    },
+
+    clearAll() {
+      for (const pending of pendingCalls.values()) releaseCallLease(pending);
+      pendingCalls.clear();
     },
 
     pendingCallId(sessionID?: string, callID?: string) {

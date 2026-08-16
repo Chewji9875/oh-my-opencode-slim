@@ -16,6 +16,8 @@ export interface CmuxSessionRecord {
   parent: string;
   title: string;
   directory: string;
+  /** Server scope that created the pane. */
+  serverUrl?: string;
   paneId?: string;
   spawnState: CmuxSpawnState;
   lifecycle: CmuxLifecycleState;
@@ -30,10 +32,28 @@ export interface CmuxSessionRecord {
   closeIntent?: CmuxCloseIntent;
   closeTimer?: { cancel(): void };
   closePromise?: Promise<void>;
+  /** Result of a close that settled after ownership changed. */
+  closeSettlement?: CmuxCloseSettlement;
   spawnPromise?: Promise<PaneResult>;
+  /** A pane returned by a spawn generation that can no longer be adopted. */
+  latePaneCleanup?: boolean;
+}
+
+export interface CmuxCloseSettlement {
+  paneId: string;
+  closed: boolean;
 }
 
 const STORE_KEY = Symbol.for('oh-my-opencode-slim.cmux-session-store');
+const ORPHAN_OBSERVERS_KEY = Symbol.for(
+  'oh-my-opencode-slim.cmux-orphan-observers',
+);
+
+interface LatePaneOrphanObserver {
+  directory: string;
+  serverUrl: string | (() => string | undefined);
+  callback: () => void;
+}
 
 function records(): Map<string, CmuxSessionRecord> {
   const globalStore = globalThis as typeof globalThis & {
@@ -43,7 +63,28 @@ function records(): Map<string, CmuxSessionRecord> {
   return globalStore[STORE_KEY];
 }
 
+function orphanObservers(): Set<LatePaneOrphanObserver> {
+  const globalStore = globalThis as typeof globalThis & {
+    [ORPHAN_OBSERVERS_KEY]?: Set<LatePaneOrphanObserver>;
+  };
+  globalStore[ORPHAN_OBSERVERS_KEY] ??= new Set();
+  return globalStore[ORPHAN_OBSERVERS_KEY];
+}
+
 export class CmuxSessionStore {
+  consumeCloseSettlement(
+    record: CmuxSessionRecord,
+  ): CmuxCloseSettlement | undefined {
+    if (records().get(record.session) !== record) return undefined;
+    const settlement = record.closeSettlement;
+    if (!settlement) return undefined;
+    if (settlement.paneId !== record.paneId) {
+      record.closeSettlement = undefined;
+      return undefined;
+    }
+    record.closeSettlement = undefined;
+    return settlement;
+  }
   claimCreated(record: CmuxSessionRecord): boolean {
     const existing = records().get(record.session);
     if (existing) {
@@ -55,7 +96,14 @@ export class CmuxSessionStore {
       // Transfer ownership without replacing the record while an adapter
       // close is in flight. The old operation must settle before any retry.
       if (existing.closePromise) {
-        existing.owner = record.owner;
+        if (!existing.latePaneCleanup) existing.owner = record.owner;
+        return false;
+      }
+      const settlement = this.consumeCloseSettlement(existing);
+      if (settlement?.closed) {
+        existing.closeTimer?.cancel();
+        existing.closeTimer = undefined;
+        records().delete(existing.session);
         return false;
       }
       existing.closeTimer?.cancel();
@@ -65,6 +113,7 @@ export class CmuxSessionStore {
       });
     }
     records().set(record.session, record);
+    this.notifyLatePaneOrphan(record);
     return true;
   }
   get(session: string): CmuxSessionRecord | undefined {
@@ -73,11 +122,65 @@ export class CmuxSessionStore {
   ownedBy(owner: string): CmuxSessionRecord[] {
     return [...records().values()].filter((record) => record.owner === owner);
   }
-  claimOrphans(owner: string, directory: string): CmuxSessionRecord[] {
+  observeLatePaneOrphans(
+    directory: string,
+    serverUrl: string | (() => string | undefined),
+    callback: () => void,
+  ): () => void {
+    const observer = { directory, serverUrl, callback };
+    orphanObservers().add(observer);
+    return () => orphanObservers().delete(observer);
+  }
+  notifyLatePaneOrphan(record: CmuxSessionRecord): void {
+    if (!record.latePaneCleanup || !record.paneId || !record.serverUrl) return;
+    for (const observer of orphanObservers()) {
+      if (observer.directory !== record.directory) continue;
+      const serverUrl =
+        typeof observer.serverUrl === 'function'
+          ? observer.serverUrl()
+          : observer.serverUrl;
+      if (serverUrl !== record.serverUrl) continue;
+      queueMicrotask(() => {
+        if (orphanObservers().has(observer)) observer.callback();
+      });
+    }
+  }
+  claimOrphans(
+    owner: string,
+    directory: string,
+    serverUrl?: string | (() => string | undefined),
+  ): CmuxSessionRecord[] {
     const claimed = [...records().values()].filter(
       (record) =>
         record.directory === directory &&
         Boolean(record.paneId) &&
+        (!record.latePaneCleanup ||
+          (serverUrl !== undefined &&
+            (typeof serverUrl === 'function' ? serverUrl() : serverUrl) ===
+              record.serverUrl &&
+            !record.closePromise)) &&
+        (record.lifecycle === 'orphaned' || record.lifecycle === 'deleted'),
+    );
+    for (const record of claimed) {
+      record.closeTimer?.cancel();
+      record.closeTimer = undefined;
+      record.owner = owner;
+    }
+    return claimed;
+  }
+  claimLatePaneOrphans(
+    owner: string,
+    directory: string,
+    serverUrl: string,
+  ): CmuxSessionRecord[] {
+    const claimed = [...records().values()].filter(
+      (record) =>
+        record.owner !== owner &&
+        record.latePaneCleanup === true &&
+        record.directory === directory &&
+        record.serverUrl === serverUrl &&
+        Boolean(record.paneId) &&
+        !record.closePromise &&
         (record.lifecycle === 'orphaned' || record.lifecycle === 'deleted'),
     );
     for (const record of claimed) {
@@ -128,5 +231,6 @@ export class CmuxSessionStore {
       record.closeTimer?.cancel();
     }
     records().clear();
+    orphanObservers().clear();
   }
 }

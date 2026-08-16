@@ -34,6 +34,17 @@ function busyClient(promptCalls: Array<() => Promise<unknown>> = []): void {
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('task_nudge', () => {
   test('admits a parent-owned live, possibly-stuck child via noReply without resuming it', async () => {
     const board = new BackgroundJobBoard();
@@ -257,6 +268,93 @@ describe('task_nudge', () => {
         sessionID: 'parent-1',
       } as any),
     ).rejects.toThrow('board state is completed, not running');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('does not prompt after the task completes during live status lookup', async () => {
+    const board = new BackgroundJobBoard();
+    registerStuckChild(board);
+    const prompt = mock(async () => ({}));
+    const statusResult = deferred<{ data: Record<string, unknown> }>();
+    const status = mock(async () => statusResult.promise);
+    client = { session: { status, prompt } };
+    const { task_nudge } = createTaskNudgeTool({
+      input: { directory: '/test' } as any,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    const pending = task_nudge.execute(
+      { task_id: 'ses_child1', message: 'Nudge' },
+      { sessionID: 'parent-1' } as any,
+    );
+    await Promise.resolve();
+    board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    statusResult.resolve({ data: { ses_child1: { type: 'busy' } } });
+
+    await expect(pending).rejects.toThrow(
+      'board state is completed, not running',
+    );
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('does not prompt after the task is deleted during live status lookup', async () => {
+    const board = new BackgroundJobBoard();
+    registerStuckChild(board);
+    const prompt = mock(async () => ({}));
+    const statusResult = deferred<{ data: Record<string, unknown> }>();
+    const status = mock(async () => statusResult.promise);
+    client = { session: { status, prompt } };
+    const { task_nudge } = createTaskNudgeTool({
+      input: { directory: '/test' } as any,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    const pending = task_nudge.execute(
+      { task_id: 'ses_child1', message: 'Nudge' },
+      { sessionID: 'parent-1' } as any,
+    );
+    await Promise.resolve();
+    board.drop('ses_child1');
+    statusResult.resolve({ data: { ses_child1: { type: 'busy' } } });
+
+    await expect(pending).rejects.toThrow('no longer tracked');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('does not prompt an old generation after relaunch during live status lookup', async () => {
+    const board = new BackgroundJobBoard();
+    registerStuckChild(board);
+    const prompt = mock(async () => ({}));
+    const statusResult = deferred<{ data: Record<string, unknown> }>();
+    const status = mock(async () => statusResult.promise);
+    client = { session: { status, prompt } };
+    const { task_nudge } = createTaskNudgeTool({
+      input: { directory: '/test' } as any,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    const pending = task_nudge.execute(
+      { task_id: 'ses_child1', message: 'Nudge' },
+      { sessionID: 'parent-1' } as any,
+    );
+    await Promise.resolve();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 121_000,
+    });
+    statusResult.resolve({ data: { ses_child1: { type: 'busy' } } });
+
+    await expect(pending).rejects.toThrow('run generation changed');
     expect(prompt).not.toHaveBeenCalled();
   });
 
