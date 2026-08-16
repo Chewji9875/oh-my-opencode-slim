@@ -56,6 +56,17 @@ const INTERVIEW_CONFIG_KEYS = [
   'dashboard',
 ] as const;
 
+// Config keys that must be arrays. A string value (e.g. "explorer") is
+// normalized to a single-element array; any other non-array value is
+// dropped. Normalization happens before schema validation so a typo in one
+// key does not silently discard the user's entire config (issue #1027).
+const DISABLED_CONFIG_KEYS = [
+  'disabled_agents',
+  'disabled_tools',
+  'disabled_mcps',
+  'disabled_skills',
+] as const;
+
 function retainExplicitInterviewFields(
   parsedConfig: PluginConfig,
   rawConfig: unknown,
@@ -198,6 +209,52 @@ function loadConfigFromPath(
         });
         if (!options?.silent) {
           console.warn(`[oh-my-opencode-slim] ${fallbackMsg}`);
+        }
+      }
+    }
+
+    // Normalize disabled_* config keys before schema validation so a
+    // non-array value does not reject the whole config object (which would
+    // silently discard every other user setting). A string value keeps the
+    // user's disable intent as a single-element array; any other non-array
+    // value (number, boolean, object, ...) is dropped.
+    if (
+      typeof rawConfig === 'object' &&
+      rawConfig !== null &&
+      !Array.isArray(rawConfig)
+    ) {
+      const configRecord = rawConfig as Record<string, unknown>;
+      for (const key of DISABLED_CONFIG_KEYS) {
+        const value = configRecord[key];
+        if (value === undefined || Array.isArray(value)) {
+          continue;
+        }
+        if (typeof value === 'string') {
+          configRecord[key] = [value];
+          const normalizedMsg =
+            `Config key "${key}" should be an array; ` +
+            `normalized to ["${value}"].`;
+          options?.onWarning?.({
+            path: configPath,
+            kind: 'invalid-schema',
+            message: normalizedMsg,
+          });
+          if (!options?.silent) {
+            console.warn(`[oh-my-opencode-slim] ${normalizedMsg}`);
+          }
+        } else {
+          delete configRecord[key];
+          const droppedMsg =
+            `Config key "${key}" must be an array; ` +
+            `ignoring invalid value.`;
+          options?.onWarning?.({
+            path: configPath,
+            kind: 'invalid-schema',
+            message: droppedMsg,
+          });
+          if (!options?.silent) {
+            console.warn(`[oh-my-opencode-slim] ${droppedMsg}`);
+          }
         }
       }
     }
@@ -532,39 +589,6 @@ export function loadPluginConfig(
   // auto+observer-disabled case by returning true, which triggers the
   // debounced toast in index.ts. Overriding to 'direct' here would prevent
   // processImageAttachments from returning true and suppress the toast.
-
-  // Normalize disabled_* config keys to ensure they are arrays or undefined.
-  // This loop is currently unreachable via the normal file-loading path:
-  // PluginConfigSchema.safeParse() rejects the WHOLE config object if any
-  // disabled_* field is non-array (no .catch() on these fields), so
-  // loadConfigFromPath returns null and the file falls back to {} BEFORE this
-  // loop ever runs. Retained only as defense-in-depth against a future schema
-  // relaxation (e.g. adding .catch() to these fields) or a construction path
-  // that bypasses safeParse entirely — not as a proven/tested fix for the
-  // originally reported crash (root cause not reproduced).
-  const ARRAY_CONFIG_KEYS = [
-    'disabled_agents',
-    'disabled_tools',
-    'disabled_mcps',
-    'disabled_skills',
-  ] as const;
-
-  const configPathForWarning = projectConfigPath ?? userConfigPath ?? '';
-  for (const key of ARRAY_CONFIG_KEYS) {
-    const value = config[key as keyof PluginConfig];
-    if (value !== undefined && !Array.isArray(value)) {
-      const message = `Config key "${key}" must be an array; ignoring invalid value.`;
-      options?.onWarning?.({
-        path: configPathForWarning,
-        kind: 'invalid-schema',
-        message,
-      });
-      if (!options?.silent) {
-        console.warn(`[oh-my-opencode-slim] ${message}`);
-      }
-      delete config[key as keyof PluginConfig];
-    }
-  }
 
   return config;
 }
