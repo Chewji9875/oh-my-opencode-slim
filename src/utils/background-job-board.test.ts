@@ -97,6 +97,45 @@ describe('BackgroundJobBoard', () => {
     expect(board.releaseLease(relaunchLease)).toBe(true);
   });
 
+  test('message lease is mutually exclusive with cancellation and relaunch', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_message_lease',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const messageLease = board.acquireMessageLease(
+      first.taskID,
+      first.generation,
+    );
+
+    expect(messageLease).toMatchObject({
+      taskID: first.taskID,
+      generation: first.generation,
+      kind: 'message',
+    });
+    expect(board.acquireCancellationLease(first.taskID, first.generation)).toBe(
+      undefined,
+    );
+    expect(board.acquireRelaunchLease(first.taskID, first.generation)).toBe(
+      undefined,
+    );
+    expect(() =>
+      board.registerLaunch({
+        taskID: first.taskID,
+        parentSessionID: first.parentSessionID,
+        agent: first.agent,
+      }),
+    ).toThrow('message lease');
+
+    if (!messageLease) throw new Error('message lease was not acquired');
+    expect(board.validateLease(messageLease)).toBe(true);
+    expect(board.releaseLease(messageLease)).toBe(true);
+    expect(
+      board.acquireCancellationLease(first.taskID, first.generation),
+    ).toBeDefined();
+  });
+
   test('expected generation and cancellation token fence markCancelled', () => {
     const board = new BackgroundJobBoard();
     const first = board.registerLaunch({
@@ -403,28 +442,110 @@ describe('BackgroundJobBoard', () => {
     expect(prompt).toContain('#### Reusable Sessions\n- none');
   });
 
-  test('does not expose cancelled or errored jobs as reusable', () => {
+  test('reuses cancelled and errored jobs only after terminal acknowledgement', () => {
+    const board = new BackgroundJobBoard();
+
+    for (const [taskID, state] of [
+      ['ses_cancelled', 'cancelled'],
+      ['ses_error', 'error'],
+    ] as const) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: `${state} review`,
+      });
+      board.updateStatus({ taskID, state });
+
+      expect(board.get(taskID)).toMatchObject({
+        state,
+        terminalUnreconciled: true,
+      });
+      expect(
+        board.resolveReusable('parent-1', taskID, 'oracle'),
+      ).toBeUndefined();
+
+      board.markReconciled(taskID);
+
+      expect(board.resolveReusable('parent-1', taskID, 'oracle')).toMatchObject(
+        {
+          taskID,
+          state: 'reconciled',
+          terminalState: state,
+          terminalUnreconciled: false,
+        },
+      );
+    }
+
+    const prompt = board.formatForPrompt('parent-1');
+    expect(prompt).toContain('ses_cancelled / oracle / cancelled, reconciled');
+    expect(prompt).toContain(
+      'Acknowledged terminal sessions are reusable by alias',
+    );
+    expect(prompt).toContain('ses_error / oracle / error, reconciled');
+  });
+
+  test('does not reuse an acknowledged terminal job with uncertain status', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
-      taskID: 'ses_cancelled',
+      taskID: 'ses_uncertain',
       parentSessionID: 'parent-1',
       agent: 'oracle',
-      description: 'cancelled review',
     });
-    board.updateStatus({ taskID: 'ses_cancelled', state: 'cancelled' });
-    board.markReconciled('ses_cancelled');
-    board.registerLaunch({
-      taskID: 'ses_error',
-      parentSessionID: 'parent-1',
-      agent: 'oracle',
-      description: 'errored review',
+    board.claimWallClockDeadline({
+      taskID: 'ses_uncertain',
+      generation: board.get('ses_uncertain')?.generation ?? -1,
     });
-    board.updateStatus({ taskID: 'ses_error', state: 'error' });
-    board.markReconciled('ses_error');
+    board.finalizeWallClockTimeout({
+      taskID: 'ses_uncertain',
+      generation: board.get('ses_uncertain')?.generation ?? -1,
+      statusUncertain: true,
+      resultSummary: 'status unavailable',
+    });
+    board.markReconciled('ses_uncertain');
 
-    expect(board.formatForPrompt('parent-1')).toBeUndefined();
-    expect(board.resolveReusable('parent-1', 'ses_cancelled')).toBeUndefined();
-    expect(board.resolveReusable('parent-1', 'ses_error')).toBeUndefined();
+    expect(board.resolveReusable('parent-1', 'ses_uncertain')).toBeUndefined();
+  });
+
+  test('stale generations cannot alter a newer relaunch after terminal acknowledgement', () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'ses_generation_terminal',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+    });
+    board.updateStatus({
+      taskID: first.taskID,
+      state: 'error',
+      expectedGeneration: first.generation,
+    });
+    board.markReconciled(first.taskID);
+
+    const relaunchLease = board.acquireRelaunchLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(relaunchLease).toBeDefined();
+    if (!relaunchLease) throw new Error('relaunch lease was not acquired');
+    const second = board.registerLaunch({
+      taskID: first.taskID,
+      parentSessionID: first.parentSessionID,
+      agent: first.agent,
+      relaunchLease,
+    });
+
+    const stale = board.updateStatus({
+      taskID: first.taskID,
+      state: 'cancelled',
+      expectedGeneration: first.generation,
+    });
+
+    expect(stale).toMatchObject({
+      generation: second.generation,
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(board.get(first.taskID)?.generation).toBe(second.generation);
   });
 
   test('prompt distinguishes reusable and recoverable sessions', () => {

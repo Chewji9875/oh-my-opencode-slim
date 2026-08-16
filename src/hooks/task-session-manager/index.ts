@@ -30,6 +30,7 @@ import { createIdleReconciler } from './idle-reconciliation';
 import { createIdleSessionTokens } from './idle-session-tokens';
 import { createInputWaitTracker } from './input-wait-tracker';
 import { createPendingCallTracker } from './pending-call-tracker';
+import type { RevivedRunTracker } from './revived-run-tracker';
 import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
 import { createTaskContextTracker } from './task-context-tracker';
 import {
@@ -170,6 +171,7 @@ export function createTaskSessionManagerHook(
     idleReconcileDelayMs?: number;
     /** Test seam only; production uses the runtime reconciliation delay. */
     runtimeStatusReconcileDelayMs?: number;
+    revivedRunTracker?: RevivedRunTracker;
   },
 ) {
   const backgroundJobBoard =
@@ -239,6 +241,7 @@ export function createTaskSessionManagerHook(
     getIdleSessionToken: (s) => getIdleSessionToken(s),
     isCurrentIdleSessionToken: (s, t) => isCurrentIdleSessionToken(s, t),
     taskContextTracker,
+    revivedRunTracker: options.revivedRunTracker,
   });
   const runtimeStatusReconciler = createRuntimeStatusReconciler({
     input: _ctx,
@@ -323,6 +326,17 @@ export function createTaskSessionManagerHook(
   };
 
   return {
+    markRevivedRunPending: (taskID: string): void => {
+      taskContextTracker.pendingManagedTaskIds.add(taskID);
+    },
+    clearRevivedRunPending: (taskID: string): void => {
+      taskContextTracker.pendingManagedTaskIds.delete(taskID);
+    },
+    contextFilesForTask: (taskID: string) =>
+      taskContextTracker.contextFilesForPrompt(taskID),
+    pruneTaskContext: (): void => {
+      taskContextTracker.prune(backgroundJobBoard);
+    },
     beginUserWait: (sessionID: string): void => {
       inputWaits.beginUserWait(sessionID);
     },
@@ -520,6 +534,7 @@ export function createTaskSessionManagerHook(
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         observeSyntheticTerminalPart: (part) =>
           observeSyntheticTerminalPart(injectionState, part),
+        revivedRunTracker: options.revivedRunTracker,
       }).then(() => runtimeStatusReconciler.schedule());
     },
   };

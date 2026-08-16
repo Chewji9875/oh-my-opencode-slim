@@ -39,7 +39,13 @@ type AgentFactory = (
   customAppendPrompt?: string,
 ) => AgentDefinition;
 
-const CANCEL_TASK_ALLOWED_AGENTS = new Set(['orchestrator']);
+const TASK_CONTROL_TOOL_NAMES = [
+  'task_cancel',
+  'task_message',
+  'task_revive',
+  'task_status',
+  'task_result',
+] as const;
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
 
 function getPrimaryModelFromOverride(
@@ -285,9 +291,12 @@ function applyDefaultPermissions(
 
   // Respect explicit deny on question (councillor)
   const questionPerm = existing.question === 'deny' ? 'deny' : 'allow';
-  const cancelTaskPerm = CANCEL_TASK_ALLOWED_AGENTS.has(agent.name)
-    ? (existing.cancel_task ?? 'allow')
-    : 'deny';
+  const taskControlPermissions = Object.fromEntries(
+    TASK_CONTROL_TOOL_NAMES.map((toolName) => [
+      toolName,
+      existing[toolName] ?? (agent.name === 'orchestrator' ? 'allow' : 'deny'),
+    ]),
+  );
   const waitForUserPerm =
     agent.name === 'orchestrator'
       ? (existing.wait_for_user ?? 'allow')
@@ -296,7 +305,7 @@ function applyDefaultPermissions(
   agent.config.permission = {
     ...existing,
     question: questionPerm,
-    cancel_task: cancelTaskPerm,
+    ...taskControlPermissions,
     wait_for_user: waitForUserPerm,
     // Apply skill permissions as nested object under 'skill' key
     skill: {

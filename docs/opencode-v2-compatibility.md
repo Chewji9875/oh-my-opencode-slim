@@ -69,7 +69,7 @@ the rest.
 | Orchestrator + specialist agents | ✅ | ✅ | |
 | Agent prompts / system injection | ✅ | ✅ | via `session.hook("context")` |
 | Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2 |
-| Tools (ast-grep, webfetch, cancel_task, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep/webfetch need `@ast-grep/napi`/`jsdom` resolvable |
+| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep/webfetch need `@ast-grep/napi`/`jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ | |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ | |
 | Event handling (session tracking, lifecycle) | ✅ | ✅ | |

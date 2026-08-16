@@ -201,4 +201,51 @@ describe('BackgroundJobCoordinator', () => {
     expect(coordinator.validateLease(relaunchLease)).toBe(true);
     expect(coordinator.releaseLease(relaunchLease)).toBe(true);
   });
+
+  test('forwards mutually exclusive message lease acquisition', () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const job = coordinator.registerLaunch({
+      taskID: 'ses_message_coordinator',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const lease = coordinator.acquireMessageLease(job.taskID, job.generation);
+
+    expect(lease).toMatchObject({ kind: 'message' });
+    expect(
+      coordinator.acquireCancellationLease(job.taskID, job.generation),
+    ).toBe(undefined);
+    expect(coordinator.acquireRelaunchLease(job.taskID, job.generation)).toBe(
+      undefined,
+    );
+    if (!lease) throw new Error('message lease was not acquired');
+    expect(coordinator.releaseLease(lease)).toBe(true);
+  });
+
+  test('forwards terminal notification lease acquisition after completion', () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const job = coordinator.registerLaunch({
+      taskID: 'ses_terminal_notification',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    coordinator.updateStatus({
+      taskID: job.taskID,
+      expectedGeneration: job.generation,
+      state: 'completed',
+    });
+
+    const lease = coordinator.acquireTerminalNotificationLease(
+      job.taskID,
+      job.generation,
+    );
+    expect(lease).toMatchObject({ kind: 'terminal-notification' });
+    expect(
+      coordinator.acquireRelaunchLease(job.taskID, job.generation),
+    ).toBeUndefined();
+    if (!lease) throw new Error('terminal notification lease was not acquired');
+    expect(coordinator.releaseLease(lease)).toBe(true);
+  });
 });

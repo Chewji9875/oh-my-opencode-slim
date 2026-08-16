@@ -25,7 +25,11 @@ export interface BackgroundJobExecution {
   generation: number;
 }
 
-export type BackgroundJobLeaseKind = 'cancellation' | 'relaunch';
+export type BackgroundJobLeaseKind =
+  | 'cancellation'
+  | 'relaunch'
+  | 'message'
+  | 'terminal-notification';
 
 /** Process-local ownership of a remote operation or same-ID relaunch. */
 export interface BackgroundJobLease {
@@ -682,6 +686,56 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return lease;
   }
 
+  acquireMessageLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    const existing = this.jobs.get(taskID);
+    if (
+      existing?.generation !== generation ||
+      existing.state !== 'running' ||
+      this.liveLeases.has(taskID)
+    ) {
+      return undefined;
+    }
+    const lease: BackgroundJobLease = {
+      taskID,
+      generation,
+      token: this.nextLeaseToken('message'),
+      kind: 'message',
+    };
+    this.liveLeases.set(taskID, lease);
+    return lease;
+  }
+
+  acquireTerminalNotificationLease(
+    taskID: string,
+    generation: number,
+  ): BackgroundJobLease | undefined {
+    const existing = this.jobs.get(taskID);
+    const terminal =
+      existing?.state === 'completed' ||
+      existing?.state === 'error' ||
+      (existing?.state === 'reconciled' &&
+        (existing.terminalState === 'completed' ||
+          existing.terminalState === 'error'));
+    if (
+      existing?.generation !== generation ||
+      !terminal ||
+      this.liveLeases.has(taskID)
+    ) {
+      return undefined;
+    }
+    const lease: BackgroundJobLease = {
+      taskID,
+      generation,
+      token: this.nextLeaseToken('terminal-notification'),
+      kind: 'terminal-notification',
+    };
+    this.liveLeases.set(taskID, lease);
+    return lease;
+  }
+
   validateLease(lease: BackgroundJobLease): boolean {
     const activeLease = this.liveLeases.get(lease.taskID);
     return (
@@ -912,6 +966,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );
     const reusable = jobs.filter((j) => isReusable(j, this.maxContextLines));
+    const acknowledgedFailedSession = reusable.some((job) => {
+      const terminal = job.terminalState ?? terminalStateOf(job.state);
+      return terminal === 'cancelled' || terminal === 'error';
+    });
 
     if (active.length === 0 && reusable.length === 0) return undefined;
 
@@ -919,9 +977,19 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       [
         '### Background Job Board',
         'SENTINEL: background-job-board-v2',
-        'Completed or reconciled sessions are reusable by alias for the same specialist/context.',
+        ...(acknowledgedFailedSession
+          ? [
+              'Acknowledged terminal sessions are reusable by alias for the same specialist/context.',
+            ]
+          : [
+              'Completed or reconciled sessions are reusable by alias for the same specialist/context.',
+            ]),
         'Timed-out running sessions are recoverable by alias for safe resume after a live busy signal.',
-        'Cancelled or errored sessions are not reusable.',
+        ...(acknowledgedFailedSession
+          ? [
+              'Active, uncertain, or unacknowledged terminal sessions are not reusable.',
+            ]
+          : ['Cancelled or errored sessions are not reusable.']),
         '',
         '#### Active / Unreconciled',
         ...(active.length > 0 ? active.map(formatJob) : ['- none']),
@@ -1063,7 +1131,13 @@ function isReusable(
   maxContextLines: number,
 ): boolean {
   const terminal = job.terminalState ?? terminalStateOf(job.state);
-  if (terminal !== 'completed' || job.terminalUnreconciled) return false;
+  if (
+    terminal === undefined ||
+    job.terminalUnreconciled ||
+    job.statusUncertain
+  ) {
+    return false;
+  }
 
   return sumContextLines(job) <= maxContextLines;
 }

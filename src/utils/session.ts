@@ -197,7 +197,7 @@ export async function extractFinalSessionResult(
           ? part.type === 'text' || part.type === 'reasoning'
           : part.type === 'text') && Boolean(part.text),
     )
-    .map((part) => part.text!)
+    .flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
     .join('\n\n');
 
   const last = messages[messages.length - 1];
