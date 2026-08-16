@@ -346,7 +346,11 @@ function getLocalDevPath(directory: string): string | null {
   for (const configPath of getConfigPaths(directory)) {
     try {
       if (!fs.existsSync(configPath)) continue;
-      const content = fs.readFileSync(configPath, 'utf-8');
+      // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+      // fail with "Unrecognized token" and skip the local dev path.
+      const content = fs
+        .readFileSync(configPath, 'utf-8')
+        .replace(/^\uFEFF/, '');
       const config = JSON.parse(stripJsonComments(content)) as OpencodeConfig;
       const plugins = getPluginEntries(config);
 
@@ -436,7 +440,11 @@ export function findPluginEntry(directory: string): PluginEntryInfo | null {
   for (const configPath of getConfigPaths(directory)) {
     try {
       if (!fs.existsSync(configPath)) continue;
-      const content = fs.readFileSync(configPath, 'utf-8');
+      // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+      // fail with "Unrecognized token" and the plugin entry would be missed.
+      const content = fs
+        .readFileSync(configPath, 'utf-8')
+        .replace(/^\uFEFF/, '');
       const config = JSON.parse(stripJsonComments(content)) as OpencodeConfig;
       const plugins = getPluginEntries(config);
 
