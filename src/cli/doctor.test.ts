@@ -162,6 +162,27 @@ describe('runDoctorCheck', () => {
     expect(result.configs[1].config?.disabled_tools).toEqual(['webfetch']);
   });
 
+  test('config with UTF-8 BOM is accepted as valid', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const configDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      `\uFEFF${JSON.stringify({
+        agents: { oracle: { model: 'test/model' } },
+      })}`,
+    );
+
+    const result = runDoctorCheck(projectDir);
+
+    // The BOM is stripped before parsing, so the config is valid rather
+    // than a false invalid-json diagnosis
+    expect(result.ok).toBe(true);
+    expect(result.configs[1].ok).toBe(true);
+    expect(result.configs[1].error).toBeUndefined();
+    expect(result.configs[1].config?.agents?.oracle?.model).toBe('test/model');
+  });
+
   test('invalid JSON returns not ok with invalid-json error', () => {
     const projectDir = path.join(tempDir, 'project');
     const configDir = path.join(projectDir, '.opencode');

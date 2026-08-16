@@ -76,6 +76,14 @@ describe('config-io', () => {
     expect(result.error).toBeUndefined();
   });
 
+  test('parseConfigFile strips a UTF-8 BOM before parsing', () => {
+    const path = join(tmpDir, 'bom.json');
+    writeFileSync(path, `\uFEFF${'{"a": 1}'}`);
+    const result = parseConfigFile(path);
+    expect(result.config).toEqual({ a: 1 } as any);
+    expect(result.error).toBeUndefined();
+  });
+
   test('parseConfigFile returns null for non-existent file', () => {
     const result = parseConfigFile(join(tmpDir, 'nonexistent.json'));
     expect(result.config).toBeNull();
