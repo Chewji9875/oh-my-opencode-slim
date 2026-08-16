@@ -875,6 +875,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "KomeijiReimu",
+      "name": "Brant",
+      "avatar_url": "https://avatars.githubusercontent.com/u/118449321?v=4",
+      "profile": "https://github.com/KomeijiReimu",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
