@@ -188,7 +188,7 @@ After spawning all independent background tasks and any remaining non-overlappin
 - Prefer re-uses over creating new sessions all the time
 - Only sessions listed under Reusable Sessions may be resumed. Active / Unreconciled sessions are not resumable.
 - When reusing a specialist session, you MUST pass the existing session or alias in the task tool's \`task_id\` argument. Saying "reuse" in prose is not enough.
-- If the Background Job Board lists \`fix-1 / ses_abc / @fixer\`, call task with \`subagent_type: "@fixer"\` and \`task_id: "fix-1"\` or \`task_id: "ses_abc"\`.
+- If the Background Job Board lists \`fix-1 / ses_abc / fixer\`, call task with \`subagent_type: "fixer"\` and \`task_id: "fix-1"\` or \`task_id: "ses_abc"\`.
 - Do not leave \`task_id\` empty when intending to reuse; omitted or empty \`task_id\` creates a new specialist session.
 
 ## 5. Verify
