@@ -32,6 +32,33 @@ interface TaskArgs {
   background?: unknown;
 }
 
+const earlyRegistrationGenerations = new WeakMap<PendingTaskCall, number>();
+
+/**
+ * session.created writes earlyRegisteredTaskID through the pending-call
+ * object. Capture the generation at that boundary so a delayed native result
+ * cannot reuse the current record after a same-ID relaunch.
+ */
+function installEarlyRegistrationGenerationFence(
+  pending: PendingTaskCall,
+  backgroundJobBoard: BackgroundJobStore,
+): void {
+  let earlyRegisteredTaskID = pending.earlyRegisteredTaskID;
+  Object.defineProperty(pending, 'earlyRegisteredTaskID', {
+    configurable: true,
+    enumerable: true,
+    get: () => earlyRegisteredTaskID,
+    set: (taskID: string | undefined) => {
+      earlyRegisteredTaskID = taskID;
+      if (!taskID) return;
+      const generation = backgroundJobBoard.get(taskID)?.generation;
+      if (generation !== undefined) {
+        earlyRegistrationGenerations.set(pending, generation);
+      }
+    },
+  });
+}
+
 export async function handleToolExecuteBefore(
   input: { tool: string; sessionID?: string; callID?: string },
   output: { args?: unknown },
@@ -96,6 +123,7 @@ export async function handleToolExecuteBefore(
     background,
     lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
   };
+  installEarlyRegistrationGenerationFence(pendingCall, deps.backgroundJobBoard);
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
     const remembered =
@@ -286,6 +314,7 @@ export async function handleToolExecuteAfter(
       const updated = deps.backgroundJobBoard.updateStatus({
         taskID: status.taskID,
         state: status.state,
+        expectedGeneration: record.generation,
         timedOut: status.timedOut,
         resultSummary: status.result,
       });
@@ -370,6 +399,20 @@ function registerTaskOutputLaunch(
   if (resumed && pending.resumedTaskId !== taskID) return undefined;
 
   const existing = deps.backgroundJobBoard.get(taskID);
+  const earlyRegistrationGeneration = earlyRegistrationGenerations.get(pending);
+  if (
+    pending.earlyRegisteredTaskID === taskID &&
+    earlyRegistrationGeneration !== undefined &&
+    existing?.generation !== earlyRegistrationGeneration
+  ) {
+    log('[task-session-manager] ignored stale native task output', {
+      taskID,
+      callID: pending.callId,
+      registeredGeneration: earlyRegistrationGeneration,
+      currentGeneration: existing?.generation,
+    });
+    return undefined;
+  }
   if (resumed && pending.relaunchLease === undefined) {
     log(
       '[task-session-manager] refused resumed task output without relaunch lease',

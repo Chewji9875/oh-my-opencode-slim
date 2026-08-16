@@ -358,6 +358,43 @@ describe('task_nudge', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  test('does not prompt when relaunch happens while acquiring the prompt boundary', async () => {
+    const board = new BackgroundJobBoard();
+    registerStuckChild(board);
+    const prompt = mock(async () => ({}));
+    let promptPropertyRead = false;
+    const session = {
+      status: mock(async () => ({
+        data: { ses_child1: { type: 'busy' } },
+      })),
+      get prompt() {
+        if (!promptPropertyRead) {
+          promptPropertyRead = true;
+          board.registerLaunch({
+            taskID: 'ses_child1',
+            parentSessionID: 'parent-1',
+            agent: 'fixer',
+            now: 121_000,
+          });
+        }
+        return prompt;
+      },
+    };
+    client = { session };
+    const { task_nudge } = createTaskNudgeTool({
+      input: { directory: '/test' } as any,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    await expect(
+      task_nudge.execute({ task_id: 'ses_child1', message: 'Nudge' }, {
+        sessionID: 'parent-1',
+      } as any),
+    ).rejects.toThrow('run generation changed');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   test('rejects a task id owned by a different parent', async () => {
     const board = new BackgroundJobBoard();
     registerStuckChild(board);

@@ -110,6 +110,16 @@ export type SyntheticTerminalOccurrencePhase =
 export type SyntheticTerminalOccurrenceOrigin =
   BackgroundJobSyntheticTerminalOccurrence;
 
+type SyntheticTerminalOccurrenceLookup =
+  | {
+      kind: 'matched';
+      origin: SyntheticTerminalOccurrenceOrigin;
+    }
+  | {
+      kind: 'ambiguous';
+      reason: string;
+    };
+
 export interface InjectionState {
   backgroundJobBoard: BackgroundJobStore;
   lifecycleLedger: BackgroundJobLifecycleLedger;
@@ -305,21 +315,31 @@ function findSyntheticTerminalOccurrence(
   state: InjectionState,
   taskID: string,
   occurrenceID: string,
-): SyntheticTerminalOccurrenceOrigin | undefined {
+): SyntheticTerminalOccurrenceLookup | undefined {
   const occurrences = state.syntheticTerminalOccurrences;
   if (!occurrences) return undefined;
 
   const direct = occurrences.get(injectedCompletionKey(taskID, occurrenceID));
-  if (direct) return direct;
+  if (direct) return { kind: 'matched', origin: direct };
 
   // Older/runtime-derived parts may lack an id in the transform payload even
   // though the event hook saw the same terminal text. Only use an ambiguous
-  // fallback when there is exactly one candidate for this task.
+  // fallback when there is exactly one candidate for this task. Multiple
+  // candidates cannot establish ownership and must remain fail-closed.
   const candidates = [...occurrences.values()].filter(
     (origin) =>
       origin.taskID === taskID && origin.occurrenceID.startsWith('ambiguous:'),
   );
-  return candidates.length === 1 ? candidates[0] : undefined;
+  if (candidates.length === 1) {
+    return { kind: 'matched', origin: candidates[0] };
+  }
+  if (candidates.length > 1) {
+    return {
+      kind: 'ambiguous',
+      reason: `multiple ambiguous message.part.updated origins (${candidates.length}) could not be uniquely matched`,
+    };
+  }
+  return undefined;
 }
 
 function rememberProcessedSyntheticTerminal(
@@ -419,7 +439,9 @@ export function observeSyntheticTerminalPart(
       priorOccurrence.lifecycleEpochAtObservation < deletionEpoch &&
       priorOccurrence.phase !== 'ambiguous');
   const phase: SyntheticTerminalOccurrencePhase =
-    !reliable || !hasPreDeletionProvenance ? 'ambiguous' : 'observed';
+    !reliable || !existing || !hasPreDeletionProvenance
+      ? 'ambiguous'
+      : 'observed';
 
   rememberSyntheticTerminalOccurrence(state, {
     taskID: status.taskID,
@@ -568,12 +590,25 @@ export function updateFromInjectedCompletion(
   const occurrenceId = createOccurrenceId(part, message, partIndex);
 
   const existing = state.backgroundJobBoard.get(status.taskID);
-  const origin = findSyntheticTerminalOccurrence(
+  const occurrenceLookup = findSyntheticTerminalOccurrence(
     state,
     status.taskID,
     occurrenceId,
   );
+  const origin =
+    occurrenceLookup?.kind === 'matched' ? occurrenceLookup.origin : undefined;
   const deletionEpoch = state.getDeletionEpoch?.(status.taskID);
+
+  if (occurrenceLookup?.kind === 'ambiguous') {
+    failClosedSyntheticTerminal(
+      state,
+      status,
+      occurrenceId,
+      existing,
+      occurrenceLookup.reason,
+    );
+    return undefined;
+  }
 
   if (origin?.phase === 'processed') return undefined;
 

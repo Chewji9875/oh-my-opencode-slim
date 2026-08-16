@@ -165,6 +165,55 @@ describe('BackgroundJobBoard', () => {
     expect(board.hasTerminalUnreconciled('parent-1')).toBe(true);
   });
 
+  test('expected generation fences a late native terminal status', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    const first = board.registerLaunch({
+      taskID: 'ses_generation',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+    board.updateStatus({
+      taskID: 'ses_generation',
+      state: 'completed',
+      resultSummary: 'G1 result',
+    });
+    listener.mockClear();
+    const second = board.registerLaunch({
+      taskID: 'ses_generation',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    board.updateStatus({
+      taskID: 'ses_generation',
+      state: 'completed',
+      expectedGeneration: first.generation,
+      resultSummary: 'late G1 result',
+    });
+
+    expect(board.get('ses_generation')).toMatchObject({
+      generation: second.generation,
+      state: 'running',
+      resultSummary: undefined,
+    });
+    expect(listener).not.toHaveBeenCalled();
+
+    board.updateStatus({
+      taskID: 'ses_generation',
+      state: 'completed',
+      expectedGeneration: second.generation,
+      resultSummary: 'G2 result',
+    });
+    expect(board.get('ses_generation')).toMatchObject({
+      generation: second.generation,
+      state: 'completed',
+      resultSummary: 'G2 result',
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   test('keeps timeout status running with timedOut overlay', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({

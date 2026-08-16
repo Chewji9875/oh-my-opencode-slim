@@ -104,6 +104,8 @@ export interface BackgroundJobLaunchInput {
 export interface BackgroundJobStatusInput {
   taskID: string;
   state: TaskOutputState;
+  /** Ignore native output from an older run of the same task ID. */
+  expectedGeneration?: number;
   timedOut?: boolean;
   statusUncertain?: boolean;
   resultSummary?: string;
@@ -317,6 +319,12 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   ): BackgroundJobRecord | undefined {
     const existing = this.jobs.get(input.taskID);
     if (!existing) return undefined;
+    if (
+      input.expectedGeneration !== undefined &&
+      existing.generation !== input.expectedGeneration
+    ) {
+      return existing;
+    }
 
     // A wall-clock deadline is a hard, non-recoverable claim. Completion after
     // that claim is late evidence and cannot replace the canonical timeout.

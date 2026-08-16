@@ -90,6 +90,13 @@ export function createTaskNudgeTool(options: {
           );
         }
 
+        // Resolve the transport before the final fence so no property access
+        // or client lookup remains between that fence and prompt invocation.
+        // OpenCode's prompt API has no expected-generation/CAS argument: a
+        // relaunch that races after this synchronous boundary is outside what
+        // this lane can prove, and is intentionally not described as atomic.
+        const session = getClient(options.input).session;
+        const prompt = session.prompt.bind(session);
         const promptJob = getCurrentNudgeJob(
           options.backgroundJobBoard,
           parentSessionID,
@@ -97,7 +104,7 @@ export function createTaskNudgeTool(options: {
           job.taskID,
           job.generation,
         );
-        await getClient(options.input).session.prompt({
+        await prompt({
           path: { id: promptJob.taskID },
           body: {
             noReply: true,

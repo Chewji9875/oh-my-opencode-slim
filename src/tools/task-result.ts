@@ -58,6 +58,29 @@ function assertRetrievableState(
   }
 }
 
+function assertStableTrackedGeneration(
+  requested: string,
+  parentSessionID: string,
+  expectedTaskID: string,
+  expectedGeneration: number,
+  backgroundJobBoard: BackgroundJobStore,
+): BackgroundJobRecord {
+  const current = backgroundJobBoard.resolve(parentSessionID, requested);
+  if (
+    !current ||
+    current.taskID !== expectedTaskID ||
+    current.generation !== expectedGeneration
+  ) {
+    if (current) assertRetrievableState(requested, current);
+    throw new Error(
+      `Task ${requested} changed generation while its result was being retrieved; wait for its current terminal result instead of retrieving it.`,
+    );
+  }
+
+  assertRetrievableState(requested, current);
+  return current;
+}
+
 export function createTaskResultTool(
   options: TaskResultToolOptions,
 ): Record<string, ToolDefinition> {
@@ -80,6 +103,21 @@ Use this when the user asks to see a prior task's full result, or before retryin
         parentSessionID,
         requested,
       );
+      const trackedTaskID = tracked?.taskID;
+      const trackedGeneration = tracked?.generation;
+
+      const revalidateTracked = (): void => {
+        if (trackedTaskID === undefined || trackedGeneration === undefined) {
+          return;
+        }
+        tracked = assertStableTrackedGeneration(
+          requested,
+          parentSessionID,
+          trackedTaskID,
+          trackedGeneration,
+          options.backgroundJobBoard,
+        );
+      };
 
       // A stopped board record is only a provisional observation. Re-check the
       // live runner once, with the same bounded status path used elsewhere,
@@ -102,9 +140,7 @@ Use this when the user asks to see a prior task's full result, or before retryin
         }
       }
 
-      if (tracked) {
-        assertRetrievableState(requested, tracked);
-      }
+      revalidateTracked();
 
       const taskID = tracked?.taskID ?? requested;
       if (!SESSION_ID_PATTERN.test(taskID)) {
@@ -130,7 +166,9 @@ Use this when the user asks to see a prior task's full result, or before retryin
         );
       }
 
+      revalidateTracked();
       liveSnapshot ??= await getRuntimeSessionStatusSnapshot(options.input);
+      revalidateTracked();
       const status = runtimeSessionStatus(liveSnapshot, taskID);
       const trackedTerminalState = tracked
         ? tracked.state === 'reconciled'
@@ -155,10 +193,12 @@ Use this when the user asks to see a prior task's full result, or before retryin
         return result;
       }
 
+      revalidateTracked();
       const result = await extractFinalSessionResult(client, taskID, {
         directory: options.input.directory,
         includeReasoning: false,
       });
+      revalidateTracked();
       if (result.empty) {
         throw new Error(`Task ${requested} has no completed text result`);
       }

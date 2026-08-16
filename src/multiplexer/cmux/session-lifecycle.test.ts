@@ -193,6 +193,7 @@ describe('CmuxSessionLifecycle races', () => {
       parent: 'p',
       title: 'agent',
       directory: '/repo',
+      serverUrl: 'http://server/',
       paneId: 'orphan-pane',
       spawnState: 'attached',
       lifecycle: 'orphaned',
@@ -202,7 +203,7 @@ describe('CmuxSessionLifecycle races', () => {
     });
     const mux = multiplexer();
     mux.closePane.mockResolvedValue(false);
-    new CmuxSessionLifecycle(
+    const lifecycle = new CmuxSessionLifecycle(
       'new',
       mux,
       () => 'http://server',
@@ -212,6 +213,7 @@ describe('CmuxSessionLifecycle races', () => {
         closeRetryMaxAttempts: 1,
       },
     );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
     await Promise.resolve();
     await Promise.resolve();
     expect(mux.closePane).toHaveBeenCalledTimes(1);
@@ -220,6 +222,61 @@ describe('CmuxSessionLifecycle races', () => {
       lifecycle: 'orphaned',
       paneId: 'orphan-pane',
     });
+  });
+
+  test('defers initial orphan recovery until the first poll', async () => {
+    let serverUrl = 'http://server';
+    let getterCalls = 0;
+    for (const [session, scope] of [
+      ['lazy-orphan', 'http://server/'],
+      ['later-orphan', 'http://other/'],
+    ] as const) {
+      store.claimCreated({
+        session,
+        owner: 'old',
+        parent: 'p',
+        title: 'agent',
+        directory: '/repo',
+        serverUrl: scope,
+        paneId: `${session}-pane`,
+        spawnState: 'attached',
+        lifecycle: 'orphaned',
+        lastActivityAt: 0,
+        activityVersion: 0,
+        idleConsecutive: 0,
+      });
+    }
+
+    const close = deferred<boolean>();
+    const mux = multiplexer();
+    mux.closePane.mockImplementation(() => close.promise);
+    const lifecycle = new CmuxSessionLifecycle(
+      'new',
+      mux,
+      () => {
+        getterCalls += 1;
+        return serverUrl;
+      },
+      '/repo',
+      undefined,
+      { fetchStatuses: async () => ({}) },
+    );
+
+    expect(getterCalls).toBe(0);
+    await lifecycle.pollOnce();
+    expect(getterCalls).toBeGreaterThan(0);
+    expect(store.get('lazy-orphan')).toMatchObject({ owner: 'new' });
+    expect(mux.closePane).toHaveBeenCalledWith('lazy-orphan-pane');
+
+    const callsAfterFirstPoll = getterCalls;
+    serverUrl = 'http://other';
+    await lifecycle.pollOnce();
+    expect(getterCalls).toBe(callsAfterFirstPoll + 1);
+    expect(store.get('later-orphan')).toMatchObject({ owner: 'old' });
+
+    close.resolve(true);
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    await lifecycle.cleanup();
   });
 
   test('terminal tracked orphan gets a fresh close budget when claimed', async () => {
@@ -234,6 +291,7 @@ describe('CmuxSessionLifecycle races', () => {
       parent: 'p',
       title: 'agent',
       directory: '/repo',
+      serverUrl: 'http://server/',
       paneId: 'pane',
       spawnState: 'attached',
       lifecycle: 'orphaned',
@@ -244,7 +302,7 @@ describe('CmuxSessionLifecycle races', () => {
     });
     const mux = multiplexer();
     mux.closePane.mockResolvedValue(false);
-    new CmuxSessionLifecycle(
+    const lifecycle = new CmuxSessionLifecycle(
       'new',
       mux,
       () => 'http://server',
@@ -254,6 +312,7 @@ describe('CmuxSessionLifecycle races', () => {
         closeRetryMaxAttempts: 1,
       },
     );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
     await Promise.resolve();
     expect(mux.closePane).toHaveBeenCalledTimes(1);
     expect(store.get('spent')?.owner).toBe('new');
@@ -307,6 +366,7 @@ describe('CmuxSessionLifecycle races', () => {
         parent: 'p',
         title: 'agent',
         directory: '/repo',
+        serverUrl: 'http://server/',
         paneId: 'pane',
         spawnState: 'attached',
         lifecycle: 'orphaned',
@@ -317,11 +377,17 @@ describe('CmuxSessionLifecycle races', () => {
       const oldMux = multiplexer();
       const close = deferred<boolean>();
       oldMux.closePane.mockImplementationOnce(() => close.promise);
-      new CmuxSessionLifecycle('old', oldMux, () => 'http://server', '/repo');
+      const old = new CmuxSessionLifecycle(
+        'old',
+        oldMux,
+        () => 'http://server',
+        '/repo',
+      );
+      await old.onSessionStatus({ type: 'session.status' });
       await Promise.resolve();
       const newMux = multiplexer();
       newMux.closePane.mockResolvedValue(false);
-      new CmuxSessionLifecycle(
+      const next = new CmuxSessionLifecycle(
         'new',
         newMux,
         () => 'http://server',
@@ -331,6 +397,7 @@ describe('CmuxSessionLifecycle races', () => {
           closeRetryMaxAttempts: 1,
         },
       );
+      await next.onSessionStatus({ type: 'session.status' });
       await Promise.resolve();
       const currentIntent = store.get('race')?.closeIntent;
       close.resolve(result);
@@ -349,6 +416,7 @@ describe('CmuxSessionLifecycle races', () => {
         parent: 'p',
         title: 'agent',
         directory: '/repo',
+        serverUrl: 'http://server/',
         paneId: 'pane',
         spawnState: 'attached',
         lifecycle: 'active',
@@ -372,7 +440,7 @@ describe('CmuxSessionLifecycle races', () => {
       store.markOrphaned('cleanup-race');
       const newMux = multiplexer();
       newMux.closePane.mockResolvedValue(false);
-      new CmuxSessionLifecycle(
+      const next = new CmuxSessionLifecycle(
         'new',
         newMux,
         () => 'http://server',
@@ -380,6 +448,7 @@ describe('CmuxSessionLifecycle races', () => {
         undefined,
         { closeRetryMaxAttempts: 1 },
       );
+      await next.onSessionStatus({ type: 'session.status' });
       await Promise.resolve();
       const currentIntent = store.get('cleanup-race')?.closeIntent;
       expect(newMux.closePane).not.toHaveBeenCalled();
@@ -411,7 +480,10 @@ describe('CmuxSessionLifecycle races', () => {
       () => 'http://server',
       '/repo',
       undefined,
-      { delay: async () => {}, isServerRunning: async () => true },
+      {
+        delay: async () => {},
+        isServerRunning: async () => true,
+      },
     );
     const creating = old.onSessionCreated({
       type: 'session.created',
@@ -424,7 +496,7 @@ describe('CmuxSessionLifecycle races', () => {
     if (existing) existing.paneId = 'new-pane';
     const newMux = multiplexer();
     newMux.closePane.mockResolvedValue(false);
-    new CmuxSessionLifecycle(
+    const next = new CmuxSessionLifecycle(
       'new',
       newMux,
       () => 'http://server',
@@ -432,6 +504,7 @@ describe('CmuxSessionLifecycle races', () => {
       undefined,
       { closeRetryMaxAttempts: 1 },
     );
+    await next.onSessionStatus({ type: 'session.status' });
     await Promise.resolve();
     const currentIntent = store.get('late-race')?.closeIntent;
     spawn.resolve({ success: true, paneId: 'old-late-pane' });
@@ -626,6 +699,7 @@ describe('CmuxSessionLifecycle races', () => {
       undefined,
       { isServerRunning: async () => true },
     );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
     for (let index = 0; index < 8; index++) await Promise.resolve();
 
     expect(store.get('wrong-directory')?.owner).toBe('old');
@@ -674,6 +748,7 @@ describe('CmuxSessionLifecycle races', () => {
         now: () => now,
       },
     );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
 
     expect(store.get('existing-late')).toMatchObject({
       owner: 'new',
@@ -707,6 +782,7 @@ describe('CmuxSessionLifecycle races', () => {
         parent: 'p',
         title: 'agent',
         directory: '/repo',
+        serverUrl: 'http://server/',
         paneId: `pane-${result}`,
         spawnState: 'attached',
         lifecycle: 'orphaned',
@@ -722,6 +798,7 @@ describe('CmuxSessionLifecycle races', () => {
         undefined,
         { closeRetryMaxAttempts: 1, isServerRunning: async () => true },
       );
+      await old.onSessionStatus({ type: 'session.status' });
       for (let index = 0; index < 8; index++) await Promise.resolve();
       const pending = store.get(session)?.closePromise;
       if (!pending) throw new Error('expected pending close');
@@ -743,6 +820,7 @@ describe('CmuxSessionLifecycle races', () => {
         undefined,
         { closeRetryMaxAttempts: 1, isServerRunning: async () => true },
       );
+      await next.onSessionStatus({ type: 'session.status' });
       expect(newMux.closePane).not.toHaveBeenCalled();
 
       close.resolve(result);
@@ -765,4 +843,150 @@ describe('CmuxSessionLifecycle races', () => {
       await old.cleanup();
     });
   }
+
+  test('older observer cannot claim a newer owner late pane', async () => {
+    const oldMux = multiplexer();
+    oldMux.closePane.mockResolvedValue(false);
+    const old = new CmuxSessionLifecycle(
+      'old',
+      oldMux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      {
+        closeRetryMaxAttempts: 1,
+        delay: async () => {},
+        isServerRunning: async () => true,
+      },
+    );
+
+    const spawn = deferred<{ success: true; paneId: string }>();
+    const newMux = multiplexer();
+    newMux.spawnPane.mockImplementationOnce(() => spawn.promise);
+    newMux.closePane.mockResolvedValue(false);
+    const next = new CmuxSessionLifecycle(
+      'new',
+      newMux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      {
+        isServerRunning: async () => true,
+        shutdownTimeoutMs: 1,
+      },
+    );
+    const creating = next.onSessionCreated({
+      type: 'session.created',
+      properties: { info: { id: 'new-late-owner', parentID: 'p' } },
+    });
+
+    await Promise.resolve();
+    await next.cleanup();
+    spawn.resolve({ success: true, paneId: 'new-owner-pane' });
+    await creating;
+    for (let index = 0; index < 16; index++) await Promise.resolve();
+
+    expect(newMux.closePane).toHaveBeenCalledWith('new-owner-pane');
+    expect(oldMux.closePane).not.toHaveBeenCalled();
+    expect(store.get('new-late-owner\0late\0new-owner-pane')).toMatchObject({
+      owner: 'new',
+      lifecycle: 'orphaned',
+    });
+
+    await old.cleanup();
+  });
+
+  test('ordinary orphan takeover requires the matching server scope', async () => {
+    store.claimCreated({
+      session: 'wrong-scope-orphan',
+      owner: 'old',
+      parent: 'p',
+      title: 'agent',
+      directory: '/repo',
+      serverUrl: 'http://other/',
+      paneId: 'wrong-scope-pane',
+      spawnState: 'attached',
+      lifecycle: 'orphaned',
+      lastActivityAt: 0,
+      activityVersion: 0,
+      idleConsecutive: 0,
+    });
+    const mux = multiplexer();
+    const lifecycle = new CmuxSessionLifecycle(
+      'new',
+      mux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      { isServerRunning: async () => true },
+    );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+
+    expect(store.get('wrong-scope-orphan')).toMatchObject({
+      owner: 'old',
+      paneId: 'wrong-scope-pane',
+    });
+    expect(mux.closePane).not.toHaveBeenCalled();
+    await lifecycle.cleanup();
+  });
+
+  test('busy reactivates a claimed exhausted orphan before close settles', async () => {
+    const policy = new CmuxClosePolicy(1, 1);
+    let exhausted = policy.request('cleanup', 0, 0);
+    exhausted = policy.failed(exhausted, 1);
+    exhausted = policy.failed(policy.resume(exhausted, 30_001), 30_002);
+    exhausted = policy.failed(policy.resume(exhausted, 90_002), 90_003);
+
+    store.claimCreated({
+      session: 'busy-orphan',
+      owner: 'old',
+      parent: 'p',
+      title: 'agent',
+      directory: '/repo',
+      serverUrl: 'http://server/',
+      paneId: 'busy-orphan-pane',
+      spawnState: 'attached',
+      lifecycle: 'orphaned',
+      lastActivityAt: 0,
+      activityVersion: 0,
+      idleConsecutive: 0,
+      closeIntent: exhausted,
+    });
+
+    const close = deferred<boolean>();
+    const mux = multiplexer();
+    mux.closePane.mockImplementationOnce(() => close.promise);
+    const lifecycle = new CmuxSessionLifecycle(
+      'new',
+      mux,
+      () => 'http://server',
+      '/repo',
+      undefined,
+      { isServerRunning: async () => true },
+    );
+    await lifecycle.onSessionStatus({ type: 'session.status' });
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(mux.closePane).toHaveBeenCalledTimes(1);
+
+    await lifecycle.onSessionStatus({
+      type: 'session.status',
+      properties: { sessionID: 'busy-orphan', status: { type: 'busy' } },
+    });
+    expect(store.get('busy-orphan')).toMatchObject({
+      owner: 'new',
+      lifecycle: 'active',
+      paneId: 'busy-orphan-pane',
+    });
+    expect(store.get('busy-orphan')?.closeIntent).toBeUndefined();
+
+    close.resolve(false);
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    expect(mux.closePane).toHaveBeenCalledTimes(1);
+    expect(store.get('busy-orphan')).toMatchObject({
+      lifecycle: 'active',
+      paneId: 'busy-orphan-pane',
+    });
+    await lifecycle.cleanup();
+  });
 });

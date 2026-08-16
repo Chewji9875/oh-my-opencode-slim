@@ -197,6 +197,94 @@ describe('task_result', () => {
     expect(output).toBe('complete findings');
   });
 
+  test('does not return G2 partial output after G1 completion races a relaunch', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    const first = board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'completed',
+      resultSummary: 'G1 complete',
+    });
+    if (!first) throw new Error('G1 was not registered');
+
+    mockClient.session.status.mockImplementation(async () => {
+      board.registerLaunch({
+        taskID: 'ses_child1',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: 'G2 relaunch',
+      });
+      return { data: { ses_child1: { type: 'busy' } } };
+    });
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant' },
+          parts: [{ type: 'text', text: 'G2 partial output' }],
+        },
+      ],
+    });
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('still running');
+
+    expect(board.get('ses_child1')).toMatchObject({
+      generation: first.generation + 1,
+      state: 'running',
+    });
+    expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('does not return a result when G2 relaunches during result extraction', async () => {
+    const { board, tool } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    board.updateStatus({
+      taskID: 'ses_child1',
+      state: 'completed',
+      resultSummary: 'G1 complete',
+    });
+
+    mockClient.session.messages.mockImplementation(async () => {
+      board.registerLaunch({
+        taskID: 'ses_child1',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: 'G2 relaunch',
+      });
+      return {
+        data: [
+          {
+            info: { role: 'assistant' },
+            parts: [{ type: 'text', text: 'G2 partial output' }],
+          },
+        ],
+      };
+    });
+
+    await expect(
+      tool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).rejects.toThrow('still running');
+
+    expect(board.get('ses_child1')?.state).toBe('running');
+  });
+
   test('rejects a reconciled task whose terminal outcome was error', async () => {
     const { board, tool, messages } = createTool();
     board.registerLaunch({

@@ -19,15 +19,200 @@ import type {
 } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 
+type BackgroundJobRecord = NonNullable<ReturnType<BackgroundJobStore['get']>>;
+
+interface SessionEventGenerationFence {
+  generation: number;
+  /** A new generation must see a live activity fence before lifecycle events. */
+  awaitingActivity: boolean;
+}
+
+interface SessionEventObservation {
+  sessionID: string;
+  job?: BackgroundJobRecord;
+  generation?: number;
+  observedAt: number;
+  stale: boolean;
+  /** Busy establishes the new local fence but does not mutate the board. */
+  activityFenceOnly: boolean;
+}
+
+/**
+ * OpenCode's v1 lifecycle events do not carry a run generation or a CAS token.
+ * Keep the strongest local fence available: a board generation transition
+ * quarantines the first unproven lifecycle sequence, while explicit host
+ * provenance/timestamps (when present) are checked against the current run.
+ * This cannot prove the origin of a same-ID event after the host has omitted
+ * that provenance; callers must not treat this as remote atomicity.
+ */
+const sessionEventFences = new WeakMap<
+  object,
+  Map<string, SessionEventGenerationFence>
+>();
+
+function eventFenceMap(
+  backgroundJobBoard: BackgroundJobStore,
+): Map<string, SessionEventGenerationFence> {
+  const key = backgroundJobBoard as object;
+  const existing = sessionEventFences.get(key);
+  if (existing) return existing;
+  const created = new Map<string, SessionEventGenerationFence>();
+  sessionEventFences.set(key, created);
+  return created;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function eventGeneration(input: {
+  event: { properties?: Record<string, unknown> };
+}): number | undefined {
+  const properties = input.event.properties;
+  const info = isRecord(properties?.info) ? properties.info : undefined;
+  const direct = properties?.generation;
+  if (finiteNumber(direct)) return direct;
+  return finiteNumber(info?.generation) ? info.generation : undefined;
+}
+
+function eventActivityAt(
+  input: { event: { properties?: Record<string, unknown> } },
+  fallback: number,
+): number {
+  const properties = input.event.properties;
+  const info = isRecord(properties?.info) ? properties.info : undefined;
+  const infoTime = isRecord(info?.time) ? info.time : undefined;
+  const directCandidates = [
+    properties?.activityAt,
+    properties?.timestamp,
+    properties?.time,
+    info?.activityAt,
+    info?.timestamp,
+    infoTime?.updated,
+  ];
+  const observed = directCandidates.find(finiteNumber);
+  return observed === undefined ? fallback : observed;
+}
+
+function rememberSessionGeneration(
+  backgroundJobBoard: BackgroundJobStore,
+  sessionID: string,
+): void {
+  const job = backgroundJobBoard.get(sessionID);
+  if (!job) return;
+  const fences = eventFenceMap(backgroundJobBoard);
+  const previous = fences.get(sessionID);
+  if (!previous || previous.generation !== job.generation) {
+    fences.set(sessionID, {
+      generation: job.generation,
+      awaitingActivity: previous !== undefined,
+    });
+  }
+}
+
+function observeSessionEvent(
+  backgroundJobBoard: BackgroundJobStore,
+  input: { event: { properties?: Record<string, unknown> } },
+  sessionID: string,
+  observedAt: number,
+  isBusy: boolean,
+): SessionEventObservation {
+  const job = backgroundJobBoard.get(sessionID);
+  if (!job) {
+    eventFenceMap(backgroundJobBoard).delete(sessionID);
+    return {
+      sessionID,
+      observedAt,
+      stale: false,
+      activityFenceOnly: false,
+    };
+  }
+
+  const fences = eventFenceMap(backgroundJobBoard);
+  const previous = fences.get(sessionID);
+  const generationChanged =
+    previous !== undefined && previous.generation !== job.generation;
+  const fence = generationChanged
+    ? {
+        generation: job.generation,
+        awaitingActivity: true,
+      }
+    : (previous ?? {
+        generation: job.generation,
+        awaitingActivity: false,
+      });
+  fences.set(sessionID, fence);
+
+  const suppliedGeneration = eventGeneration(input);
+  const suppliedCurrentGeneration =
+    suppliedGeneration !== undefined && suppliedGeneration === job.generation;
+  const activityIsBeforeRun = observedAt < job.runStartedAt;
+  const activityIsBeforeCurrentBusy =
+    job.lastLiveBusyAt !== undefined && job.lastLiveBusyAt > observedAt;
+  const stale =
+    (suppliedGeneration !== undefined && !suppliedCurrentGeneration) ||
+    activityIsBeforeRun ||
+    activityIsBeforeCurrentBusy ||
+    (fence.awaitingActivity && !isBusy && !suppliedCurrentGeneration);
+
+  // A host event without provenance can only establish a local activity
+  // boundary. Do not let that first post-relaunch busy observation mutate G2;
+  // a later event runs after the boundary has been established.
+  const activityFenceOnly =
+    !stale && fence.awaitingActivity && isBusy && !suppliedCurrentGeneration;
+  if (!stale && (activityFenceOnly || suppliedCurrentGeneration)) {
+    fence.awaitingActivity = false;
+  }
+
+  return {
+    sessionID,
+    job,
+    generation: job.generation,
+    observedAt,
+    stale,
+    activityFenceOnly,
+  };
+}
+
+function isCurrentSessionObservation(
+  backgroundJobBoard: BackgroundJobStore,
+  observation: SessionEventObservation,
+): boolean {
+  if (!observation.job || observation.generation === undefined) return true;
+  const current = backgroundJobBoard.get(observation.sessionID);
+  if (!current || current.generation !== observation.generation) return false;
+  if (current.runStartedAt > observation.observedAt) return false;
+  return !(
+    current.lastLiveBusyAt !== undefined &&
+    current.lastLiveBusyAt > observation.observedAt
+  );
+}
+
 export async function handleEvent(
   input: {
     event: {
       type: string;
       properties?: {
-        info?: { id?: string; parentID?: string; agent?: string };
+        info?: {
+          id?: string;
+          parentID?: string;
+          agent?: string;
+          generation?: number;
+          activityAt?: number;
+          timestamp?: number;
+          time?: { updated?: number };
+        };
         id?: string;
         requestID?: string;
         sessionID?: string;
+        generation?: number;
+        activityAt?: number;
+        timestamp?: number;
+        time?: { updated?: number };
         status?: { type?: string };
         error?: { name?: string };
         part?: unknown;
@@ -60,6 +245,8 @@ export async function handleEvent(
       isFallbackInProgress?: (sessionID: string) => boolean;
       /** True when foreground fallback could still recover the session. */
       willAttemptFallback?: (sessionID: string) => boolean;
+      /** Test seam; production uses event-arrival wall-clock time. */
+      now?: () => number;
     };
     idleReconciler: {
       scheduleIdleReconciliation(sessionID: string): void;
@@ -112,6 +299,9 @@ export async function handleEvent(
   if (input.event.type === 'session.created') {
     const info = input.event.properties?.info;
     if (info?.id) deps.retainedBoardSnapshots.delete(info.id);
+    if (info?.id) {
+      rememberSessionGeneration(deps.backgroundJobBoard, info.id);
+    }
     log('[task-session-manager] session.created observed', {
       sessionID: info?.id,
       parentSessionID: info?.parentID,
@@ -191,6 +381,7 @@ export async function handleEvent(
     deps.backgroundJobSupervisor?.dispose();
     deps.pendingCallTracker.clearAll?.();
     deps.retainedBoardSnapshots.clear();
+    eventFenceMap(deps.backgroundJobBoard).clear();
     const idleSessionIds = deps.idleReconciler.clearAllTimers();
     // Local-only: drop idle tokens. Process-global wait_for_user stays armed.
     const waitSessionIDs = new Set([
@@ -213,7 +404,21 @@ export async function handleEvent(
   ) {
     const sessionId =
       input.event.properties?.info?.id || input.event.properties?.sessionID;
-    const job = sessionId ? deps.backgroundJobBoard.get(sessionId) : undefined;
+    const observedAt = eventActivityAt(
+      input,
+      deps.options.now?.() ?? Date.now(),
+    );
+    const observation = sessionId
+      ? observeSessionEvent(
+          deps.backgroundJobBoard,
+          input,
+          sessionId,
+          observedAt,
+          false,
+        )
+      : undefined;
+    if (observation?.stale || observation?.activityFenceOnly) return;
+    const job = observation?.job;
     log('[task-session-manager] idle/status idle observed', {
       sessionID: sessionId,
       managesSession: sessionId
@@ -241,13 +446,13 @@ export async function handleEvent(
         // false completion the child-idle path would record.
         deps.idleReconciler.scheduleErrorTerminalize(
           sessionId,
-          Date.now(),
+          observedAt,
           job.generation,
         );
       } else {
         deps.idleReconciler.scheduleChildIdleReconciliation(
           sessionId,
-          Date.now(),
+          observedAt,
           job.generation,
         );
       }
@@ -258,6 +463,27 @@ export async function handleEvent(
   if (input.event.type === 'session.error') {
     const sessionId =
       input.event.properties?.info?.id || input.event.properties?.sessionID;
+    const observedAt = eventActivityAt(
+      input,
+      deps.options.now?.() ?? Date.now(),
+    );
+    const observation = sessionId
+      ? observeSessionEvent(
+          deps.backgroundJobBoard,
+          input,
+          sessionId,
+          observedAt,
+          false,
+        )
+      : undefined;
+    if (
+      observation?.stale ||
+      observation?.activityFenceOnly ||
+      (observation &&
+        !isCurrentSessionObservation(deps.backgroundJobBoard, observation))
+    ) {
+      return;
+    }
     if (sessionId) {
       deps.idleSessionTokens.invalidate(sessionId);
     }
@@ -285,8 +511,18 @@ export async function handleEvent(
         deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
         // orchestrator sees the failure instead of a false completion.
-        const job = deps.backgroundJobBoard.get(sessionId);
+        const job = observation?.job ?? deps.backgroundJobBoard.get(sessionId);
         if (job && job.state === 'running') {
+          // BackgroundJobStore has no expected-generation/CAS form for
+          // updateStatus. The check immediately above is the strongest
+          // synchronous boundary available; a remote event cannot be made
+          // atomic with a later relaunch through this API.
+          if (
+            observation &&
+            !isCurrentSessionObservation(deps.backgroundJobBoard, observation)
+          ) {
+            return;
+          }
           deps.backgroundJobBoard.updateStatus({
             taskID: sessionId,
             state: 'error',
@@ -309,8 +545,16 @@ export async function handleEvent(
       // nothing to retry into, so surface the failure on the board.
       const props = input.event.properties as { error?: unknown } | undefined;
       if (deps.options.isFallbackInProgress?.(sessionId)) return;
-      const job = deps.backgroundJobBoard.get(sessionId);
+      const job = observation?.job ?? deps.backgroundJobBoard.get(sessionId);
       if (job && job.state === 'running') {
+        // This is a final synchronous generation check, not a claim that
+        // updateStatus is a CAS operation; the store API cannot provide that.
+        if (
+          observation &&
+          !isCurrentSessionObservation(deps.backgroundJobBoard, observation)
+        ) {
+          return;
+        }
         deps.backgroundJobBoard.updateStatus({
           taskID: sessionId,
           state: 'error',
@@ -330,10 +574,31 @@ export async function handleEvent(
     const statusType = (
       input.event.properties as { status?: { type?: string } } | undefined
     )?.status?.type;
-    if (sessionId) deps.idleSessionTokens.invalidate(sessionId);
     if (statusType !== 'busy') {
+      if (sessionId) deps.idleSessionTokens.invalidate(sessionId);
       return;
     }
+    const observedAt = eventActivityAt(
+      input,
+      deps.options.now?.() ?? Date.now(),
+    );
+    const observation = sessionId
+      ? observeSessionEvent(
+          deps.backgroundJobBoard,
+          input,
+          sessionId,
+          observedAt,
+          true,
+        )
+      : undefined;
+    if (observation?.stale || observation?.activityFenceOnly) return;
+    if (
+      observation &&
+      !isCurrentSessionObservation(deps.backgroundJobBoard, observation)
+    ) {
+      return;
+    }
+    if (sessionId) deps.idleSessionTokens.invalidate(sessionId);
     // Live busy cancels a pending child idle-reconcile — the session
     // recovered (FG re-prompt or continued work).
     // Note: invalidate above already cleared the parent idle-reconcile
@@ -345,10 +610,14 @@ export async function handleEvent(
       deps.deferredInlineErrors.delete(sessionId);
     }
     const before = sessionId
-      ? deps.backgroundJobBoard.get(sessionId)
+      ? (observation?.job ?? deps.backgroundJobBoard.get(sessionId))
       : undefined;
     const updated = sessionId
-      ? deps.backgroundJobBoard.markRunningFromLiveSession(sessionId)
+      ? deps.backgroundJobBoard.markRunningFromLiveSession(
+          sessionId,
+          observedAt,
+          observation?.generation,
+        )
       : undefined;
     if (before?.cancellationRequested) {
       log('[task-session-manager] busy observed after cancel request', {
@@ -380,6 +649,44 @@ export async function handleEvent(
     input.event.properties?.info?.id || input.event.properties?.sessionID;
   if (!sessionId) return;
 
+  const observedAt = eventActivityAt(input, deps.options.now?.() ?? Date.now());
+  const observation = observeSessionEvent(
+    deps.backgroundJobBoard,
+    input,
+    sessionId,
+    observedAt,
+    false,
+  );
+  const suppliedGeneration = eventGeneration(input);
+  const hasCurrentGenerationProvenance =
+    suppliedGeneration !== undefined &&
+    observation.generation !== undefined &&
+    suppliedGeneration === observation.generation;
+  const ambiguousRelaunchDeletion =
+    observation.job !== undefined &&
+    observation.job.generation > 1 &&
+    !hasCurrentGenerationProvenance;
+  if (
+    observation.stale ||
+    observation.activityFenceOnly ||
+    !isCurrentSessionObservation(deps.backgroundJobBoard, observation) ||
+    ambiguousRelaunchDeletion
+  ) {
+    log(
+      '[task-session-manager] ignored session.deleted without current-generation proof',
+      {
+        sessionID: sessionId,
+        currentGeneration: observation.generation,
+        eventGeneration: suppliedGeneration,
+        observedAt,
+        reason: ambiguousRelaunchDeletion
+          ? 'OpenCode event has no generation/CAS provenance after relaunch'
+          : 'generation or activity fence rejected deletion',
+      },
+    );
+    return;
+  }
+
   // Foreground-fallback teardown recreates the session; keep process-global
   // wait_for_user. Genuine deletion clears wait state for the session.
   if (deps.options.isFallbackInProgress?.(sessionId)) {
@@ -400,4 +707,5 @@ export async function handleEvent(
   log('[task-session-manager] session.deleted observed', {
     sessionID: sessionId,
   });
+  eventFenceMap(deps.backgroundJobBoard).delete(sessionId);
 }

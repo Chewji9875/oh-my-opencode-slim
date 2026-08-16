@@ -13,6 +13,8 @@ export interface CmuxDeferredSpawn {
 export interface CmuxSessionRecord {
   session: string;
   owner: string;
+  /** Monotonic lifecycle owner fence used for late-pane takeover. */
+  ownerGeneration?: number;
   parent: string;
   title: string;
   directory: string;
@@ -45,14 +47,18 @@ export interface CmuxCloseSettlement {
 }
 
 const STORE_KEY = Symbol.for('oh-my-opencode-slim.cmux-session-store');
+const OWNER_GENERATION_KEY = Symbol.for(
+  'oh-my-opencode-slim.cmux-owner-generation',
+);
 const ORPHAN_OBSERVERS_KEY = Symbol.for(
   'oh-my-opencode-slim.cmux-orphan-observers',
 );
 
 interface LatePaneOrphanObserver {
+  ownerGeneration: number;
   directory: string;
   serverUrl: string | (() => string | undefined);
-  callback: () => void;
+  callback: (record: CmuxSessionRecord) => void;
 }
 
 function records(): Map<string, CmuxSessionRecord> {
@@ -71,7 +77,20 @@ function orphanObservers(): Set<LatePaneOrphanObserver> {
   return globalStore[ORPHAN_OBSERVERS_KEY];
 }
 
+function nextOwnerGeneration(): number {
+  const globalStore = globalThis as typeof globalThis & {
+    [OWNER_GENERATION_KEY]?: number;
+  };
+  const generation = (globalStore[OWNER_GENERATION_KEY] ?? 0) + 1;
+  globalStore[OWNER_GENERATION_KEY] = generation;
+  return generation;
+}
+
 export class CmuxSessionStore {
+  registerOwner(): number {
+    return nextOwnerGeneration();
+  }
+
   consumeCloseSettlement(
     record: CmuxSessionRecord,
   ): CmuxCloseSettlement | undefined {
@@ -93,10 +112,16 @@ export class CmuxSessionStore {
         (existing.lifecycle !== 'orphaned' && existing.lifecycle !== 'deleted')
       )
         return false;
+      if (!existing.serverUrl || existing.serverUrl !== record.serverUrl)
+        return false;
       // Transfer ownership without replacing the record while an adapter
       // close is in flight. The old operation must settle before any retry.
       if (existing.closePromise) {
-        if (!existing.latePaneCleanup) existing.owner = record.owner;
+        if (!existing.latePaneCleanup) {
+          existing.owner = record.owner;
+          if (record.ownerGeneration !== undefined)
+            existing.ownerGeneration = record.ownerGeneration;
+        }
         return false;
       }
       const settlement = this.consumeCloseSettlement(existing);
@@ -107,8 +132,12 @@ export class CmuxSessionStore {
         return false;
       }
       existing.closeTimer?.cancel();
+      const nextOwner = record.owner;
+      const nextOwnerGeneration =
+        record.ownerGeneration ?? existing.ownerGeneration;
       Object.assign(record, existing, {
-        owner: record.owner,
+        owner: nextOwner,
+        ownerGeneration: nextOwnerGeneration,
         closeTimer: undefined,
       });
     }
@@ -125,9 +154,10 @@ export class CmuxSessionStore {
   observeLatePaneOrphans(
     directory: string,
     serverUrl: string | (() => string | undefined),
-    callback: () => void,
+    callback: (record: CmuxSessionRecord) => void,
+    ownerGeneration = 0,
   ): () => void {
-    const observer = { directory, serverUrl, callback };
+    const observer = { directory, serverUrl, callback, ownerGeneration };
     orphanObservers().add(observer);
     return () => orphanObservers().delete(observer);
   }
@@ -141,7 +171,7 @@ export class CmuxSessionStore {
           : observer.serverUrl;
       if (serverUrl !== record.serverUrl) continue;
       queueMicrotask(() => {
-        if (orphanObservers().has(observer)) observer.callback();
+        if (orphanObservers().has(observer)) observer.callback(record);
       });
     }
   }
@@ -149,22 +179,29 @@ export class CmuxSessionStore {
     owner: string,
     directory: string,
     serverUrl?: string | (() => string | undefined),
+    ownerGeneration?: number,
   ): CmuxSessionRecord[] {
+    const currentServerUrl =
+      serverUrl === undefined
+        ? undefined
+        : typeof serverUrl === 'function'
+          ? serverUrl()
+          : serverUrl;
+    if (!currentServerUrl) return [];
     const claimed = [...records().values()].filter(
       (record) =>
         record.directory === directory &&
+        record.serverUrl === currentServerUrl &&
         Boolean(record.paneId) &&
-        (!record.latePaneCleanup ||
-          (serverUrl !== undefined &&
-            (typeof serverUrl === 'function' ? serverUrl() : serverUrl) ===
-              record.serverUrl &&
-            !record.closePromise)) &&
+        (!record.latePaneCleanup || !record.closePromise) &&
         (record.lifecycle === 'orphaned' || record.lifecycle === 'deleted'),
     );
     for (const record of claimed) {
       record.closeTimer?.cancel();
       record.closeTimer = undefined;
       record.owner = owner;
+      if (ownerGeneration !== undefined)
+        record.ownerGeneration = ownerGeneration;
     }
     return claimed;
   }
@@ -172,21 +209,29 @@ export class CmuxSessionStore {
     owner: string,
     directory: string,
     serverUrl: string,
+    ownerGeneration?: number,
+    expectedRecord?: CmuxSessionRecord,
   ): CmuxSessionRecord[] {
     const claimed = [...records().values()].filter(
       (record) =>
+        (!expectedRecord || record === expectedRecord) &&
         record.owner !== owner &&
         record.latePaneCleanup === true &&
         record.directory === directory &&
         record.serverUrl === serverUrl &&
         Boolean(record.paneId) &&
         !record.closePromise &&
+        (ownerGeneration === undefined ||
+          record.ownerGeneration === undefined ||
+          record.ownerGeneration < ownerGeneration) &&
         (record.lifecycle === 'orphaned' || record.lifecycle === 'deleted'),
     );
     for (const record of claimed) {
       record.closeTimer?.cancel();
       record.closeTimer = undefined;
       record.owner = owner;
+      if (ownerGeneration !== undefined)
+        record.ownerGeneration = ownerGeneration;
     }
     return claimed;
   }
@@ -232,5 +277,9 @@ export class CmuxSessionStore {
     }
     records().clear();
     orphanObservers().clear();
+    const globalStore = globalThis as typeof globalThis & {
+      [OWNER_GENERATION_KEY]?: number;
+    };
+    globalStore[OWNER_GENERATION_KEY] = 0;
   }
 }
