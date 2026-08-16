@@ -118,11 +118,13 @@ export function createRevivedRunTracker(options: {
   const onTerminal = (record: BackgroundJobRecord): void => {
     const run = runs.get(record.taskID);
     if (!run || run.generation !== record.generation) return;
-    if (
-      record.state !== 'completed' &&
-      record.state !== 'error' &&
-      record.state !== 'cancelled'
-    ) {
+    if (record.state === 'cancelled') {
+      settleRun(run, record);
+      options.backgroundJobSupervisor?.onTerminal(record);
+      discardRun(run);
+      return;
+    }
+    if (record.state !== 'completed' && record.state !== 'error') {
       return;
     }
     finish(run, record);
@@ -206,6 +208,14 @@ export function createRevivedRunTracker(options: {
     if (record.state !== 'completed' && record.state !== 'error') return false;
     if (run.terminalState && run.terminalState !== record.state) return true;
     run.terminalState = record.state;
+    settleRun(run, record);
+    options.backgroundJobSupervisor?.onTerminal(record);
+    if (run.notification.sent || run.notification.pending) return true;
+    void notifyParent(run, record);
+    return true;
+  }
+
+  function settleRun(run: RevivedRun, record: BackgroundJobRecord): void {
     options.backgroundJobBoard.addContext(
       record.taskID,
       options.contextFilesForPrompt?.(record.taskID) ?? [],
@@ -213,10 +223,6 @@ export function createRevivedRunTracker(options: {
     options.backgroundJobBoard.addContext(record.taskID, record.contextFiles);
     options.pruneContext?.();
     options.onSettled?.(run.taskID);
-    options.backgroundJobSupervisor?.onTerminal(record);
-    if (run.notification.sent || run.notification.pending) return true;
-    void notifyParent(run, record);
-    return true;
   }
 
   async function notifyParent(

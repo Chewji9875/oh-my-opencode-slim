@@ -51,12 +51,23 @@ function createHarness(
       session,
     },
   } as never;
+  const settled = mock(() => {});
+  const pruned = mock(() => {});
   const tracker = createRevivedRunTracker({
     input,
     backgroundJobBoard: board,
     notificationRetryDelayMs: 0,
+    onSettled: settled,
+    pruneContext: pruned,
   });
-  return { board, run, tracker, prompt: session.promptAsync };
+  return {
+    board,
+    run,
+    tracker,
+    prompt: session.promptAsync,
+    settled,
+    pruned,
+  };
 }
 
 describe('revived run tracker', () => {
@@ -350,5 +361,52 @@ describe('revived run tracker', () => {
     expect(
       harness.tracker.isTracked(harness.run.taskID, newer.generation),
     ).toBe(false);
+  });
+
+  test('clears cancelled runs and pending context without notifying the parent', () => {
+    const harness = createHarness(() => ({ data: [] }));
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      description: 'inspect the change',
+    });
+    const cancelled = harness.board.updateStatus({
+      taskID: harness.run.taskID,
+      expectedGeneration: harness.run.generation,
+      state: 'cancelled',
+      resultSummary: 'cancelled by user',
+    });
+    if (!cancelled) throw new Error('missing cancelled record');
+    harness.tracker.onTerminal(cancelled);
+
+    expect(
+      harness.tracker.isTracked(harness.run.taskID, harness.run.generation),
+    ).toBe(false);
+    expect(harness.settled).toHaveBeenCalledTimes(1);
+    expect(harness.pruned).toHaveBeenCalledTimes(1);
+    expect(harness.prompt).not.toHaveBeenCalled();
+
+    const lease = harness.board.acquireRelaunchLease(
+      harness.run.taskID,
+      harness.run.generation,
+    );
+    if (!lease) throw new Error('missing revive lease');
+    const next = harness.board.registerLaunch({
+      taskID: harness.run.taskID,
+      parentSessionID: 'parent',
+      agent: 'explorer',
+      background: true,
+      relaunchLease: lease,
+    });
+    harness.board.releaseLease(lease);
+    harness.tracker.register({
+      taskID: next.taskID,
+      generation: next.generation,
+      parentSessionID: 'parent',
+      description: 'second revive',
+    });
+    harness.tracker.onTerminal(cancelled);
+    expect(harness.tracker.isTracked(next.taskID, next.generation)).toBe(true);
   });
 });
