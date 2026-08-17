@@ -103,6 +103,10 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bmodel is not available\b/i,
   /\bunsupported model\b/i,
   /\bunknown model\b/i,
+  // OpenCode's ProviderModelNotFoundError uses "Model not found" wording; the
+  // model may exist on a later entry in the configured chain, so treat it as a
+  // provider outage and advance the fallback chain.
+  /\bmodel not found\b/i,
   // Model retired/end-of-life (HTTP 410 Gone) — the model no longer exists,
   // so the next model must be tried instead of retrying the dead one.
   /\bend of life\b/i,
