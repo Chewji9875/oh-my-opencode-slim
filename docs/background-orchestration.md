@@ -180,9 +180,10 @@ on the local job board.
 
 After a full OpenCode or plugin restart, persisted running background-task
 history is rehydrated into the local job board and immediately reconciled against
-live host session status. A missing or idle child is therefore surfaced as
-`stopped, unreconciled`, while a busy child remains running; status lookup
-failures remain uncertain rather than being treated as completion.
+live host session status. A missing or idle child is a stop candidate: after a
+5s confirmation grace it is surfaced as `stopped, unreconciled`, while a busy
+child remains running; status lookup failures remain uncertain rather than being
+treated as completion.
 
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them
 against each other and the original user goal.
@@ -453,17 +454,22 @@ liveness authority. After a tracked task launches, the plugin periodically
 checks that single map for every board job still marked `running`, while normal
 session events remain the fast path.
 
-`busy` and `retry` confirm that a job is live. An explicit `idle` state or an
-absent session in an otherwise valid map records `stopped, unreconciled` rather
-than `completed`: it means execution ended before a native terminal task result
-was delivered, not that the task succeeded. Stopped sessions are never reusable
-and stay visible to the parent for recovery. A later live `busy` observation can
-revive them, and only explicit terminal task output proves completion, error, or
-cancellation.
+`busy` and `retry` confirm that a job is live and reset any pending stop
+confirmation. An explicit `idle` state or an absent session in an otherwise
+valid map is not immediately terminal: the first observation starts a 5s
+confirmation grace and keeps the job `running, status uncertain`. Repeat
+non-busy evidence after that grace records `stopped, unreconciled` rather than
+`completed`: it means execution ended before a native terminal task result was
+delivered, not that the task succeeded. Stopped sessions are never reusable and
+stay visible to the parent for recovery. A later live `busy` observation can
+revive an unreconciled stopped job. After the parent has been woken and the stop
+acknowledged, stale busy cannot flip the job back to running. Only explicit
+terminal task output proves completion, error, or cancellation.
 
 Malformed status entries and failed status requests are surfaced as `status
-uncertain`; they never prove that a job stopped or completed. Each observation
-is generation-aware, so a delayed response cannot modify a relaunched task.
+uncertain`; they never prove that a job stopped or completed and do not confirm
+a pending stop. Each observation is generation-aware, so a delayed response
+cannot modify a relaunched task.
 
 ### Opt-in Wall-clock Supervisor
 

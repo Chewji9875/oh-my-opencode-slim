@@ -1,6 +1,10 @@
 import type { BackgroundJobStore, ContextFile } from '../../utils';
 import { log } from '../../utils/logger';
 import type { RevivedRunTracker } from './revived-run-tracker';
+import {
+  observeNonBusyRuntime,
+  STOP_CONFIRMATION_GRACE_MS,
+} from './stop-confirmation';
 
 export function createIdleReconciler(options: {
   backgroundJobBoard: BackgroundJobStore;
@@ -8,6 +12,7 @@ export function createIdleReconciler(options: {
   /** Called when a deferred inline error is terminalized at idle. */
   onErrorTerminalize?: (sessionID: string) => void;
   idleReconcileDelayMs: number;
+  stopConfirmationGraceMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
   hasInputWait: (sessionID: string) => boolean;
   getIdleSessionToken: (sessionID: string) => symbol;
@@ -84,19 +89,29 @@ export function createIdleReconciler(options: {
         if (terminalPublished) return;
       }
 
-      // Idle is a quiescent runner observation, not proof that the background
-      // task ended. Keep the job live so a late terminal task result can win.
+      const updated = observeNonBusyRuntime({
+        backgroundJobBoard: options.backgroundJobBoard,
+        taskID: sessionID,
+        observedAt: idleObservedAt,
+        generation: observedGeneration,
+        graceMs: options.stopConfirmationGraceMs ?? STOP_CONFIRMATION_GRACE_MS,
+        lastStatusError:
+          'Runtime session is idle; task termination is unconfirmed.',
+        taskContextTracker: options.taskContextTracker,
+      });
+      if (updated?.state === 'stopped') {
+        log('[task-session-manager] confirmed runtime-stopped job from idle', {
+          sessionID,
+          alias: updated.alias,
+          parentSessionID: updated.parentSessionID,
+        });
+        return;
+      }
       log('[task-session-manager] observed quiescent job from idle', {
         sessionID,
         alias: job.alias,
         parentSessionID: job.parentSessionID,
       });
-      options.backgroundJobBoard.markStatusUncertain(
-        sessionID,
-        'Runtime session is idle; task termination is unconfirmed.',
-        observedGeneration,
-        idleObservedAt,
-      );
     }, options.idleReconcileDelayMs).unref?.();
     childIdleReconcileTimers.set(sessionID, timer);
   }

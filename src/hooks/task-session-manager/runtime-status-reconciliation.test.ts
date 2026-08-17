@@ -5,6 +5,7 @@ import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
 function createReconciler(
   status: () => Promise<unknown>,
   statusTimeoutMs?: number,
+  stopConfirmationGraceMs?: number,
 ) {
   const board = new BackgroundJobBoard();
   const contextFilesForPrompt = mock(() => []);
@@ -16,6 +17,7 @@ function createReconciler(
     } as never,
     backgroundJobBoard: board,
     statusTimeoutMs,
+    stopConfirmationGraceMs,
     taskContextTracker: {
       pendingManagedTaskIds: new Set(['child-1']),
       contextFilesForPrompt,
@@ -256,13 +258,139 @@ describe('runtime status reconciliation', () => {
     });
   });
 
-  test('allows runtime busy to revive an acknowledged stopped job', () => {
+  test('idle then busy inside grace remains running with no terminal listener', async () => {
+    let liveStatus: unknown = { data: { 'child-1': { type: 'idle' } } };
+    const { board, reconciler } = createReconciler(
+      async () => liveStatus,
+      undefined,
+      60_000,
+    );
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(listener).not.toHaveBeenCalled();
+
+    liveStatus = { data: { 'child-1': { type: 'busy' } } };
+    await reconciler.reconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+      stopConfirmationStartedAt: undefined,
+    });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  test('repeated idle beyond confirmation grace becomes stopped exactly once', async () => {
+    const { board, reconciler, contextFilesForPrompt, prune } = createReconciler(
+      async () => ({ data: { 'child-1': { type: 'idle' } } }),
+      undefined,
+      0,
+    );
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({ state: 'running' });
+    expect(listener).not.toHaveBeenCalled();
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(contextFilesForPrompt).toHaveBeenCalledTimes(1);
+    expect(prune).toHaveBeenCalledTimes(1);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({ state: 'stopped' });
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test('a busy observation resets pending stop confirmation', async () => {
+    let liveStatus: unknown = { data: { 'child-1': { type: 'idle' } } };
+    const { board, reconciler } = createReconciler(
+      async () => liveStatus,
+      undefined,
+      0,
+    );
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')?.stopConfirmationStartedAt).toBeDefined();
+
+    liveStatus = { data: { 'child-1': { type: 'busy' } } };
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      stopConfirmationStartedAt: undefined,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    liveStatus = { data: { 'child-1': { type: 'idle' } } };
+    await reconciler.reconcile();
+    expect(board.get('child-1')).toMatchObject({ state: 'running' });
+    expect(board.get('child-1')?.stopConfirmationStartedAt).toBeDefined();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  test('status lookup failure does not confirm a stop or wake the parent', async () => {
+    let liveStatus: () => Promise<unknown> = async () => ({
+      data: { 'child-1': { type: 'idle' } },
+    });
+    const { board, reconciler } = createReconciler(
+      () => liveStatus(),
+      undefined,
+      0,
+    );
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+
+    await reconciler.reconcile();
+    expect(board.get('child-1')?.stopConfirmationStartedAt).toBeDefined();
+
+    liveStatus = async () => {
+      throw new Error('server restarting');
+    };
+    await reconciler.reconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      lastStatusError: 'Runtime status lookup failed: server restarting',
+    });
+    expect(board.get('child-1')?.stopConfirmationStartedAt).toBeDefined();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  test('does not let stale busy revive a confirmed stopped job after terminal wake', () => {
     const { board } = createReconciler(async () => ({ data: {} }));
     const generation = board.get('child-1')?.generation;
-    board.markStopped('child-1', 'no result', 1, generation);
-    board.markReconciled('child-1');
+    board.markStopped('child-1', 'no result', 150, generation, 150);
+    board.markReconciled('child-1', 160);
 
-    board.markRunningFromLiveSession('child-1', 2, generation);
+    board.markRunningFromLiveSession('child-1', 200, generation);
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+      lastLiveBusyAt: 200,
+    });
+  });
+
+  test('later live busy can still revive an unreconciled stopped job', () => {
+    const { board } = createReconciler(async () => ({ data: {} }));
+    const generation = board.get('child-1')?.generation;
+    board.markStopped('child-1', 'no result', 150, generation, 150);
+
+    board.markRunningFromLiveSession('child-1', 200, generation);
 
     expect(board.get('child-1')).toMatchObject({
       state: 'running',

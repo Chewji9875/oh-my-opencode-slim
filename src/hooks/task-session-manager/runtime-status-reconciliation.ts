@@ -5,6 +5,10 @@ import {
   runtimeSessionStatus,
 } from '../../utils';
 import { log } from '../../utils/logger';
+import {
+  observeNonBusyRuntime,
+  STOP_CONFIRMATION_GRACE_MS,
+} from './stop-confirmation';
 
 export const RUNTIME_STATUS_RECONCILE_DELAY_MS = 5_000;
 
@@ -13,6 +17,7 @@ export function createRuntimeStatusReconciler(options: {
   backgroundJobBoard: BackgroundJobStore;
   delayMs?: number;
   statusTimeoutMs?: number;
+  stopConfirmationGraceMs?: number;
   taskContextTracker: {
     pendingManagedTaskIds: Set<string>;
     contextFilesForPrompt(taskId: string): ContextFile[];
@@ -51,11 +56,14 @@ export function createRuntimeStatusReconciler(options: {
       .filter((job) => job.state === 'running');
     if (running.length === 0) return;
 
+    const requestStartedAt = Date.now();
     const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
       timeoutMs: options.statusTimeoutMs,
     });
     if (disposed) return;
     const observedAt = Date.now();
+    const graceMs =
+      options.stopConfirmationGraceMs ?? STOP_CONFIRMATION_GRACE_MS;
     if (snapshot.error) {
       for (const job of running) {
         options.backgroundJobBoard.markStatusUncertain(
@@ -81,16 +89,6 @@ export function createRuntimeStatusReconciler(options: {
         continue;
       }
       const status = runtimeSessionStatus(snapshot, job.taskID);
-      if (status === undefined) {
-        options.backgroundJobBoard.markStatusUncertain(
-          job.taskID,
-          snapshot.malformedSessionIDs.has(job.taskID)
-            ? 'Runtime status response did not contain a recognized session state.'
-            : 'Runtime status response did not contain a live session state; task termination is unconfirmed.',
-          job.generation,
-        );
-        continue;
-      }
       if (status === 'busy' || status === 'retry') {
         options.backgroundJobBoard.markRunningFromLiveSession(
           job.taskID,
@@ -99,15 +97,36 @@ export function createRuntimeStatusReconciler(options: {
         );
         continue;
       }
+      if (status === undefined && snapshot.malformedSessionIDs.has(job.taskID)) {
+        options.backgroundJobBoard.markStatusUncertain(
+          job.taskID,
+          'Runtime status response did not contain a recognized session state.',
+          job.generation,
+        );
+        continue;
+      }
 
-      // Idle only says that the runner is currently quiescent. It is not
-      // terminal evidence for a background task: a task result can arrive
-      // after this observation.
-      options.backgroundJobBoard.markStatusUncertain(
-        job.taskID,
-        'Runtime session is idle; task termination is unconfirmed.',
-        job.generation,
-      );
+      const lastStatusError =
+        status === undefined
+          ? 'Runtime status response did not contain a live session state; task termination is unconfirmed.'
+          : 'Runtime session is idle; task termination is unconfirmed.';
+      const updated = observeNonBusyRuntime({
+        backgroundJobBoard: options.backgroundJobBoard,
+        taskID: job.taskID,
+        observedAt: requestStartedAt,
+        generation: job.generation,
+        graceMs,
+        lastStatusError,
+        taskContextTracker: options.taskContextTracker,
+      });
+      if (updated?.state === 'stopped') {
+        log('[task-session-manager] confirmed runtime-stopped job', {
+          taskID: updated.taskID,
+          alias: updated.alias,
+          parentSessionID: updated.parentSessionID,
+        });
+        continue;
+      }
       log(
         '[task-session-manager] runtime session quiescent; terminal result pending',
         {

@@ -70,6 +70,8 @@ export interface BackgroundJobRecord {
   deadlineExceededAt?: number;
   updatedAt: number;
   lastLiveBusyAt?: number;
+  /** First non-busy runtime observation for the current stop-confirmation grace. */
+  stopConfirmationStartedAt?: number;
   completedAt?: number;
   resultSummary?: string;
   lastStatusError?: string;
@@ -279,6 +281,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         runStartedAt: now,
         deadlineExceededAt: undefined,
         lastLiveBusyAt: now,
+        stopConfirmationStartedAt: undefined,
         lastUsedAt: now,
         updatedAt: now,
         totalErrors: existing.totalErrors ?? 0,
@@ -379,6 +382,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalState: terminal ? input.state : existing.terminalState,
       resultSummary: input.resultSummary ?? existing.resultSummary,
       lastStatusError: input.lastStatusError,
+      stopConfirmationStartedAt:
+        input.state === 'running'
+          ? existing.stopConfirmationStartedAt
+          : undefined,
     };
 
     if (input.state === 'completed') {
@@ -428,8 +435,22 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const isStaleTerminal =
       isCanonicalTerminalState(existing.state) ||
-      existing.state === 'reconciled';
+      existing.state === 'reconciled' ||
+      (existing.state === 'stopped' && !existing.terminalUnreconciled);
     if (isStaleTerminal) {
+      const updated: BackgroundJobRecord = {
+        ...existing,
+        lastLiveBusyAt: now,
+      };
+      this.jobs.set(taskID, updated);
+      return updated;
+    }
+
+    if (
+      existing.state === 'stopped' &&
+      existing.completedAt !== undefined &&
+      now <= existing.completedAt
+    ) {
       const updated: BackgroundJobRecord = {
         ...existing,
         lastLiveBusyAt: now,
@@ -443,6 +464,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       state: 'running',
       updatedAt: now,
       lastLiveBusyAt: now,
+      stopConfirmationStartedAt: undefined,
       timedOut: false,
       recoverableAfterLiveBusy:
         existing.recoverableAfterLiveBusy || existing.timedOut,
@@ -500,9 +522,33 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       completedAt: existing.completedAt ?? now,
       resultSummary,
       lastStatusError: undefined,
+      stopConfirmationStartedAt: undefined,
     };
     this.jobs.set(taskID, updated);
     this.notifyTerminalStateListeners(taskID);
+    return updated;
+  }
+
+  noteStopConfirmation(
+    taskID: string,
+    startedAt: number,
+    expectedGeneration?: number,
+  ): BackgroundJobRecord | undefined {
+    const existing = this.jobs.get(taskID);
+    if (existing?.state !== 'running') return existing;
+    if (
+      expectedGeneration !== undefined &&
+      existing.generation !== expectedGeneration
+    ) {
+      return existing;
+    }
+    if (existing.stopConfirmationStartedAt !== undefined) return existing;
+
+    const updated: BackgroundJobRecord = {
+      ...existing,
+      stopConfirmationStartedAt: startedAt,
+    };
+    this.jobs.set(taskID, updated);
     return updated;
   }
 
@@ -639,6 +685,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalState: 'cancelled',
       resultSummary: summary,
       lastStatusError: undefined,
+      stopConfirmationStartedAt: undefined,
     };
 
     this.jobs.set(taskID, updated);
@@ -840,6 +887,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       timeoutCount: (existing.timeoutCount ?? 0) + 1,
       lastErrorAt: now,
       totalErrors: (existing.totalErrors ?? 0) + 1,
+      stopConfirmationStartedAt: undefined,
     };
     this.jobs.set(input.taskID, updated);
     this.notifyTerminalStateListeners(input.taskID);

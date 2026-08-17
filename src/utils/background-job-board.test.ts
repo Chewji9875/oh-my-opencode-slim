@@ -1005,6 +1005,88 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
+  test('live busy clears pending stop confirmation', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    board.noteStopConfirmation('ses_1', 111, board.get('ses_1')?.generation);
+
+    const updated = board.markRunningFromLiveSession('ses_1', 200);
+
+    expect(updated).toMatchObject({
+      state: 'running',
+      stopConfirmationStartedAt: undefined,
+      lastLiveBusyAt: 200,
+    });
+  });
+
+  test('noteStopConfirmation keeps the first observation and ignores later ones', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    const generation = board.get('ses_1')?.generation;
+
+    expect(board.noteStopConfirmation('ses_1', 11, generation)).toMatchObject({
+      stopConfirmationStartedAt: 11,
+    });
+    expect(board.noteStopConfirmation('ses_1', 21, generation)).toMatchObject({
+      stopConfirmationStartedAt: 11,
+    });
+  });
+
+  test('stale busy does not revive a confirmed stopped job after terminal wake', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    const generation = board.get('ses_1')?.generation;
+    board.markStopped('ses_1', 'no result', 150, generation, 150);
+    board.markReconciled('ses_1', 160);
+
+    const updated = board.markRunningFromLiveSession('ses_1', 200, generation);
+
+    expect(updated).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+      lastLiveBusyAt: 200,
+    });
+  });
+
+  test('stale busy at the stop timestamp does not revive an unreconciled stopped job', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    const generation = board.get('ses_1')?.generation;
+    board.markStopped('ses_1', 'no result', 150, generation, 150);
+
+    const stale = board.markRunningFromLiveSession('ses_1', 150, generation);
+    expect(stale).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+      lastLiveBusyAt: 150,
+    });
+
+    const later = board.markRunningFromLiveSession('ses_1', 151, generation);
+    expect(later).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+  });
+
   test('live busy session does not reopen non-cancelled terminal jobs', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
