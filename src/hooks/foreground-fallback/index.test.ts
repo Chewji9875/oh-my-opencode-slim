@@ -298,6 +298,36 @@ describe('isFailoverError', () => {
       }),
     ).toBe(false);
   });
+
+  test('returns true for OpenCode ProviderModelNotFoundError "Model not found" errors', () => {
+    // Issue #1034: OpenCode's ProviderModelNotFoundError ("Model not found:
+    // <model>") was not classified as a failover error, so a missing primary
+    // model failed the task outright instead of advancing the fallback chain.
+    // The reporter's error string always carries the message; the bare
+    // camelCase class name "ProviderModelNotFoundError" (no spaces) does not
+    // match /\bmodel not found\b/i and is intentionally not covered here.
+    expect(
+      isFailoverError(
+        'ProviderModelNotFoundError: Model not found: custom/missing-model.',
+      ),
+    ).toBe(true);
+    expect(
+      isFailoverError({ message: 'Model not found: custom/missing-model' }),
+    ).toBe(true);
+  });
+
+  test('returns true for existing model-outage patterns (regression guard)', () => {
+    expect(isFailoverError('model not available')).toBe(true);
+    expect(isFailoverError('unsupported model')).toBe(true);
+    expect(isFailoverError('unknown model')).toBe(true);
+  });
+
+  test('returns false for normal errors and model mentions without outage wording', () => {
+    expect(isFailoverError('Cannot connect to database')).toBe(false);
+    expect(isFailoverError({ message: 'invalid model configuration' })).toBe(
+      false,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -467,6 +497,42 @@ describe('ForegroundFallbackManager session.error', () => {
         sessionID: 'sess-1',
         error: {
           message: 'stream error: Cannot connect to API',
+        },
+      },
+    });
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const call = mocks.promptAsync.mock.calls[0] as [
+      {
+        model: { providerID: string; modelID: string };
+      },
+    ];
+    expect(call[0].body.model.providerID).toBe('openai');
+    expect(call[0].body.model.modelID).toBe('gpt-4o');
+  });
+
+  test('triggers fallback on ProviderModelNotFoundError session.error', async () => {
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: {
+          message:
+            'ProviderModelNotFoundError: Model not found: custom/missing-model.',
         },
       },
     });
