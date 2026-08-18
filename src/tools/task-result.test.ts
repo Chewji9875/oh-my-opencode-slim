@@ -85,7 +85,7 @@ describe('task_result', () => {
     ).resolves.toBe('final findings');
   });
 
-  test('rejects a still-running tracked task', async () => {
+  test('returns a non-error status for a still-running tracked task', async () => {
     const { board, tool, messages } = createTool();
     board.registerLaunch({
       taskID: 'ses_child1',
@@ -94,12 +94,14 @@ describe('task_result', () => {
       description: 'trace bug',
     });
 
-    await expect(
-      tool.execute({ task_id: 'exp-1' }, {
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-      } as any),
-    ).rejects.toThrow('still running');
+    const output = await tool.execute({ task_id: 'exp-1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toContain('task_id: ses_child1');
+    expect(output).toContain('state: running');
+    expect(output).toContain('task_status');
     expect(messages).not.toHaveBeenCalled();
   });
 
@@ -122,13 +124,13 @@ describe('task_result', () => {
       data: { ses_child1: { type: 'busy' } },
     });
 
-    await expect(
-      tool.execute({ task_id: 'exp-1' }, {
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-      } as any),
-    ).rejects.toThrow('still running');
+    const output = await tool.execute({ task_id: 'exp-1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
 
+    expect(output).toContain('state: running');
+    expect(output).toContain('task_status');
     expect(board.get('ses_child1')).toMatchObject({
       state: 'running',
       statusUncertain: false,
@@ -235,8 +237,7 @@ describe('task_result', () => {
         sessionID: 'parent-1',
         agent: 'orchestrator',
       } as any),
-    ).rejects.toThrow('still running');
-
+    ).rejects.toThrow('changed generation');
     expect(board.get('ses_child1')).toMatchObject({
       generation: first.generation + 1,
       state: 'running',
@@ -280,8 +281,7 @@ describe('task_result', () => {
         sessionID: 'parent-1',
         agent: 'orchestrator',
       } as any),
-    ).rejects.toThrow('still running');
-
+    ).rejects.toThrow('changed generation');
     expect(board.get('ses_child1')?.state).toBe('running');
   });
 
@@ -309,33 +309,36 @@ describe('task_result', () => {
     expect(messages).not.toHaveBeenCalled();
   });
 
-  test('rejects an untracked child whose live session is busy', async () => {
+  test('returns a status for an untracked child whose live session is busy', async () => {
     const { tool, messages } = createTool();
     mockClient.session.status.mockImplementation(async () => ({
       data: { ses_child1: { type: 'busy' } },
     }));
 
-    await expect(
-      tool.execute({ task_id: 'ses_child1' }, {
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-      } as any),
-    ).rejects.toThrow('still running');
+    const output = await tool.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toContain('task_id: ses_child1');
+    expect(output).toContain('state: running');
+    expect(output).toContain('task_status');
     expect(messages).not.toHaveBeenCalled();
   });
 
-  test('rejects an untracked child whose live session is retrying', async () => {
+  test('returns a status for an untracked child whose live session is retrying', async () => {
     const { tool, messages } = createTool();
     mockClient.session.status.mockImplementation(async () => ({
       data: { ses_child1: { type: 'retry' } },
     }));
 
-    await expect(
-      tool.execute({ task_id: 'ses_child1' }, {
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-      } as any),
-    ).rejects.toThrow('still running');
+    const output = await tool.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toContain('state: retry');
+    expect(output).toContain('task_status');
     expect(messages).not.toHaveBeenCalled();
   });
 

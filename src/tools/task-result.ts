@@ -26,22 +26,17 @@ interface TaskResultToolOptions {
 /**
  * Gate tracked task retrieval on the tracked terminal outcome. Only a
  * `completed` state (or a reconciled job whose terminal outcome was
- * `completed`) may yield a successful result; running, errored and cancelled
- * jobs are rejected explicitly and accurately instead of leaking partial
- * output as a final result.
+ * `completed`) may yield a successful result. Errored, cancelled and otherwise
+ * unconfirmed jobs are rejected instead of leaking partial output as a final
+ * result.
  */
 function assertRetrievableState(
   requested: string,
   job: BackgroundJobRecord,
 ): void {
-  const terminalState =
-    job.state === 'reconciled' ? job.terminalState : job.state;
+  const terminalState = getTrackedTerminalState(job);
 
-  if (terminalState === 'running') {
-    throw new Error(
-      `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
-    );
-  }
+  if (terminalState === 'running') return;
   if (terminalState === 'error') {
     throw new Error(
       `Task ${requested} ended in error: ${job.lastStatusError ?? job.resultSummary ?? 'no error details available'}`,
@@ -56,6 +51,21 @@ function assertRetrievableState(
   if (terminalState !== 'completed') {
     throw new Error(`Task ${requested} has no confirmed completed result`);
   }
+}
+
+function getTrackedTerminalState(
+  job: BackgroundJobRecord,
+): BackgroundJobRecord['state'] | BackgroundJobRecord['terminalState'] {
+  return job.state === 'reconciled' ? job.terminalState : job.state;
+}
+
+function formatRunningTaskStatus(taskID: string, state = 'running'): string {
+  return [
+    `task_id: ${taskID}`,
+    `state: ${state}`,
+    'message: Task is still running. Wait for its terminal result.',
+    'next: use task_status to inspect the task',
+  ].join('\n');
 }
 
 function assertStableTrackedGeneration(
@@ -141,6 +151,9 @@ Use this when the user asks to see a prior task's full result, or before retryin
       }
 
       revalidateTracked();
+      if (tracked && getTrackedTerminalState(tracked) === 'running') {
+        return formatRunningTaskStatus(tracked.taskID);
+      }
 
       const taskID = tracked?.taskID ?? requested;
       if (!SESSION_ID_PATTERN.test(taskID)) {
@@ -167,8 +180,14 @@ Use this when the user asks to see a prior task's full result, or before retryin
       }
 
       revalidateTracked();
+      if (tracked && getTrackedTerminalState(tracked) === 'running') {
+        return formatRunningTaskStatus(tracked.taskID);
+      }
       liveSnapshot ??= await getRuntimeSessionStatusSnapshot(options.input);
       revalidateTracked();
+      if (tracked && getTrackedTerminalState(tracked) === 'running') {
+        return formatRunningTaskStatus(tracked.taskID);
+      }
       const status = runtimeSessionStatus(liveSnapshot, taskID);
       const trackedTerminalState = tracked
         ? tracked.state === 'reconciled'
@@ -179,8 +198,9 @@ Use this when the user asks to see a prior task's full result, or before retryin
         (status === 'busy' || status === 'retry') &&
         trackedTerminalState !== 'completed'
       ) {
-        throw new Error(
-          `Task ${requested} is still running. Wait for its terminal result instead of retrieving or duplicating it.`,
+        return formatRunningTaskStatus(
+          taskID,
+          status === 'retry' ? 'retry' : 'running',
         );
       }
 
