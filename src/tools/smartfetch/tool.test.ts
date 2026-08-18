@@ -2,6 +2,12 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { CACHE } from './cache';
 import { createWebfetchTool } from './tool';
 
+let mockV2Client: Record<string, unknown>;
+
+mock.module('../../utils/opencode-client', () => ({
+  getClient: () => mockV2Client,
+}));
+
 function createExecutionContext() {
   return {
     ask: mock(async () => undefined),
@@ -119,5 +125,56 @@ describe('smartfetch/tool', () => {
     expect(secondResult).toContain(
       'requested_url: "https://example.com/docs#sec2"',
     );
+  });
+
+  test('passes ctx.sessionID as parentID to the secondary-model session', async () => {
+    const fetchMock = mock(async () => {
+      return new Response(
+        'Article about smartfetch: it fetches pages, extracts the main ' +
+          'content, caches results, and summarizes them with a secondary ' +
+          'model whenever a prompt is provided by the tool caller.',
+        { status: 200, headers: { 'content-type': 'text/plain' } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const session = {
+      create: mock(async () => ({ data: { id: 'secondary-session' } })),
+      prompt: mock(async () => ({
+        data: { parts: [{ type: 'text', text: 'Extracted answer' }] },
+      })),
+      delete: mock(async () => ({ data: true })),
+      abort: mock(async () => ({ data: true })),
+    };
+    const toolIds = { ids: mock(async () => ({ data: ['read'] })) };
+    mockV2Client = { session, tool: toolIds };
+
+    const webfetch = createWebfetchTool({ client: mockV2Client } as any, {
+      webfetchModels: [{ id: 'provider/small-model' }],
+    });
+    const ctx = createExecutionContext();
+    ctx.sessionID = 'main-session-id';
+    const result = await webfetch.execute(
+      {
+        url: 'https://example.com/article',
+        format: 'markdown',
+        extract_main: true,
+        prefer_llms_txt: 'auto',
+        include_metadata: false,
+        save_binary: false,
+        prompt: 'Extract the answer',
+      },
+      ctx,
+    );
+
+    expect(session.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          title: 'smartfetch-secondary',
+          parentID: 'main-session-id',
+        }),
+      }),
+    );
+    expect(result).toContain('Extracted answer');
   });
 });
