@@ -8,6 +8,10 @@ import type { JSX } from '@opentui/solid';
 import { createElement, insert, setProp } from '@opentui/solid';
 import { DEFAULT_DISABLED_AGENTS, SUBAGENT_NAMES } from './config/constants';
 import { loadPluginConfig } from './config/loader';
+import {
+  recordTmuxPane,
+  removeTmuxPane,
+} from './multiplexer/tmux-pane-registry';
 import { openPresetManager } from './tui-preset';
 import {
   readTuiSnapshot,
@@ -25,6 +29,7 @@ const FALLBACK_SIDEBAR_AGENTS = SUBAGENT_NAMES.filter(
     !DEFAULT_DISABLED_AGENTS.includes(agent),
 );
 const BORDER = { type: 'single' };
+const TMUX_PANE_HEARTBEAT_MS = 10_000;
 
 type Child = JSX.Element | string | number | null | undefined | false;
 
@@ -73,6 +78,61 @@ function getTuiDirectory(api: {
   state?: { path?: { directory?: string } };
 }): string {
   return api.state?.path?.directory ?? process.cwd();
+}
+
+export interface ActiveTmuxPaneRegistration {
+  sessionId?: string;
+  paneId?: string;
+  ownerPid: number;
+  lastRecordedAt: number;
+}
+
+function clearTmuxPaneRegistration(
+  registration: ActiveTmuxPaneRegistration,
+): void {
+  if (registration.sessionId && registration.paneId) {
+    removeTmuxPane(
+      registration.sessionId,
+      registration.paneId,
+      registration.ownerPid,
+    );
+  }
+  registration.sessionId = undefined;
+  registration.paneId = undefined;
+  registration.lastRecordedAt = 0;
+}
+
+export function syncTmuxPaneRegistration(
+  api: Pick<TuiPluginApi, 'route'>,
+  registration: ActiveTmuxPaneRegistration,
+  now = Date.now(),
+): void {
+  const paneId = process.env.TMUX_PANE;
+  const route = api.route.current;
+  const routeParams = 'params' in route ? route.params : undefined;
+  const sessionId =
+    route.name === 'session' &&
+    routeParams &&
+    typeof routeParams.sessionID === 'string'
+      ? routeParams.sessionID
+      : undefined;
+  const unchanged =
+    registration.sessionId === sessionId && registration.paneId === paneId;
+
+  if (!paneId || !sessionId) {
+    clearTmuxPaneRegistration(registration);
+    return;
+  }
+  if (unchanged && now - registration.lastRecordedAt < TMUX_PANE_HEARTBEAT_MS) {
+    return;
+  }
+  if (!unchanged) clearTmuxPaneRegistration(registration);
+
+  if (recordTmuxPane(sessionId, paneId, registration.ownerPid)) {
+    registration.sessionId = sessionId;
+    registration.paneId = paneId;
+    registration.lastRecordedAt = now;
+  }
 }
 
 export function splitSidebarModelId(model: string): {
@@ -358,9 +418,15 @@ const plugin: TuiPluginModule & { id: string } = {
     let configDirectory = getTuiDirectory(api);
     let { configInvalid, compactSidebar } = readConfigState(configDirectory);
     let snapshot = readTuiSnapshot(configDirectory);
+    const tmuxRegistration: ActiveTmuxPaneRegistration = {
+      ownerPid: process.pid,
+      lastRecordedAt: 0,
+    };
+    syncTmuxPaneRegistration(api, tmuxRegistration);
     const renderTimer = setInterval(async () => {
       try {
         const currentDirectory = getTuiDirectory(api);
+        syncTmuxPaneRegistration(api, tmuxRegistration);
         snapshot = await readTuiSnapshotAsync(currentDirectory);
         if (currentDirectory !== configDirectory) {
           configDirectory = currentDirectory;
@@ -375,6 +441,7 @@ const plugin: TuiPluginModule & { id: string } = {
 
     api.lifecycle.onDispose(() => {
       clearInterval(renderTimer);
+      clearTmuxPaneRegistration(tmuxRegistration);
     });
 
     api.slots.register({

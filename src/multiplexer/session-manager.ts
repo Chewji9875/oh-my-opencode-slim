@@ -346,7 +346,15 @@ export class MultiplexerSessionManager {
         return;
 
       const paneResult = await this.multiplexer
-        .spawnPane(sessionId, title, serverUrl, directory)
+        .spawnPane(
+          sessionId,
+          title,
+          serverUrl,
+          directory,
+          this.multiplexer.type === 'tmux'
+            ? { parentSessionId: parentId }
+            : undefined,
+        )
         .catch((err) => {
           log('[multiplexer-session-manager] failed to spawn pane', {
             instanceId: this.instanceId,
@@ -940,7 +948,15 @@ export class MultiplexerSessionManager {
         return;
 
       const paneResult = await this.multiplexer
-        .spawnPane(sessionId, known.title, serverUrl, known.directory)
+        .spawnPane(
+          sessionId,
+          known.title,
+          serverUrl,
+          known.directory,
+          this.multiplexer.type === 'tmux'
+            ? { parentSessionId: known.parentId }
+            : undefined,
+        )
         .catch((err) => {
           log('[multiplexer-session-manager] failed to respawn pane', {
             instanceId: this.instanceId,
