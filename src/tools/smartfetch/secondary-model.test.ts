@@ -362,4 +362,44 @@ describe('smartfetch/secondary-model', () => {
       _testConfig.secondaryModelTimeoutMs = originalTimeout;
     }
   });
+
+  test('passes parentID to session.create when parentSessionID is provided', async () => {
+    mockV2Client = createV2ClientMock([{ text: 'Answer' }]);
+
+    const result = await runSecondaryModelWithFallback(
+      testInput,
+      [models[0]],
+      'Summarize',
+      'This is enough fetched content to clear the short-content guard.',
+      'parent-session-id',
+    );
+
+    expect(result.text).toBe('Answer');
+    expect(mockV2Session.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          title: 'smartfetch-secondary',
+          parentID: 'parent-session-id',
+        }),
+      }),
+    );
+  });
+
+  test('omits parentID from session.create when parentSessionID is undefined', async () => {
+    mockV2Client = createV2ClientMock([{ text: 'Answer' }]);
+
+    const result = await runSecondaryModelWithFallback(
+      testInput,
+      [models[0]],
+      'Summarize',
+      'This is enough fetched content to clear the short-content guard.',
+    );
+
+    expect(result.text).toBe('Answer');
+    expect(mockV2Session.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: { title: 'smartfetch-secondary' },
+      }),
+    );
+  });
 });
