@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../utils/background-job-board';
 import { buildPluginInput } from '../v2/client-shim';
 import { createTaskResultTool } from './task-result';
+import { createTaskStatusTool } from './task-status';
 
 let mockClient: Record<string, any>;
 
@@ -26,11 +27,22 @@ function createTool() {
   const status = mock(async () => ({ data: {} }));
   mockClient = { session: { get, messages, status } };
 
+  const input = { directory: '/test/project' } as any;
   const tools = createTaskResultTool({
-    input: { directory: '/test/project' } as any,
+    input,
     backgroundJobBoard: board,
   });
-  return { board, get, messages, tool: tools.task_result };
+  const statusTools = createTaskStatusTool({
+    input,
+    backgroundJobBoard: board,
+  });
+  return {
+    board,
+    get,
+    messages,
+    statusTool: statusTools.task_status,
+    tool: tools.task_result,
+  };
 }
 
 describe('task_result', () => {
@@ -86,7 +98,7 @@ describe('task_result', () => {
   });
 
   test('returns a non-error status for a still-running tracked task', async () => {
-    const { board, tool, messages } = createTool();
+    const { board, tool, statusTool, messages } = createTool();
     board.registerLaunch({
       taskID: 'ses_child1',
       parentSessionID: 'parent-1',
@@ -99,9 +111,42 @@ describe('task_result', () => {
       agent: 'orchestrator',
     } as any);
 
-    expect(output).toContain('task_id: ses_child1');
-    expect(output).toContain('state: running');
-    expect(output).toContain('task_status');
+    expect(output).toBe(
+      [
+        'task_id: ses_child1',
+        'state: running',
+        'message: Task is still running. Wait for its terminal result.',
+        'next: use task_status to inspect the task',
+      ].join('\n'),
+    );
+    await expect(
+      statusTool.execute({ task_id: 'exp-1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).resolves.toContain('state: running');
+    expect(messages).not.toHaveBeenCalled();
+  });
+
+  test('preserves a live retry state for a tracked running task', async () => {
+    const { board, tool, messages } = createTool();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'trace bug',
+    });
+    mockClient.session.status.mockResolvedValue({
+      data: { ses_child1: { type: 'retry' } },
+    });
+
+    const output = await tool.execute({ task_id: 'exp-1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as any);
+
+    expect(output).toContain('state: retry');
+    expect(output).toContain('next: use task_status to inspect the task');
     expect(messages).not.toHaveBeenCalled();
   });
 
@@ -320,10 +365,31 @@ describe('task_result', () => {
       agent: 'orchestrator',
     } as any);
 
-    expect(output).toContain('task_id: ses_child1');
-    expect(output).toContain('state: running');
-    expect(output).toContain('task_status');
+    expect(output).toBe(
+      [
+        'task_id: ses_child1',
+        'state: running',
+        'message: Task is still running. Wait for its terminal result.',
+        'next: retry task_result after the task finishes',
+      ].join('\n'),
+    );
     expect(messages).not.toHaveBeenCalled();
+
+    mockClient.session.status.mockResolvedValue({ data: {} });
+    mockClient.session.messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'assistant', time: { completed: 100 } },
+          parts: [{ type: 'text', text: 'final findings' }],
+        },
+      ],
+    });
+    await expect(
+      tool.execute({ task_id: 'ses_child1' }, {
+        sessionID: 'parent-1',
+        agent: 'orchestrator',
+      } as any),
+    ).resolves.toBe('final findings');
   });
 
   test('returns a status for an untracked child whose live session is retrying', async () => {
@@ -338,7 +404,8 @@ describe('task_result', () => {
     } as any);
 
     expect(output).toContain('state: retry');
-    expect(output).toContain('task_status');
+    expect(output).toContain('next: retry task_result after the task finishes');
+    expect(output).not.toContain('task_status');
     expect(messages).not.toHaveBeenCalled();
   });
 
