@@ -165,7 +165,9 @@ function loadConfigFromPath(
   options?: LoadPluginConfigOptions,
 ): PluginConfig | null {
   try {
-    const content = fs.readFileSync(configPath, 'utf-8');
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and silently drop the whole config.
+    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
     // Use stripJsonComments to support JSONC format (comments and trailing commas)
     let rawConfig: unknown;
     try {

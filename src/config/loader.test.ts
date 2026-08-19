@@ -66,6 +66,29 @@ describe('loadPluginConfig', () => {
     expect(config.autoUpdate).toBe(false);
   });
 
+  test('loads config with a UTF-8 BOM prefix (same result as no BOM)', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      `\uFEFF${JSON.stringify({
+        preset: 'fast',
+        presets: { fast: { oracle: { model: 'fast-model' } } },
+        agents: { oracle: { temperature: 0.9 } },
+        autoUpdate: false,
+      })}`,
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    // The BOM is stripped silently (RFC 8259 permits one); every setting
+    // survives, including preset resolution.
+    expect(config.autoUpdate).toBe(false);
+    expect(config.agents?.oracle?.model).toBe('fast-model');
+    expect(config.agents?.oracle?.temperature).toBe(0.9);
+  });
+
   test('deep-merges webfetch settings across user and project configs', () => {
     const userConfigPath = path.join(userConfigDir, 'opencode');
     const projectDir = path.join(tempDir, 'project');
