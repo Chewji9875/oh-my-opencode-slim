@@ -893,6 +893,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "HeZ2z",
+      "name": "HeZzz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/142383180?v=4",
+      "profile": "https://github.com/HeZ2z",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
