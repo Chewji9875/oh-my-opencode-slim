@@ -82,7 +82,7 @@ export function createTaskMessageTool(options: {
 
         const session = getClient(options.input).session;
         const prompt = session.prompt.bind(session);
-        getCurrentTaskMessageJob(
+        const transportJob = getCurrentTaskMessageJob(
           options.backgroundJobBoard,
           parentSessionID,
           requested,
@@ -96,6 +96,7 @@ export function createTaskMessageTool(options: {
             prompt({
               path: { id: lease.taskID },
               body: {
+                agent: transportJob.agent,
                 noReply: true,
                 parts: [{ type: 'text', text: args.message.trim() }],
               },

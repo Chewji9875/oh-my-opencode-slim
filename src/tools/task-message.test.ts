@@ -55,6 +55,7 @@ describe('task_message', () => {
     expect(prompt).toHaveBeenCalledWith({
       path: { id: 'ses_child1' },
       body: {
+        agent: 'fixer',
         noReply: true,
         parts: [{ type: 'text', text: 'Please continue.' }],
       },
