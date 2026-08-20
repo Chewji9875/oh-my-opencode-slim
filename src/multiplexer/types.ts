@@ -14,6 +14,11 @@ export interface PaneResult {
   error?: 'unavailable' | 'not_found' | 'invalid_state' | 'hard';
 }
 
+export interface PaneSpawnOptions {
+  /** Root/parent OpenCode session that requested this child pane. */
+  parentSessionId?: string;
+}
+
 /**
  * Core multiplexer interface
  * Implementations: TmuxMultiplexer, ZellijMultiplexer, HerdrMultiplexer,
@@ -44,6 +49,7 @@ export interface Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult>;
 
   /**

@@ -152,6 +152,7 @@ describe('MultiplexerSessionManager', () => {
         'Test Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-456' },
       );
     });
 
@@ -199,6 +200,7 @@ describe('MultiplexerSessionManager', () => {
         'Nested Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/child/directory',
+        { parentSessionId: 'parent-456' },
       );
     });
 
@@ -289,6 +291,7 @@ describe('MultiplexerSessionManager', () => {
         'Ready Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-ready' },
       );
     });
 
@@ -360,6 +363,7 @@ describe('MultiplexerSessionManager', () => {
         'Recover Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-recover-timeout' },
       );
     });
 
@@ -410,6 +414,7 @@ describe('MultiplexerSessionManager', () => {
         'Busy During Wait',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-busy-during-wait' },
       );
     });
 
@@ -467,6 +472,7 @@ describe('MultiplexerSessionManager', () => {
         'Respawn Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-respawn' },
       );
     });
 
@@ -768,6 +774,7 @@ describe('MultiplexerSessionManager', () => {
         'Resumed Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/resumed/dir',
+        { parentSessionId: 'parent' },
       );
     });
 
@@ -1694,6 +1701,7 @@ describe('MultiplexerSessionManager', () => {
         'Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/task/dir',
+        { parentSessionId: 'parent-789' },
       );
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
       expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
@@ -1761,6 +1769,7 @@ describe('MultiplexerSessionManager', () => {
         'Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-close-race' },
       );
     });
 

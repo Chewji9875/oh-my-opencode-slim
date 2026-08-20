@@ -722,6 +722,7 @@ export function createWebfetchTool(
             secondaryModels,
             args.prompt || '',
             fetchResult.markdown,
+            ctx.sessionID,
           );
         } catch (error: unknown) {
           secondaryModelError =

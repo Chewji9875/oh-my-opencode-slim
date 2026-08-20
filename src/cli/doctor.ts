@@ -80,7 +80,9 @@ function checkConfigFile(
       };
     }
 
-    const content = fs.readFileSync(configPath, 'utf-8');
+    // Strip a UTF-8 BOM so a BOM-prefixed config is not misdiagnosed as
+    // invalid JSON (matches the loader's behavior).
+    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
     const rawConfig = JSON.parse(stripJsonComments(content));
     // Normalize disabled_* keys exactly like the loader does before schema
     // validation, so a string value (e.g. "explorer") is not diagnosed as a

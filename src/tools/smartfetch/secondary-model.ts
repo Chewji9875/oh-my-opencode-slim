@@ -204,6 +204,7 @@ async function runSecondaryModel(
   model: SecondaryModel,
   prompt: string,
   content: string,
+  parentSessionID?: string,
 ) {
   const client = getClient(input);
   const directory = input.directory;
@@ -215,7 +216,10 @@ async function runSecondaryModel(
   try {
     const sessionResponse = await client.session.create({
       query: { directory },
-      body: { title: 'smartfetch-secondary' },
+      body: {
+        title: 'smartfetch-secondary',
+        ...(parentSessionID ? { parentID: parentSessionID } : {}),
+      },
       throwOnError: true,
     });
 
@@ -326,11 +330,18 @@ export async function runSecondaryModelWithFallback(
   models: SecondaryModel[],
   prompt: string,
   content: string,
+  parentSessionID?: string,
 ) {
   let lastError: unknown;
   for (const model of models) {
     try {
-      const result = await runSecondaryModel(input, model, prompt, content);
+      const result = await runSecondaryModel(
+        input,
+        model,
+        prompt,
+        content,
+        parentSessionID,
+      );
       if (!isUsableSecondaryText(result.text)) {
         lastError = new Error('Secondary model returned no usable text');
         continue;

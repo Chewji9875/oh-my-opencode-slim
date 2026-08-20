@@ -165,7 +165,9 @@ function persistPresetName(directory: string, presetName: string): void {
   try {
     const { userConfigPath } = findPluginConfigPaths(directory);
     if (!userConfigPath) return;
-    const raw = fs.readFileSync(userConfigPath, 'utf-8');
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and the preset would not be persisted.
+    const raw = fs.readFileSync(userConfigPath, 'utf-8').replace(/^\uFEFF/, '');
     const persisted = JSON.parse(stripJsonComments(raw)) as Record<
       string,
       unknown
@@ -186,7 +188,9 @@ function readUserConfig(directory: string): Record<string, unknown> | null {
   try {
     const { userConfigPath } = findPluginConfigPaths(directory);
     if (!userConfigPath) return null;
-    const raw = fs.readFileSync(userConfigPath, 'utf-8');
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and the preset name would be lost.
+    const raw = fs.readFileSync(userConfigPath, 'utf-8').replace(/^\uFEFF/, '');
     return JSON.parse(stripJsonComments(raw)) as Record<string, unknown>;
   } catch {
     return null;
