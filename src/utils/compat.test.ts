@@ -3,7 +3,11 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runInNewContext } from 'node:vm';
-import { crossWrite, resolveWindowsCommand } from './compat';
+import {
+  buildWindowsCommandLine,
+  crossWrite,
+  resolveWindowsCommand,
+} from './compat';
 
 const TEST_DIR = path.join(os.tmpdir(), `compat-test-${process.pid}`);
 
@@ -148,5 +152,89 @@ describe('resolveWindowsCommand', () => {
       '.COM;.EXE;.BAT;.CMD',
     );
     expect(resolved).toBeUndefined();
+  });
+
+  it('treats an empty PATH component as the current directory', () => {
+    // cmd.exe semantics: a PATH entry that is empty after splitting
+    // points at the cwd, so `dir1;;dir2` searches cwd between them.
+    const marker = `omos-cwd-probe-${process.pid}.cmd`;
+    writeFileSync(marker, '');
+    try {
+      const resolved = resolveWindowsCommand(
+        marker.replace(/\.cmd$/, ''),
+        ['', ''].join(path.delimiter),
+        '.CMD',
+      );
+      expect(resolved?.file).toBe(marker);
+      expect(resolved?.viaCmdShell).toBe(true);
+    } finally {
+      rmSync(marker, { force: true });
+    }
+  });
+
+  it('keeps a quoted PATH component containing separators intact', () => {
+    // Quoted entries may contain ';'; splitting on raw ';' would shred
+    // the directory name and miss the shim cmd.exe finds.
+    const dir = fixtureDir('semi;colon', ['bun.cmd']);
+    const resolved = resolveWindowsCommand('bun', `"${dir}"`, '.CMD');
+    expect(resolved?.file).toBe(path.join(dir, 'bun.cmd'));
+  });
+
+  it('strips surrounding quotes from individual PATH components', () => {
+    const quotedDir = fixtureDir('quoted-entry', ['bun.cmd']);
+    const plainDir = fixtureDir('plain-entry', []);
+    const resolved = resolveWindowsCommand(
+      'bun',
+      `"${quotedDir}"${path.delimiter}${plainDir}`,
+      '.CMD',
+    );
+    expect(resolved?.file).toBe(path.join(quotedDir, 'bun.cmd'));
+  });
+});
+
+describe('buildWindowsCommandLine', () => {
+  it('wraps the whole line in one outer quote pair for cmd /s /c', () => {
+    // cmd's /s handling strips the first and the last quote of the /c
+    // payload; the outer pair absorbs that so per-argument quotes keep
+    // their meaning.
+    expect(buildWindowsCommandLine('bun', ['install'])).toBe('"bun install"');
+  });
+
+  it('quotes arguments containing spaces with Windows escaping', () => {
+    expect(buildWindowsCommandLine('tar', ['-xf', 'C:\\my file.zip'])).toBe(
+      '"tar -xf "C:\\my file.zip""',
+    );
+  });
+
+  it('double-escapes trailing backslashes inside quoted arguments', () => {
+    expect(buildWindowsCommandLine('bun', ['C:\\my dir\\'])).toBe(
+      '"bun "C:\\my dir\\\\""',
+    );
+  });
+
+  it('escapes embedded quotes in quoted arguments', () => {
+    expect(buildWindowsCommandLine('bun', ['a"b'])).toBe('"bun "a\\"b""');
+  });
+
+  it('quotes cmd metacharacters so cmd.exe treats them literally', () => {
+    // Unquoted, `&` would let cmd chain a second command — the argument
+    // must end up inside double quotes on the final command line.
+    expect(buildWindowsCommandLine('bun', ['run', 'a&b'])).toBe(
+      '"bun run "a&b""',
+    );
+    expect(buildWindowsCommandLine('bun', ['run', 'a|b', 'c^d'])).toBe(
+      '"bun run "a|b" "c^d""',
+    );
+  });
+
+  it('rejects percent signs that cmd.exe would expand even quoted', () => {
+    expect(() => buildWindowsCommandLine('bun', ['100%'])).toThrow(/'%'/);
+    expect(() => buildWindowsCommandLine('bun', ['a%PATH%b'])).toThrow();
+  });
+
+  it('rejects control characters that corrupt the cmd line', () => {
+    expect(() => buildWindowsCommandLine('bun', ['a\nb'])).toThrow();
+    expect(() => buildWindowsCommandLine('bun', ['a\rb'])).toThrow();
+    expect(() => buildWindowsCommandLine('bun', ['a\u0000b'])).toThrow();
   });
 });

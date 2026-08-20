@@ -65,6 +65,33 @@ function splitList(value: string, separator: string): string[] {
 }
 
 /**
+ * Splits a Windows PATH the way cmd.exe reads it: a `;` inside a quoted
+ * component does not separate entries, the surrounding quotes are
+ * stripped, and an empty component stands for the current directory.
+ * Plain `String.split(';')` would shred quoted entries whose directory
+ * names contain `;` and silently drop current-directory entries.
+ */
+function splitWindowsPath(pathEnv: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (const char of pathEnv) {
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (char === path.delimiter && !inQuotes) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts.map((part) => (part === '' ? '.' : part));
+}
+
+/**
  * Resolve a bare command name against PATH and PATHEXT the way cmd.exe
  * does, so spawn() can launch it on Windows.
  *
@@ -76,9 +103,12 @@ function splitList(value: string, separator: string): string[] {
  * shell, which silently breaks bun-based flows such as the auto-updater.
  *
  * Walks PATH entries in order; within each entry, tries PATHEXT
- * extensions in declared order. The first directory containing any match
- * wins, and the matched extension decides whether the file is directly
- * spawnable (`.exe`/`.com`) or must run through cmd.exe (`.cmd`/`.bat`).
+ * extensions in declared order. PATH entries are split the way cmd.exe
+ * reads them (quoted entries may contain `;`, empty entries mean the
+ * current directory — see splitWindowsPath). The first directory
+ * containing any match wins, and the matched extension decides whether
+ * the file is directly spawnable (`.exe`/`.com`) or must run through
+ * cmd.exe (`.cmd`/`.bat`).
  */
 export function resolveWindowsCommand(
   command: string,
@@ -98,7 +128,7 @@ export function resolveWindowsCommand(
     candidate.toLowerCase(),
   );
 
-  for (const dir of splitList(pathEnv, path.delimiter)) {
+  for (const dir of splitWindowsPath(pathEnv)) {
     let entries: string[];
     try {
       entries = readdirSync(dir);
@@ -126,21 +156,61 @@ export function resolveWindowsCommand(
 }
 
 /**
+ * cmd.exe metacharacters neutralised by double-quoting the argument.
+ * Inside double quotes, `& | < > ( ) ^ !` are literal to cmd; unquoted
+ * they split or chain commands (verified on Windows: passing `a&echo x`
+ * as a bare token makes cmd execute the second command).
+ */
+const CMD_METACHARACTERS = /[\s"&|<>()^!]/;
+
+/**
+ * Detects characters that cannot be passed through `cmd.exe /c` at
+ * all: `%` expands environment variables even inside double quotes and
+ * has no escape on the cmd command line, and control characters corrupt
+ * the line. Node.js rejects the same inputs with EINVAL when spawning
+ * .cmd/.bat files (CVE-2024-27980 hardening); we throw instead of
+ * letting cmd.exe reinterpret the argument.
+ */
+function isCmdUnsafeArgument(arg: string): boolean {
+  if (arg.includes('%')) return true;
+  for (let i = 0; i < arg.length; i++) {
+    if (arg.charCodeAt(i) <= 0x1f) return true;
+  }
+  return false;
+}
+
+/**
  * Quotes one argument for a `cmd.exe /c` command line. Arguments that
- * contain no spaces or quotes are passed through untouched — cmd's /s
- * stripping mangles gratuitously quoted tokens. Callers must not pass
- * untrusted input — cmd.exe expands `%VAR%` even inside quotes.
+ * contain no metacharacters are passed through untouched — cmd's /s
+ * stripping mangles gratuitously quoted tokens.
+ *
+ * Throws on arguments that cmd.exe cannot represent faithfully (`%`,
+ * control characters) so callers fail loudly instead of executing an
+ * altered command line.
  */
 function escapeWindowsArgument(arg: string): string {
-  if (!/[\s"]/.test(arg)) {
+  if (isCmdUnsafeArgument(arg)) {
+    throw new Error(
+      `cannot pass ${JSON.stringify(arg)} through a .cmd shim: cmd.exe reinterprets '%' and control characters even inside quotes`,
+    );
+  }
+  if (!CMD_METACHARACTERS.test(arg)) {
     return arg;
   }
   const escaped = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1');
   return `"${escaped}"`;
 }
 
-function buildWindowsCommandLine(file: string, args: string[]): string {
-  return [file, ...args].map(escapeWindowsArgument).join(' ');
+/**
+ * Builds the full command line handed to `cmd.exe /d /s /c`. The whole
+ * line is wrapped in one outer pair of quotes because cmd's /s
+ * processing strips the first and the last quote of the /c payload:
+ * without the outer pair, a spaced path like `"C:\Program
+ * Files\...\bun.cmd"` loses its quotes and the spawn fails (verified on
+ * Windows). Exported for unit tests only.
+ */
+export function buildWindowsCommandLine(file: string, args: string[]): string {
+  return `"${[file, ...args].map(escapeWindowsArgument).join(' ')}"`;
 }
 
 /**
