@@ -212,10 +212,6 @@ describe('buildWindowsCommandLine', () => {
     );
   });
 
-  it('escapes embedded quotes in quoted arguments', () => {
-    expect(buildWindowsCommandLine('bun', ['a"b'])).toBe('"bun "a\\"b""');
-  });
-
   it('quotes cmd metacharacters so cmd.exe treats them literally', () => {
     // Unquoted, `&` would let cmd chain a second command — the argument
     // must end up inside double quotes on the final command line.
@@ -230,6 +226,14 @@ describe('buildWindowsCommandLine', () => {
   it('rejects percent signs that cmd.exe would expand even quoted', () => {
     expect(() => buildWindowsCommandLine('bun', ['100%'])).toThrow(/'%'/);
     expect(() => buildWindowsCommandLine('bun', ['a%PATH%b'])).toThrow();
+  });
+
+  it('rejects double quotes that would toggle the cmd quoted region', () => {
+    // `\"` is not an escape for cmd.exe; a quote followed by a
+    // metacharacter would expose command syntax (verified as injection).
+    expect(() => buildWindowsCommandLine('bun', ['a"&b'])).toThrow(/'"'/);
+    expect(() => buildWindowsCommandLine('bun', ['a"b'])).toThrow();
+    expect(() => buildWindowsCommandLine('bun', ['he said "hi"'])).toThrow();
   });
 
   it('rejects control characters that corrupt the cmd line', () => {

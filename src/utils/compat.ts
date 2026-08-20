@@ -159,20 +159,35 @@ export function resolveWindowsCommand(
  * cmd.exe metacharacters neutralised by double-quoting the argument.
  * Inside double quotes, `& | < > ( ) ^ !` are literal to cmd; unquoted
  * they split or chain commands (verified on Windows: passing `a&echo x`
- * as a bare token makes cmd execute the second command).
+ * as a bare token makes cmd execute the second command). `"` is not
+ * listed — arguments containing it are rejected by
+ * isCmdUnsafeArgument instead.
  */
-const CMD_METACHARACTERS = /[\s"&|<>()^!]/;
+const CMD_METACHARACTERS = /[\s&|<>()^!]/;
 
 /**
  * Detects characters that cannot be passed through `cmd.exe /c` at
- * all: `%` expands environment variables even inside double quotes and
- * has no escape on the cmd command line, and control characters corrupt
- * the line. Node.js rejects the same inputs with EINVAL when spawning
- * .cmd/.bat files (CVE-2024-27980 hardening); we throw instead of
- * letting cmd.exe reinterpret the argument.
+ * all:
+ *
+ * - `%` expands environment variables even inside double quotes and
+ *   has no escape on the cmd command line.
+ * - `"` toggles cmd's quoted region no matter what precedes it —
+ *   cmd.exe, unlike the MSVCRT argument parser, does not treat `\` as
+ *   an escape. Emitting `\"` therefore closes the quoted region and
+ *   exposes any following metacharacter as command syntax (verified:
+ *   `a"&echo x` injected the second command). Doubling quotes instead
+ *   (`a""&b`) stays safe at the cmd layer but is ambiguous to the
+ *   child: node's argv parser reads `""` as a literal quote while
+ *   bun's splits the argument in two (verified), so no single
+ *   escaping works across targets.
+ * - Control characters corrupt the command line.
+ *
+ * Node.js refuses to spawn `.cmd`/`.bat` files with any arguments at
+ * all for the same class of reasons (EINVAL since CVE-2024-27980
+ * hardening); we keep the provably-safe subset and throw otherwise.
  */
 function isCmdUnsafeArgument(arg: string): boolean {
-  if (arg.includes('%')) return true;
+  if (arg.includes('%') || arg.includes('"')) return true;
   for (let i = 0; i < arg.length; i++) {
     if (arg.charCodeAt(i) <= 0x1f) return true;
   }
@@ -182,22 +197,25 @@ function isCmdUnsafeArgument(arg: string): boolean {
 /**
  * Quotes one argument for a `cmd.exe /c` command line. Arguments that
  * contain no metacharacters are passed through untouched — cmd's /s
- * stripping mangles gratuitously quoted tokens.
+ * stripping mangles gratuitously quoted tokens. Quoted arguments have
+ * no `"` left to escape (those throw in isCmdUnsafeArgument); only a
+ * trailing backslash run must be doubled so the closing quote is not
+ * read as an escape by the child's argument parser.
  *
  * Throws on arguments that cmd.exe cannot represent faithfully (`%`,
- * control characters) so callers fail loudly instead of executing an
- * altered command line.
+ * `"`, control characters) so callers fail loudly instead of
+ * executing an altered command line.
  */
 function escapeWindowsArgument(arg: string): string {
   if (isCmdUnsafeArgument(arg)) {
     throw new Error(
-      `cannot pass ${JSON.stringify(arg)} through a .cmd shim: cmd.exe reinterprets '%' and control characters even inside quotes`,
+      `cannot pass ${JSON.stringify(arg)} through a .cmd shim: cmd.exe reinterprets '%', '"', and control characters even inside quotes`,
     );
   }
   if (!CMD_METACHARACTERS.test(arg)) {
     return arg;
   }
-  const escaped = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1');
+  const escaped = arg.replace(/(\\*)$/, '$1$1');
   return `"${escaped}"`;
 }
 
