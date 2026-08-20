@@ -902,6 +902,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "Qiaoyi-Li",
+      "name": "Qiaoyi Li",
+      "avatar_url": "https://avatars.githubusercontent.com/u/76148131?v=4",
+      "profile": "https://github.com/Qiaoyi-Li",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
