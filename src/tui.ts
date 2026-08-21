@@ -1,7 +1,7 @@
 import type {
   TuiCommand,
+  TuiPlugin,
   TuiPluginApi,
-  TuiPluginModule,
 } from '@opencode-ai/plugin/tui';
 import { type ColorInput, parseColor, RGBA } from '@opentui/core';
 import type { JSX } from '@opentui/solid';
@@ -87,6 +87,41 @@ export interface ActiveTmuxPaneRegistration {
   lastRecordedAt: number;
 }
 
+/**
+ * Route views accepted by `syncTmuxPaneRegistration`. OpenCode v1 exposes
+ * `{ name, params: { sessionID } }` while opencode2 exposes
+ * `{ type: 'session', sessionID }`; both are normalized internally.
+ *
+ * `params.sessionID` is typed `unknown` because the v1 host type allows
+ * arbitrary `Record<string, unknown>` params; the runtime typeof guard
+ * below keeps normalization safe.
+ */
+export type TuiRouteView =
+  | {
+      name?: string;
+      params?: { sessionID?: unknown };
+    }
+  | {
+      type?: string;
+      sessionID?: string;
+    };
+
+function resolveRouteSessionId(route: TuiRouteView): string | undefined {
+  const view = route as {
+    name?: string;
+    params?: { sessionID?: unknown };
+    type?: string;
+    sessionID?: string;
+  };
+  if (view.name === 'session' && typeof view.params?.sessionID === 'string') {
+    return view.params.sessionID;
+  }
+  if (view.type === 'session' && typeof view.sessionID === 'string') {
+    return view.sessionID;
+  }
+  return undefined;
+}
+
 function clearTmuxPaneRegistration(
   registration: ActiveTmuxPaneRegistration,
 ): void {
@@ -103,19 +138,12 @@ function clearTmuxPaneRegistration(
 }
 
 export function syncTmuxPaneRegistration(
-  api: Pick<TuiPluginApi, 'route'>,
+  route: TuiRouteView,
   registration: ActiveTmuxPaneRegistration,
   now = Date.now(),
 ): void {
   const paneId = process.env.TMUX_PANE;
-  const route = api.route.current;
-  const routeParams = 'params' in route ? route.params : undefined;
-  const sessionId =
-    route.name === 'session' &&
-    routeParams &&
-    typeof routeParams.sessionID === 'string'
-      ? routeParams.sessionID
-      : undefined;
+  const sessionId = resolveRouteSessionId(route);
   const unchanged =
     registration.sessionId === sessionId && registration.paneId === paneId;
 
@@ -384,6 +412,117 @@ export function readCompactSidebar(directory: string): boolean {
 }
 
 /**
+ * Local structural subset of the OpenCode v2 TUI plugin context, mirroring
+ * `@opencode-ai/plugin@0.0.0-beta-17793` `dist/tui/context.d.ts`. These
+ * types are declared locally because the pinned dependency (1.18.13) still
+ * ships the old v1 TUI types.
+ */
+interface V2TuiThemeTokens {
+  text: { default: unknown; subdued: unknown };
+  background: { default: unknown };
+  border: { default: unknown };
+}
+
+interface V2TuiSlotClaim {
+  append?: string;
+  prepend?: string;
+  before?: string;
+  after?: string;
+  replace?: string;
+  render: (input: { sessionID: string }) => JSX.Element;
+}
+
+interface V2TuiContext {
+  location?: { directory: string };
+  renderer: { requestRender: () => void };
+  theme: V2TuiThemeTokens;
+  ui: {
+    slot: (claim: V2TuiSlotClaim) => () => void;
+    router: { current: () => { type?: string; sessionID?: string } };
+  };
+}
+
+/**
+ * Map the v2 resolved theme tokens onto the flat theme shape that
+ * `renderSidebar` consumes. v2 has no `accent` token, so the badge renders
+ * without a chip background (`element()` skips undefined props).
+ */
+function v2ThemeView(theme: V2TuiThemeTokens): {
+  accent: undefined;
+  background: unknown;
+  borderActive: unknown;
+  text: unknown;
+  textMuted: unknown;
+} {
+  return {
+    accent: undefined,
+    background: theme.background.default,
+    borderActive: theme.border.default,
+    text: theme.text.default,
+    textMuted: theme.text.subdued,
+  };
+}
+
+/**
+ * OpenCode v2 TUI plugin entry point (`setup(context)` contract). Mirrors
+ * the v1 `tui` hook behavior for the sidebar and tmux pane registration:
+ * a 1000ms interval refreshes the snapshot, follows config directory
+ * changes, heartbeats the tmux pane registration, and requests a render.
+ *
+ * No command/preset registration happens here: `/preset` relies on the
+ * legacy `api.command` API which does not exist on v2.
+ *
+ * Returns a cleanup function disposing the slot, the interval timer, and
+ * the tmux pane registration.
+ */
+async function setup(ctx: V2TuiContext): Promise<void | (() => void)> {
+  if (isPluginDisabledByEnv()) return;
+
+  const version = (await readPackageVersion()) ?? 'dev';
+  let configDirectory = ctx.location?.directory ?? process.cwd();
+  let { configInvalid, compactSidebar } = readConfigState(configDirectory);
+  let snapshot = readTuiSnapshot(configDirectory);
+  const tmuxRegistration: ActiveTmuxPaneRegistration = {
+    ownerPid: process.pid,
+    lastRecordedAt: 0,
+  };
+  syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
+  const renderTimer = setInterval(async () => {
+    try {
+      const currentDirectory = ctx.location?.directory ?? process.cwd();
+      syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
+      snapshot = await readTuiSnapshotAsync(currentDirectory);
+      if (currentDirectory !== configDirectory) {
+        configDirectory = currentDirectory;
+        ({ configInvalid, compactSidebar } =
+          readConfigState(configDirectory));
+      }
+      ctx.renderer.requestRender();
+    } catch {
+      // Ignore render errors; this is best-effort live status.
+    }
+  }, 1000);
+
+  const disposeSlot = ctx.ui.slot({
+    append: 'sidebar.content',
+    render: () =>
+      renderSidebar(
+        snapshot,
+        version,
+        v2ThemeView(ctx.theme),
+        configInvalid,
+        compactSidebar,
+      ),
+  });
+
+  return () => {
+    disposeSlot();
+    clearInterval(renderTimer);
+    clearTmuxPaneRegistration(tmuxRegistration);
+  };
+}
+
+/**
  * Build the TUI slash command for `/preset`. Registered via the legacy
  * `api.command` API (still populated in OpenCode 1.18 for v1 plugins). If the
  * API is unavailable the command is simply not registered and `/preset` is a
@@ -409,7 +548,22 @@ function buildPresetCommand(
   };
 }
 
-const plugin: TuiPluginModule & { id: string } = {
+/**
+ * Dual-contract TUI plugin module.
+ *
+ * OpenCode v1 hosts validate `{ id, tui }` and ignore extra keys, while
+ * opencode2 (beta-17793) validates `{ id, setup }` and ignores extra keys.
+ * The legacy `tui` hook is kept byte-for-byte for v1 hosts; `setup`
+ * implements the v2 contract. Shipping both fixes `Invalid V2 TUI plugin
+ * module: oh-my-opencode-slim` (upstream issue #1002).
+ */
+interface TuiDualContractModule {
+  id: string;
+  tui: TuiPlugin;
+  setup: (ctx: V2TuiContext) => Promise<void | (() => void)>;
+}
+
+const plugin: TuiDualContractModule = {
   id: `${PLUGIN_NAME}:tui`,
   tui: async (api, _options, meta) => {
     if (isPluginDisabledByEnv()) return;
@@ -422,11 +576,11 @@ const plugin: TuiPluginModule & { id: string } = {
       ownerPid: process.pid,
       lastRecordedAt: 0,
     };
-    syncTmuxPaneRegistration(api, tmuxRegistration);
+    syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
     const renderTimer = setInterval(async () => {
       try {
         const currentDirectory = getTuiDirectory(api);
-        syncTmuxPaneRegistration(api, tmuxRegistration);
+        syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
         snapshot = await readTuiSnapshotAsync(currentDirectory);
         if (currentDirectory !== configDirectory) {
           configDirectory = currentDirectory;
@@ -479,6 +633,7 @@ const plugin: TuiPluginModule & { id: string } = {
       api.lifecycle.onDispose(disposeCommands);
     }
   },
+  setup,
 };
 
 export default plugin;

@@ -272,13 +272,12 @@ describe('tmux pane registration', () => {
       ownerPid: 100,
       lastRecordedAt: 0,
     };
-    const api = {
-      route: {
-        current: { name: 'session', params: { sessionID: 'root-session-b' } },
-      },
-    };
 
-    syncTmuxPaneRegistration(api as never, registration, 1_000);
+    syncTmuxPaneRegistration(
+      { name: 'session', params: { sessionID: 'root-session-b' } },
+      registration,
+      1_000,
+    );
 
     expect(readTmuxPane('root-session-b', 1_000)).toBe('%42');
   });
@@ -288,18 +287,29 @@ describe('tmux pane registration', () => {
       ownerPid: 100,
       lastRecordedAt: 0,
     };
-    const api = {
-      route: {
-        current: { name: 'session', params: { sessionID: 'root-a' } },
-      },
-    };
+    const route = { name: 'session', params: { sessionID: 'root-a' } };
 
-    syncTmuxPaneRegistration(api as never, registration, 1_000);
-    api.route.current.params.sessionID = 'root-b';
-    syncTmuxPaneRegistration(api as never, registration, 2_000);
+    syncTmuxPaneRegistration(route, registration, 1_000);
+    route.params.sessionID = 'root-b';
+    syncTmuxPaneRegistration(route, registration, 2_000);
 
     expect(readTmuxPane('root-a', 2_000)).toBeUndefined();
     expect(readTmuxPane('root-b', 2_000)).toBe('%42');
+  });
+
+  test('accepts the v2 route shape ({ type, sessionID })', () => {
+    const registration: ActiveTmuxPaneRegistration = {
+      ownerPid: 100,
+      lastRecordedAt: 0,
+    };
+
+    syncTmuxPaneRegistration(
+      { type: 'session', sessionID: 'v2-session' },
+      registration,
+      1_000,
+    );
+
+    expect(readTmuxPane('v2-session', 1_000)).toBe('%42');
   });
 });
 
@@ -345,5 +355,99 @@ describe('getContrastForeground', () => {
   test('parses hex string colors correctly', () => {
     const result = getContrastForeground('#ffffff', '#ffffff', '#1e1e1e');
     expect(result).toBe('#1e1e1e');
+  });
+});
+
+describe('dual-contract plugin module', () => {
+  let originalEnv: typeof process.env;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  function createV2Context(directory: string) {
+    const slotClaims: Array<{
+      append?: string;
+      render: (input: { sessionID: string }) => unknown;
+    }> = [];
+    let disposeCalls = 0;
+    const ctx = {
+      location: { directory },
+      renderer: { requestRender: () => {} },
+      theme: {
+        text: { default: '#f0f0f0', subdued: '#8a8a8a' },
+        background: { default: '#101010' },
+        border: { default: '#3a3a3a' },
+      },
+      ui: {
+        slot: (claim: (typeof slotClaims)[number]) => {
+          slotClaims.push(claim);
+          return () => {
+            disposeCalls += 1;
+          };
+        },
+        router: {
+          current: () => ({ type: 'home' }) as {
+            type?: string;
+            sessionID?: string;
+          },
+        },
+      },
+    };
+    return {
+      ctx,
+      slotClaims,
+      getDisposeCalls: () => disposeCalls,
+    };
+  }
+
+  type V2Context = Parameters<typeof tuiPlugin.setup>[0];
+
+  test('exposes the dual contract shape', () => {
+    expect(typeof tuiPlugin.id).toBe('string');
+    expect(tuiPlugin.id.length).toBeGreaterThan(0);
+    expect(typeof tuiPlugin.tui).toBe('function');
+    expect(typeof tuiPlugin.setup).toBe('function');
+  });
+
+  test('setup registers one sidebar.content slot and cleanup disposes it', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v2-'));
+    let cleanup: (() => void) | undefined;
+    try {
+      const { ctx, slotClaims, getDisposeCalls } = createV2Context(tempDir);
+      cleanup = (await tuiPlugin.setup(
+        ctx as unknown as V2Context,
+      )) as () => void;
+
+      expect(slotClaims).toHaveLength(1);
+      expect(slotClaims[0]?.append).toBe('sidebar.content');
+      expect(typeof slotClaims[0]?.render).toBe('function');
+      expect(getDisposeCalls()).toBe(0);
+
+      cleanup();
+      expect(getDisposeCalls()).toBe(1);
+    } finally {
+      cleanup?.();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('setup returns early without registering a slot when disabled by env', async () => {
+    process.env.OH_MY_OPENCODE_SLIM_DISABLE = '1';
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v2-'));
+    try {
+      const { ctx, slotClaims } = createV2Context(tempDir);
+      const cleanup = await tuiPlugin.setup(ctx as unknown as V2Context);
+
+      expect(slotClaims).toHaveLength(0);
+      expect(cleanup).toBeUndefined();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
