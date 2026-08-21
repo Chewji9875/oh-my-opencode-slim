@@ -104,7 +104,6 @@ function buildAcpAgentDefinition(
     description,
     config: {
       model: config.wrapperModel ?? fallbackModel ?? DEFAULT_MODELS.oracle,
-      temperature: 0,
       prompt,
       permission: {
         read: 'deny',
@@ -227,7 +226,6 @@ function buildCustomAgentDefinition(
     description,
     config: {
       model: primaryModel ?? DEFAULT_MODELS.oracle,
-      temperature: 0.2,
       prompt: resolvePrompt(
         name,
         override.prompt,

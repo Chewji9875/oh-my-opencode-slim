@@ -336,7 +336,6 @@ export function createOrchestratorAgent(
     description:
       'AI coding orchestrator that delegates tasks to specialist agents for optimal quality, speed, and cost',
     config: {
-      temperature: 0.1,
       prompt,
     },
   };

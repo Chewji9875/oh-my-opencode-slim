@@ -17,9 +17,9 @@ describe('createCouncillorAgent', () => {
     expect(agent.config.model).toBe('custom-model');
   });
 
-  test('sets temperature to 0.2', () => {
+  test('leaves temperature unset', () => {
     const agent = createCouncillorAgent('test-model');
-    expect(agent.config.temperature).toBe(0.2);
+    expect(agent.config.temperature).toBeUndefined();
   });
 
   test('sets default prompt when no custom prompts provided', () => {
