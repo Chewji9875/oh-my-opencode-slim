@@ -167,6 +167,24 @@ describe('applyAgentToDraft', () => {
     });
   });
 
+  test('omits an unspecified temperature from request settings', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', {});
+
+    const request = calls[0].agent.request as Record<string, unknown>;
+    expect(
+      Object.hasOwn(request.settings as Record<string, unknown>, 'temperature'),
+    ).toBe(false);
+  });
+
+  test('passes an explicit temperature to request settings', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', { temperature: 0 });
+
+    const request = calls[0].agent.request as Record<string, unknown>;
+    expect((request.settings as Record<string, unknown>).temperature).toBe(0);
+  });
+
   test('permission deny beats tools-list allow (tools first, last-wins)', () => {
     const { draft, calls } = recorder();
     applyAgentToDraft(draft, 'a', {

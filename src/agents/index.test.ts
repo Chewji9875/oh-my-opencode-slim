@@ -630,6 +630,58 @@ describe('getAgentConfigs', () => {
     expect(configs.orchestrator.description).toBeDefined();
     expect(configs.explorer.description).toBeDefined();
   });
+
+  test('omits temperature from default SDK agent configs', () => {
+    const configs = getAgentConfigs(
+      runtimeFor({
+        disabled_agents: [],
+        council: councilConfig(),
+        agents: {
+          reviewer: { model: 'test/reviewer' },
+        },
+        acpAgents: {
+          bridge: {
+            command: 'bridge-acp',
+            args: [],
+            env: {},
+            timeoutMs: 0,
+            permissionMode: 'ask',
+          },
+        },
+      }),
+    );
+
+    for (const name of [
+      'orchestrator',
+      'explorer',
+      'librarian',
+      'oracle',
+      'designer',
+      'fixer',
+      'observer',
+      'council',
+      'councillor',
+      'councillor-alpha',
+      'reviewer',
+      'bridge',
+    ]) {
+      expect(Object.hasOwn(configs[name], 'temperature')).toBe(false);
+    }
+  });
+
+  test('passes explicit temperature overrides to the SDK config', () => {
+    const configs = getAgentConfigs(
+      runtimeFor({
+        agents: {
+          explorer: { temperature: 0.5 },
+          fixer: { temperature: 0 },
+        },
+      }),
+    );
+
+    expect(configs.explorer.temperature).toBe(0.5);
+    expect(configs.fixer.temperature).toBe(0);
+  });
 });
 
 describe('council agent model resolution', () => {

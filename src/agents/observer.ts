@@ -41,7 +41,6 @@ export function createObserverAgent(
       'Visual analysis. Use for interpreting images, screenshots, PDFs, and diagrams - extracts structured observations without loading raw files into main context. Requires a vision-capable model.',
     config: {
       model,
-      temperature: 0.1,
       prompt,
     },
   };

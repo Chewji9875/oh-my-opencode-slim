@@ -72,7 +72,6 @@ export function createCouncillorAgent(
     config: {
       model,
       variant,
-      temperature: 0.2,
       prompt,
       // Strict read-only allowlist: deny all, then allow inspection tools only.
       permission: createReadOnlyAgentPermission(),

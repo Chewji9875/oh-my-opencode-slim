@@ -77,7 +77,6 @@ export function createCouncilAgent(
       'Multi-model consensus agent that synthesizes viewpoints from council members to make informed decisions with higher confidence than single models',
     config: {
       model,
-      temperature: 0.1,
       prompt,
       permission: {
         ...createSynthesisOnlyPermission(),
