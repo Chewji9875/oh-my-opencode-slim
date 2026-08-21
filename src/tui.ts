@@ -87,15 +87,7 @@ export interface ActiveTmuxPaneRegistration {
   lastRecordedAt: number;
 }
 
-/**
- * Route views accepted by `syncTmuxPaneRegistration`. OpenCode v1 exposes
- * `{ name, params: { sessionID } }` while opencode2 exposes
- * `{ type: 'session', sessionID }`; both are normalized internally.
- *
- * `params.sessionID` is typed `unknown` because the v1 host type allows
- * arbitrary `Record<string, unknown>` params; the runtime typeof guard
- * below keeps normalization safe.
- */
+/** Route shapes accepted by `syncTmuxPaneRegistration`: v1 `{ name, params }` and v2 `{ type, sessionID }`. */
 export type TuiRouteView =
   | {
       name?: string;
@@ -411,12 +403,8 @@ export function readCompactSidebar(directory: string): boolean {
   return readConfigState(directory).compactSidebar;
 }
 
-/**
- * Local structural subset of the OpenCode v2 TUI plugin context, mirroring
- * `@opencode-ai/plugin@0.0.0-beta-17793` `dist/tui/context.d.ts`. These
- * types are declared locally because the pinned dependency (1.18.13) still
- * ships the old v1 TUI types.
- */
+// Mirrors @opencode-ai/plugin@0.0.0-beta-17793 dist/tui/context.d.ts;
+// declared locally because the pinned dep ships v1 types only.
 interface V2TuiThemeTokens {
   text: { default: unknown; subdued: unknown };
   background: { default: unknown };
@@ -442,11 +430,7 @@ interface V2TuiContext {
   };
 }
 
-/**
- * Map the v2 resolved theme tokens onto the flat theme shape that
- * `renderSidebar` consumes. v2 has no `accent` token, so the badge renders
- * without a chip background (`element()` skips undefined props).
- */
+/** Map v2 theme tokens onto the flat shape `renderSidebar` consumes (v2 has no `accent` token). */
 function v2ThemeView(theme: V2TuiThemeTokens): {
   accent: undefined;
   background: unknown;
@@ -464,16 +448,8 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
 }
 
 /**
- * OpenCode v2 TUI plugin entry point (`setup(context)` contract). Mirrors
- * the v1 `tui` hook behavior for the sidebar and tmux pane registration:
- * a 1000ms interval refreshes the snapshot, follows config directory
- * changes, heartbeats the tmux pane registration, and requests a render.
- *
- * No command/preset registration happens here: `/preset` relies on the
- * legacy `api.command` API which does not exist on v2.
- *
- * Returns a cleanup function disposing the slot, the interval timer, and
- * the tmux pane registration.
+ * V2 entry point: sidebar slot + refresh loop; returns cleanup.
+ * `/preset` stays v1-only (`api.command` is absent on v2).
  */
 async function setup(ctx: V2TuiContext): Promise<void | (() => void)> {
   if (isPluginDisabledByEnv()) return;
@@ -487,11 +463,14 @@ async function setup(ctx: V2TuiContext): Promise<void | (() => void)> {
     lastRecordedAt: 0,
   };
   syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
+  let disposed = false;
   const renderTimer = setInterval(async () => {
+    if (disposed) return;
     try {
       const currentDirectory = ctx.location?.directory ?? process.cwd();
       syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
       snapshot = await readTuiSnapshotAsync(currentDirectory);
+      if (disposed) return;
       if (currentDirectory !== configDirectory) {
         configDirectory = currentDirectory;
         ({ configInvalid, compactSidebar } =
@@ -516,6 +495,7 @@ async function setup(ctx: V2TuiContext): Promise<void | (() => void)> {
   });
 
   return () => {
+    disposed = true;
     disposeSlot();
     clearInterval(renderTimer);
     clearTmuxPaneRegistration(tmuxRegistration);
@@ -549,13 +529,8 @@ function buildPresetCommand(
 }
 
 /**
- * Dual-contract TUI plugin module.
- *
- * OpenCode v1 hosts validate `{ id, tui }` and ignore extra keys, while
- * opencode2 (beta-17793) validates `{ id, setup }` and ignores extra keys.
- * The legacy `tui` hook is kept byte-for-byte for v1 hosts; `setup`
- * implements the v2 contract. Shipping both fixes `Invalid V2 TUI plugin
- * module: oh-my-opencode-slim` (upstream issue #1002).
+ * Dual contract: v1 hosts validate `{ id, tui }`, opencode2 validates
+ * `{ id, setup }`; both ignore extra keys. Fixes #1002.
  */
 interface TuiDualContractModule {
   id: string;
