@@ -1,7 +1,7 @@
 import type {
   TuiCommand,
+  TuiPlugin,
   TuiPluginApi,
-  TuiPluginModule,
 } from '@opencode-ai/plugin/tui';
 import { type ColorInput, parseColor, RGBA } from '@opentui/core';
 import type { JSX } from '@opentui/solid';
@@ -87,6 +87,33 @@ export interface ActiveTmuxPaneRegistration {
   lastRecordedAt: number;
 }
 
+/** Route shapes accepted by `syncTmuxPaneRegistration`: v1 `{ name, params }` and v2 `{ type, sessionID }`. */
+export type TuiRouteView =
+  | {
+      name?: string;
+      params?: { sessionID?: unknown };
+    }
+  | {
+      type?: string;
+      sessionID?: string;
+    };
+
+function resolveRouteSessionId(route: TuiRouteView): string | undefined {
+  const view = route as {
+    name?: string;
+    params?: { sessionID?: unknown };
+    type?: string;
+    sessionID?: string;
+  };
+  if (view.name === 'session' && typeof view.params?.sessionID === 'string') {
+    return view.params.sessionID;
+  }
+  if (view.type === 'session' && typeof view.sessionID === 'string') {
+    return view.sessionID;
+  }
+  return undefined;
+}
+
 function clearTmuxPaneRegistration(
   registration: ActiveTmuxPaneRegistration,
 ): void {
@@ -103,19 +130,12 @@ function clearTmuxPaneRegistration(
 }
 
 export function syncTmuxPaneRegistration(
-  api: Pick<TuiPluginApi, 'route'>,
+  route: TuiRouteView,
   registration: ActiveTmuxPaneRegistration,
   now = Date.now(),
 ): void {
   const paneId = process.env.TMUX_PANE;
-  const route = api.route.current;
-  const routeParams = 'params' in route ? route.params : undefined;
-  const sessionId =
-    route.name === 'session' &&
-    routeParams &&
-    typeof routeParams.sessionID === 'string'
-      ? routeParams.sessionID
-      : undefined;
+  const sessionId = resolveRouteSessionId(route);
   const unchanged =
     registration.sessionId === sessionId && registration.paneId === paneId;
 
@@ -383,6 +403,105 @@ export function readCompactSidebar(directory: string): boolean {
   return readConfigState(directory).compactSidebar;
 }
 
+// Mirrors @opencode-ai/plugin@0.0.0-beta-17793 dist/tui/context.d.ts;
+// declared locally because the pinned dep ships v1 types only.
+interface V2TuiThemeTokens {
+  text: { default: unknown; subdued: unknown };
+  background: { default: unknown };
+  border: { default: unknown };
+}
+
+interface V2TuiSlotClaim {
+  append?: string;
+  prepend?: string;
+  before?: string;
+  after?: string;
+  replace?: string;
+  render: (input: { sessionID: string }) => JSX.Element;
+}
+
+interface V2TuiContext {
+  location?: { directory: string };
+  renderer: { requestRender: () => void };
+  theme: V2TuiThemeTokens;
+  ui: {
+    slot: (claim: V2TuiSlotClaim) => () => void;
+    router: { current: () => { type?: string; sessionID?: string } };
+  };
+}
+
+/** Map v2 theme tokens onto the flat shape `renderSidebar` consumes (v2 has no `accent` token). */
+function v2ThemeView(theme: V2TuiThemeTokens): {
+  accent: undefined;
+  background: unknown;
+  borderActive: unknown;
+  text: unknown;
+  textMuted: unknown;
+} {
+  return {
+    accent: undefined,
+    background: theme.background.default,
+    borderActive: theme.border.default,
+    text: theme.text.default,
+    textMuted: theme.text.subdued,
+  };
+}
+
+/**
+ * V2 entry point: sidebar slot + refresh loop; returns cleanup.
+ * `/preset` stays v1-only (`api.command` is absent on v2).
+ */
+async function setup(ctx: V2TuiContext): Promise<void | (() => void)> {
+  if (isPluginDisabledByEnv()) return;
+
+  const version = (await readPackageVersion()) ?? 'dev';
+  let configDirectory = ctx.location?.directory ?? process.cwd();
+  let { configInvalid, compactSidebar } = readConfigState(configDirectory);
+  let snapshot = readTuiSnapshot(configDirectory);
+  const tmuxRegistration: ActiveTmuxPaneRegistration = {
+    ownerPid: process.pid,
+    lastRecordedAt: 0,
+  };
+  syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
+  let disposed = false;
+  const renderTimer = setInterval(async () => {
+    if (disposed) return;
+    try {
+      const currentDirectory = ctx.location?.directory ?? process.cwd();
+      syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
+      snapshot = await readTuiSnapshotAsync(currentDirectory);
+      if (disposed) return;
+      if (currentDirectory !== configDirectory) {
+        configDirectory = currentDirectory;
+        ({ configInvalid, compactSidebar } =
+          readConfigState(configDirectory));
+      }
+      ctx.renderer.requestRender();
+    } catch {
+      // Ignore render errors; this is best-effort live status.
+    }
+  }, 1000);
+
+  const disposeSlot = ctx.ui.slot({
+    append: 'sidebar.content',
+    render: () =>
+      renderSidebar(
+        snapshot,
+        version,
+        v2ThemeView(ctx.theme),
+        configInvalid,
+        compactSidebar,
+      ),
+  });
+
+  return () => {
+    disposed = true;
+    disposeSlot();
+    clearInterval(renderTimer);
+    clearTmuxPaneRegistration(tmuxRegistration);
+  };
+}
+
 /**
  * Build the TUI slash command for `/preset`. Registered via the legacy
  * `api.command` API (still populated in OpenCode 1.18 for v1 plugins). If the
@@ -409,7 +528,17 @@ function buildPresetCommand(
   };
 }
 
-const plugin: TuiPluginModule & { id: string } = {
+/**
+ * Dual contract: v1 hosts validate `{ id, tui }`, opencode2 validates
+ * `{ id, setup }`; both ignore extra keys. Fixes #1002.
+ */
+interface TuiDualContractModule {
+  id: string;
+  tui: TuiPlugin;
+  setup: (ctx: V2TuiContext) => Promise<void | (() => void)>;
+}
+
+const plugin: TuiDualContractModule = {
   id: `${PLUGIN_NAME}:tui`,
   tui: async (api, _options, meta) => {
     if (isPluginDisabledByEnv()) return;
@@ -422,11 +551,11 @@ const plugin: TuiPluginModule & { id: string } = {
       ownerPid: process.pid,
       lastRecordedAt: 0,
     };
-    syncTmuxPaneRegistration(api, tmuxRegistration);
+    syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
     const renderTimer = setInterval(async () => {
       try {
         const currentDirectory = getTuiDirectory(api);
-        syncTmuxPaneRegistration(api, tmuxRegistration);
+        syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
         snapshot = await readTuiSnapshotAsync(currentDirectory);
         if (currentDirectory !== configDirectory) {
           configDirectory = currentDirectory;
@@ -479,6 +608,7 @@ const plugin: TuiPluginModule & { id: string } = {
       api.lifecycle.onDispose(disposeCommands);
     }
   },
+  setup,
 };
 
 export default plugin;
