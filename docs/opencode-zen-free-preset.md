@@ -14,7 +14,8 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
   "presets": {
     "opencode-zen-free": {
       "orchestrator": {
-        "model": "opencode/hy3-free",
+        "model": "opencode/x-preview-f-free",
+        "variant": "high",
         "temperature": 0.4,
         "skills": ["*"],
         "mcps": ["*", "!context7"]
@@ -27,13 +28,13 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
         "mcps": []
       },
       "explorer": {
-        "model": "opencode/deepseek-v4-flash-free",
+        "model": "opencode/nemotron-3.5-lightning-free",
         "temperature": 0.2,
         "skills": [],
         "mcps": []
       },
       "librarian": {
-        "model": "opencode/deepseek-v4-flash-free",
+        "model": "opencode/nemotron-3.5-lightning-free",
         "temperature": 0.2,
         "skills": [],
         "mcps": ["context7", "gh_grep"]
@@ -46,7 +47,8 @@ You need an API key for the `opencode` provider. Sign up at [OpenCode Zen](https
         "mcps": []
       },
       "fixer": {
-        "model": "opencode/laguna-s-2.1-free",
+        "model": "opencode/hy3-free",
+        "variant": "high",
         "temperature": 0.2,
         "skills": [],
         "mcps": []
