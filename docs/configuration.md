@@ -315,6 +315,12 @@ Set `enabled: false` to keep idle reconciliation and background-job orchestratio
 without periodic wake prompts. See the
 [Background Orchestration](background-orchestration.md) guide for the concept,
 defaults, and examples.
+
+Configurations that still use the removed `backgroundJobs.continueOnIdle` key
+emit a deprecation warning and migrate its boolean value to
+`orchestratorWake.enabled`. An `orchestratorWake.enabled` value in the same
+config file takes precedence; replace the legacy key with that setting.
+
 `wallClockTimeoutMs` is a hard deadline that only supervises explicitly
 background native task calls; foreground calls or calls with `background`
 omitted are not supervised. It is independent from OpenCode's external

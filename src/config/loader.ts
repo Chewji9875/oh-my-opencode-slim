@@ -4,6 +4,7 @@ import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import {
+  BackgroundJobsConfigSchema,
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type PluginConfig,
@@ -56,6 +57,7 @@ const INTERVIEW_CONFIG_KEYS = [
   'port',
   'dashboard',
 ] as const;
+const LEGACY_BACKGROUND_JOBS_KEYS = ['continueOnIdle'] as const;
 
 // Config keys that must be arrays. A string value (e.g. "explorer") is
 // normalized to a single-element array; any other non-array value is
@@ -112,6 +114,50 @@ export function normalizeDisabledArrayKeys(
   }
 }
 
+function migrateLegacyBackgroundJobsConfig(rawConfig: unknown): unknown {
+  if (
+    typeof rawConfig !== 'object' ||
+    rawConfig === null ||
+    Array.isArray(rawConfig)
+  ) {
+    return rawConfig;
+  }
+
+  const configRecord = rawConfig as Record<string, unknown>;
+  const backgroundJobs = configRecord.backgroundJobs;
+  if (
+    typeof backgroundJobs !== 'object' ||
+    backgroundJobs === null ||
+    Array.isArray(backgroundJobs) ||
+    !Object.hasOwn(backgroundJobs, 'continueOnIdle')
+  ) {
+    return rawConfig;
+  }
+
+  const migratedBackgroundJobs = {
+    ...(backgroundJobs as Record<string, unknown>),
+  };
+  const legacyContinueOnIdle = migratedBackgroundJobs.continueOnIdle;
+  delete migratedBackgroundJobs.continueOnIdle;
+
+  const wake = migratedBackgroundJobs.orchestratorWake;
+  if (
+    typeof legacyContinueOnIdle === 'boolean' &&
+    (wake === undefined ||
+      (typeof wake === 'object' && wake !== null && !Array.isArray(wake)))
+  ) {
+    const wakeConfig = (wake ?? {}) as Record<string, unknown>;
+    if (!Object.hasOwn(wakeConfig, 'enabled')) {
+      migratedBackgroundJobs.orchestratorWake = {
+        ...wakeConfig,
+        enabled: legacyContinueOnIdle,
+      };
+    }
+  }
+
+  return { ...configRecord, backgroundJobs: migratedBackgroundJobs };
+}
+
 function retainExplicitInterviewFields(
   parsedConfig: PluginConfig,
   rawConfig: unknown,
@@ -147,6 +193,69 @@ function retainExplicitInterviewFields(
   return {
     ...parsedConfig,
     interview: interview as PluginConfig['interview'],
+  };
+}
+
+function retainExplicitBackgroundJobsFields(
+  parsedConfig: PluginConfig,
+  rawConfig: unknown,
+): PluginConfig {
+  if (!parsedConfig.backgroundJobs) {
+    return parsedConfig;
+  }
+
+  const rawBackgroundJobs =
+    typeof rawConfig === 'object' &&
+    rawConfig !== null &&
+    !Array.isArray(rawConfig) &&
+    typeof (rawConfig as Record<string, unknown>).backgroundJobs === 'object' &&
+    (rawConfig as Record<string, unknown>).backgroundJobs !== null &&
+    !Array.isArray((rawConfig as Record<string, unknown>).backgroundJobs)
+      ? ((rawConfig as Record<string, unknown>).backgroundJobs as Record<
+          string,
+          unknown
+        >)
+      : undefined;
+
+  if (!rawBackgroundJobs) {
+    return parsedConfig;
+  }
+
+  const backgroundJobs: Record<string, unknown> = {};
+  const parsedBackgroundJobs = parsedConfig.backgroundJobs as unknown as Record<
+    string,
+    unknown
+  >;
+  for (const key of Object.keys(rawBackgroundJobs)) {
+    if (
+      key !== 'orchestratorWake' &&
+      Object.hasOwn(parsedBackgroundJobs, key)
+    ) {
+      backgroundJobs[key] = parsedBackgroundJobs[key];
+    }
+  }
+
+  const rawWake =
+    typeof rawBackgroundJobs.orchestratorWake === 'object' &&
+    rawBackgroundJobs.orchestratorWake !== null &&
+    !Array.isArray(rawBackgroundJobs.orchestratorWake)
+      ? (rawBackgroundJobs.orchestratorWake as Record<string, unknown>)
+      : undefined;
+  const orchestratorWake: Record<string, unknown> = {};
+  const parsedWake = parsedConfig.backgroundJobs
+    .orchestratorWake as unknown as Record<string, unknown>;
+  for (const key of Object.keys(rawWake ?? {})) {
+    if (Object.hasOwn(parsedWake, key)) {
+      orchestratorWake[key] = parsedWake[key];
+    }
+  }
+  if (Object.keys(orchestratorWake).length > 0) {
+    backgroundJobs.orchestratorWake = orchestratorWake;
+  }
+
+  return {
+    ...parsedConfig,
+    backgroundJobs: backgroundJobs as PluginConfig['backgroundJobs'],
   };
 }
 
@@ -235,6 +344,38 @@ function loadConfigFromPath(
       }
     }
 
+    // Preserve the opt-out behavior of the removed continueOnIdle key for
+    // one compatibility window by migrating it before schema validation.
+    if (
+      typeof rawConfig === 'object' &&
+      rawConfig !== null &&
+      typeof (rawConfig as Record<string, unknown>).backgroundJobs ===
+        'object' &&
+      (rawConfig as Record<string, unknown>).backgroundJobs !== null
+    ) {
+      const backgroundJobs = (rawConfig as Record<string, unknown>)
+        .backgroundJobs as Record<string, unknown>;
+      const present = LEGACY_BACKGROUND_JOBS_KEYS.filter(
+        (key) => key in backgroundJobs,
+      );
+      if (present.length > 0) {
+        const backgroundJobsMsg =
+          'Deprecated backgroundJobs.continueOnIdle config key found. ' +
+          'Boolean values are migrated to backgroundJobs.orchestratorWake.enabled ' +
+          'unless that replacement is explicit in the same config file; other values are ignored. ' +
+          'Use backgroundJobs.orchestratorWake.enabled instead.';
+        options?.onWarning?.({
+          path: configPath,
+          kind: 'deprecated-key',
+          message: backgroundJobsMsg,
+        });
+        if (!options?.silent) {
+          console.warn(`[oh-my-opencode-slim] ${backgroundJobsMsg}`);
+        }
+      }
+    }
+    rawConfig = migrateLegacyBackgroundJobsConfig(rawConfig);
+
     // Warn about deprecated fallback.* keys. The schema strips these before
     // validation so the rest of the config still loads; without this warning
     // users would not know their stale keys are ignored.
@@ -294,7 +435,8 @@ function loadConfigFromPath(
     // Zod applies nested defaults while parsing each layer. Keep interview
     // defaults from masquerading as explicitly configured overrides; the
     // merged interview config is normalized after all layers are merged.
-    const layerConfig = retainExplicitInterviewFields(result.data, rawConfig);
+    let layerConfig = retainExplicitInterviewFields(result.data, rawConfig);
+    layerConfig = retainExplicitBackgroundJobsFields(layerConfig, rawConfig);
 
     // Zod applies webfetch.enabled's default while parsing each layer. Keep
     // that default from masquerading as an explicitly configured override;
@@ -548,6 +690,11 @@ export function loadPluginConfig(
   }
   if (config.interview) {
     config.interview = InterviewConfigSchema.parse(config.interview);
+  }
+  if (config.backgroundJobs) {
+    config.backgroundJobs = BackgroundJobsConfigSchema.parse(
+      config.backgroundJobs,
+    );
   }
 
   // Override preset from environment variable if set
