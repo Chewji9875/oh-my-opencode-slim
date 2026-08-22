@@ -605,6 +605,94 @@ describe('onWarning callback', () => {
     );
   });
 
+  test('migrates deprecated backgroundJobs.continueOnIdle and warns', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        autoUpdate: false,
+        backgroundJobs: {
+          continueOnIdle: false,
+          orchestratorWake: { intervalMs: 120_000 },
+        },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.backgroundJobs?.orchestratorWake).toEqual({
+      enabled: false,
+      intervalMs: 120_000,
+    });
+    expect(config.backgroundJobs).not.toHaveProperty('continueOnIdle');
+    expect(config.autoUpdate).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('deprecated-key');
+    expect(warnings[0]?.message).toContain(
+      'Deprecated backgroundJobs.continueOnIdle',
+    );
+  });
+
+  test('prefers explicit orchestratorWake.enabled over deprecated continueOnIdle', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        backgroundJobs: {
+          continueOnIdle: false,
+          orchestratorWake: { enabled: true },
+        },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.backgroundJobs?.orchestratorWake.enabled).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('deprecated-key');
+  });
+
+  test('preserves migrated continueOnIdle across a partial project override', () => {
+    const userConfigPath = path.join(tempDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ backgroundJobs: { continueOnIdle: false } }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        backgroundJobs: { strategy: 'checkpoint-compatible' },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.backgroundJobs?.orchestratorWake.enabled).toBe(false);
+    expect(config.backgroundJobs?.strategy).toBe('checkpoint-compatible');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('deprecated-key');
+  });
+
   test('both deprecated keys fire two warnings', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
