@@ -162,6 +162,7 @@ function applyOverrides(
       // into the OpenCode config too. An explicit agent-level variant below
       // intentionally takes precedence.
       if (
+        agent.name !== 'orchestrator' &&
         override.variant === undefined &&
         primaryModel.variant !== undefined
       ) {
