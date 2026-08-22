@@ -132,7 +132,8 @@ function isSafeDisplayName(displayName: string): boolean {
  * Apply user-provided overrides to an agent's configuration.
  * Supports overriding model (string or priority array), variant, and temperature.
  * When model is an array, stores it as _modelArray for runtime fallback resolution
- * and clears config.model so OpenCode does not pre-resolve a stale value.
+ * and selects its primary entry for ephemeral subagents. The orchestrator leaves
+ * config.model unset so its live runtime selection is not overwritten.
  */
 function applyOverrides(
   agent: AgentDefinition,
@@ -143,6 +144,7 @@ function applyOverrides(
       agent._modelArray = override.model.map((m) =>
         typeof m === 'string' ? { id: m } : m,
       );
+      const primaryModel = agent._modelArray[0];
       // Subagents are ephemeral, freshly-created sessions with no prior
       // runtime state to preserve, so giving them a concrete config.model
       // at launch time (the array's primary entry) is safe — see #9100e59.
@@ -160,7 +162,17 @@ function applyOverrides(
       // added by #639). Leaving it undefined for the orchestrator lets
       // that later, precedence-aware guard be the sole source of truth.
       agent.config.model =
-        agent.name === 'orchestrator' ? undefined : agent._modelArray[0].id;
+        agent.name === 'orchestrator' ? undefined : primaryModel.id;
+      // Subagents launch with the primary model, so carry its inline variant
+      // into the OpenCode config too. An explicit agent-level variant below
+      // intentionally takes precedence.
+      if (
+        agent.name !== 'orchestrator' &&
+        override.variant === undefined &&
+        primaryModel.variant !== undefined
+      ) {
+        agent.config.variant = primaryModel.variant;
+      }
     } else {
       agent.config.model = override.model;
     }
