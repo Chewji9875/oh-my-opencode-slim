@@ -130,6 +130,46 @@ describe('tool-loop-guard', () => {
     expect(output.output).toContain(LOOP_GUARD_WARNING);
   });
 
+  test('identical args returning changing results never block', async () => {
+    // Each re-read returns different content (file was modified) — this is
+    // progress, not a loop. 6 identical-args calls must never be refused.
+    for (let i = 1; i <= 6; i++) {
+      await hook['tool.execute.before'](beforeInput({ callID: `d${i}` }), {
+        args: { filePath: 'a.ts' },
+      });
+      const output = { output: `revision ${i}`, metadata: {} };
+      await hook['tool.execute.after'](afterInput({ callID: `d${i}` }), output);
+      expect(output.output).toBe(`revision ${i}`); // never warned, never blocked
+    }
+  });
+
+  test('identical args with stable identical output warn but no block for non-readonly tool', async () => {
+    // bash is not in BLOCK_TOOLS: warn at 3 but never throw even at 6.
+    for (let i = 1; i <= 6; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'bash', callID: `e${i}` }),
+        { args: { command: 'uname' } },
+      );
+    }
+    const output = { output: 'Linux', metadata: {} };
+    await hook['tool.execute.after'](
+      afterInput({ tool: 'bash', callID: 'e6' }),
+      output,
+    );
+    expect(output.output).toContain(LOOP_GUARD_WARNING);
+  });
+
+  test('identical args with stable identical output still block at 5', async () => {
+    for (let i = 1; i <= 4; i++) {
+      await runIdenticalCall(`f${i}`, { filePath: 'a.ts' }); // output identical each time
+    }
+    await expect(
+      hook['tool.execute.before'](beforeInput({ callID: 'f5' }), {
+        args: { filePath: 'a.ts' },
+      }),
+    ).rejects.toThrow('infinite loop');
+  });
+
   test('sessions are isolated', async () => {
     for (let i = 1; i <= 2; i++) {
       await runIdenticalCall(`a${i}`, { filePath: 'a.ts' });

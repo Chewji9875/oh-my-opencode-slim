@@ -94,8 +94,10 @@ function stableStringify(value: unknown): string {
 interface SessionState {
   /** Fingerprint of the most recent eligible call in this session. */
   last: string;
-  /** How many consecutive identical calls have been observed. */
+  /** How many consecutive identical (args) calls have been observed. */
   count: number;
+  /** Fingerprint of the most recent eligible call's output. */
+  lastOutput: string;
 }
 
 export interface ToolLoopGuardHook {
@@ -138,8 +140,15 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       const key = fingerprint(tool, output.args);
 
       const existing = sessions.get(sessionID);
-      const count = existing && existing.last === key ? existing.count + 1 : 1;
-      sessions.set(sessionID, { last: key, count });
+      const sameArgs = existing !== undefined && existing.last === key;
+      const count = sameArgs ? existing.count + 1 : 1;
+      sessions.set(sessionID, {
+        last: key,
+        count,
+        // New args start a fresh run; identical args carry the prior output
+        // forward so the after-hook can detect when the result changed.
+        lastOutput: sameArgs ? existing.lastOutput : '',
+      });
       keepSessionsBounded();
 
       if (count >= LOOP_GUARD_BLOCK_AT && LOOP_GUARD_BLOCK_TOOLS[tool]) {
@@ -169,6 +178,17 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
 
       const key = input.callID ? callKeys.get(input.callID) : undefined;
       if (input.callID) callKeys.delete(input.callID);
+
+      if (key === state.last) {
+        // Identical args. If the result differs from the prior call's result,
+        // this is progress, not a loop — reset the run so it cannot block.
+        const outputHash = fingerprint(tool, output.output);
+        if (state.lastOutput !== '' && outputHash !== state.lastOutput) {
+          state.count = 1;
+        }
+        state.lastOutput = outputHash;
+      }
+
       if (
         key !== undefined &&
         (key !== state.last || state.count < LOOP_GUARD_WARN_AT)
