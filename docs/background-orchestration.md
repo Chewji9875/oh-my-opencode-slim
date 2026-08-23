@@ -171,7 +171,8 @@ A cancelled or errored retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
 
-on the local job board.»
+Terminal jobs are reconciled automatically after their result is injected into
+the orchestrator session. That lifecycle state is not proof the output was used;
 the orchestrator must still verify it consumed the relevant result before
 finalizing.
 
