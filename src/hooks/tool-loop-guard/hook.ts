@@ -1,3 +1,5 @@
+import { log } from '../../utils/logger';
+
 /**
  * Tool loop guard.
  *
@@ -141,6 +143,11 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       keepSessionsBounded();
 
       if (count >= LOOP_GUARD_BLOCK_AT && LOOP_GUARD_BLOCK_TOOLS[tool]) {
+        log('[tool-loop-guard] blocked repeated tool call', {
+          sessionID,
+          tool,
+          count,
+        });
         throw new Error(
           `Refusing to execute "${tool}": this exact call (same tool, same arguments) has been issued ${count} times in a row with identical results and constitutes an infinite loop. Stop repeating it. Reassess your goal, make a different call, or produce your final answer.`,
         );
@@ -172,6 +179,11 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
 
       if (typeof output.output !== 'string') return;
       if (output.output.includes(LOOP_GUARD_MARKER)) return;
+      log('[tool-loop-guard] warned repeated tool call', {
+        sessionID,
+        tool: input.tool.toLowerCase(),
+        count: state.count,
+      });
       output.output += `\n${LOOP_GUARD_WARNING}`;
     },
 
