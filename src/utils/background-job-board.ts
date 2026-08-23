@@ -944,7 +944,16 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   markUsed(parentSessionID: string, key: string, now = Date.now()): void {
     const job = this.resolve(parentSessionID, key);
     if (!job) return;
-    this.jobs.set(job.taskID, { ...job, lastUsedAt: now, updatedAt: now });
+    // A use must land strictly after the job's completion so the
+    // duplicate-spawn guard's escape hatch opens even when the retrieval and
+    // the terminal transition share a millisecond.
+    const usedAt =
+      job.completedAt === undefined ? now : Math.max(now, job.completedAt + 1);
+    this.jobs.set(job.taskID, {
+      ...job,
+      lastUsedAt: usedAt,
+      updatedAt: now,
+    });
   }
 
   taskIDs(): Set<string> {
