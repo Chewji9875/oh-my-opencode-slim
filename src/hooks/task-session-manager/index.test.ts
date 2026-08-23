@@ -1713,6 +1713,107 @@ describe('task-session-manager hook', () => {
     board.releaseLease(cancellationLease);
   });
 
+  test('blocks a new spawn duplicating an unreconciled terminal job objective', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'dup-1' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: '  Review   Plan ',
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
+  test('allows re-dispatch after the terminal result was retrieved', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    const spawn = {
+      args: {
+        subagent_type: 'oracle',
+        background: true,
+        description: 'review plan',
+      },
+    };
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+        spawn,
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+
+    // task_result retrieval marks the job used after completion (#1070 escape hatch).
+    board.markUsed('parent-1', 'child-1', 300);
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+      spawn,
+    );
+  });
+
+  test('does not block distinct objectives, agents, or parent sessions', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'distinct-objective' },
+      {
+        args: {
+          subagent_type: 'oracle',
+          background: true,
+          description: 'write tests',
+        },
+      },
+    );
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'distinct-agent' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'review plan',
+        },
+      },
+    );
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-2', callID: 'distinct-parent' },
+      {
+        args: {
+          subagent_type: 'oracle',
+          background: true,
+          description: 'review plan',
+        },
+      },
+    );
+  });
+
   test('after output errors still release a pending relaunch lease', async () => {
     const board = new BackgroundJobBoard();
     setupCompletedJob(board, {
