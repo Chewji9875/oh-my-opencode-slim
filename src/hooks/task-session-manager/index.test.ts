@@ -310,6 +310,63 @@ describe('task-session-manager hook', () => {
     );
   });
 
+  test('rehydrated long objectives keep the duplicate-spawn guard effective', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const longObjective = `${'z'.repeat(60)} rehydrated objective`;
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            historicalRunningTaskPart('historical-long', {
+              background: true,
+              subagent_type: 'oracle',
+              description: longObjective,
+            }),
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    // Rehydration stores the untruncated objective, not just the label.
+    expect(board.get('historical-long')).toMatchObject({
+      description: longObjective.slice(0, 48),
+      objective: longObjective,
+    });
+
+    // Mark it terminal-unreconciled, then spawn an exact duplicate.
+    board.updateStatus({
+      taskID: 'historical-long',
+      state: 'stopped',
+      resultSummary: 'no result',
+      now: 200,
+    });
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'rehydrated-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
   test('rehydrates a completed tool call when its child output is still running', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({

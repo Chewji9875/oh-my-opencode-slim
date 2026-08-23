@@ -11,6 +11,7 @@ import type {
   ContextFile,
 } from '../../utils';
 import {
+  deriveFullObjective,
   deriveTaskSessionLabel,
   parseTaskIdFromTaskOutput,
   parseTaskLaunchOutput,
@@ -35,23 +36,6 @@ interface TaskArgs {
 const earlyRegistrationGenerations = new WeakMap<PendingTaskCall, number>();
 function normalizeObjectiveKey(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
-}
-/**
- * Full objective text before deriveTaskSessionLabel truncates it: the
- * whitespace-normalized description, else the first non-empty prompt line.
- * Board records store this untruncated so the duplicate-spawn guard can
- * match long exact duplicates without colliding on shared 48-char prefixes.
- */
-function deriveFullObjective(args: TaskArgs): string | undefined {
-  const description =
-    typeof args.description === 'string' ? args.description : '';
-  const preferred = description.replace(/\s+/g, ' ').trim();
-  if (preferred) return preferred;
-  const firstPromptLine = (typeof args.prompt === 'string' ? args.prompt : '')
-    .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .find(Boolean);
-  return firstPromptLine ?? undefined;
 }
 
 /**
@@ -143,8 +127,11 @@ export async function handleToolExecuteBefore(
     background,
     lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
   };
-  const fullObjective = deriveFullObjective(args);
-  pendingCall.fullObjective = fullObjective;
+  pendingCall.fullObjective = deriveFullObjective({
+    description:
+      typeof args.description === 'string' ? args.description : undefined,
+    prompt: typeof args.prompt === 'string' ? args.prompt : undefined,
+  });
   installEarlyRegistrationGenerationFence(pendingCall, deps.backgroundJobBoard);
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
@@ -204,7 +191,9 @@ export async function handleToolExecuteBefore(
   // Escape hatch: task_result retrieval after completion updates lastUsedAt
   // beyond completedAt, marking the result as consumed and authorizing retry.
   if (!pendingCall.resumedTaskId) {
-    const objectiveKey = normalizeObjectiveKey(fullObjective ?? label);
+    const objectiveKey = normalizeObjectiveKey(
+      pendingCall.fullObjective ?? label,
+    );
     const duplicate = deps.backgroundJobBoard
       .list(input.sessionID)
       .find(

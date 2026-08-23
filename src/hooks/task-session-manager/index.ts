@@ -5,6 +5,7 @@ import {
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
   clearBackgroundJobSuppression,
+  deriveFullObjective,
   deriveTaskSessionLabel,
   getBackgroundJobLifecycleLedger,
   isInternalInitiatorPart,
@@ -126,7 +127,7 @@ function rehydrateHistoricalRunningTasks(
         parentSessionID,
         agent,
         description: label,
-        objective: label,
+        objective: deriveFullObjective({ description, prompt }) ?? label,
         background: true,
         preserveRun: true,
         // Historical parts do not carry a trustworthy launch timestamp. Zero

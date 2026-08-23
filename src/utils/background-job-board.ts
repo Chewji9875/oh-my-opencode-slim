@@ -1169,6 +1169,24 @@ export function deriveTaskSessionLabel(input: {
     ? firstPromptLine.slice(0, 48)
     : `recent ${input.agentType} task`;
 }
+/**
+ * Full objective text before deriveTaskSessionLabel truncates it: the
+ * whitespace-normalized description, else the first non-empty prompt line.
+ * Board records store this untruncated so the duplicate-spawn guard can
+ * match long exact duplicates without colliding on shared 48-char prefixes.
+ */
+export function deriveFullObjective(input: {
+  description?: string;
+  prompt?: string;
+}): string | undefined {
+  const preferred = normalizeWhitespace(input.description ?? '');
+  if (preferred) return preferred;
+  const firstPromptLine = (input.prompt ?? '')
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .find(Boolean);
+  return firstPromptLine ?? undefined;
+}
 
 function sumContextLines(record: BackgroundJobRecord): number {
   return record.contextFiles.reduce((sum, f) => sum + (f.lineCount ?? 0), 0);
