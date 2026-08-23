@@ -39,7 +39,7 @@ from `index.ts`) that returns the hook points OpenCode invokes.
 
 | Category | Factories | Hook points |
 |---|---|---|
-| Prompt transforms | `createApplyPatchHook`, `createPhaseReminderHook`, `createPostFileToolNudgeHook`, `createChatHeadersHook`, task-session-manager board injection, `processImageAttachments` | `experimental.chat.messages.transform`, `chat.headers` |
+| Prompt transforms | `createPhaseReminderHook`, `createPostFileToolNudgeHook`, `createChatHeadersHook`, task-session-manager board injection, `processImageAttachments` | `experimental.chat.messages.transform`, `chat.headers` |
 | Tool interception | `createApplyPatchHook` (tool), task-session-manager | `tool.execute.before` / `tool.execute.after` |
 | Error recovery | `createJsonErrorRecoveryHook`, `createAutoUpdateCheckerHook` | message transform, tool-execute after |
 | Lifecycle/event | task-session-manager, `createCacheMonitorHook`, `createOrchestratorWakeScheduler` | `event` |
