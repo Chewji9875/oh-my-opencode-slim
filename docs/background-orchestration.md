@@ -171,10 +171,17 @@ A cancelled or errored retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
 
-Terminal jobs are reconciled automatically after their result is injected into
-the orchestrator session. That lifecycle state is not proof the output was used;
+on the local job board.»
 the orchestrator must still verify it consumed the relevant result before
-finalizing. Separately, the default-on orchestrator wake scheduler may prompt an
+finalizing.
+
+To stop self-reinforcing acknowledgment loops, a brand-new `task` spawn is
+refused while the parent still owns an unreconciled terminal job with the same
+agent and an exactly matching objective. The refusal names the existing task ID
+and directs the caller to `task_result`; once that result has been retrieved,
+the same objective may be dispatched again for follow-up work.
+
+Separately, the default-on orchestrator wake scheduler may prompt an
 idle parent with incomplete todos after continuous idle time; it does not depend
 on the local job board.
 
