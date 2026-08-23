@@ -310,6 +310,63 @@ describe('task-session-manager hook', () => {
     );
   });
 
+  test('rehydrated long objectives keep the duplicate-spawn guard effective', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const longObjective = `${'z'.repeat(60)} rehydrated objective`;
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            historicalRunningTaskPart('historical-long', {
+              background: true,
+              subagent_type: 'oracle',
+              description: longObjective,
+            }),
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    // Rehydration stores the untruncated objective, not just the label.
+    expect(board.get('historical-long')).toMatchObject({
+      description: longObjective.slice(0, 48),
+      objective: longObjective,
+    });
+
+    // Mark it terminal-unreconciled, then spawn an exact duplicate.
+    board.updateStatus({
+      taskID: 'historical-long',
+      state: 'stopped',
+      resultSummary: 'no result',
+      now: 200,
+    });
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'rehydrated-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
   test('rehydrates a completed tool call when its child output is still running', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({
@@ -1711,6 +1768,141 @@ describe('task-session-manager hook', () => {
       throw new Error('cancellation lease was not acquired');
     }
     board.releaseLease(cancellationLease);
+  });
+
+  test('blocks a new spawn duplicating an unreconciled terminal job objective', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'dup-1' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: '  Review   Plan ',
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
+  test('allows re-dispatch after the terminal result was retrieved', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    const spawn = {
+      args: {
+        subagent_type: 'oracle',
+        background: true,
+        description: 'review plan',
+      },
+    };
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+        spawn,
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+
+    // task_result retrieval marks the job used after completion (#1070 escape hatch).
+    board.markUsed('parent-1', 'child-1', 300);
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+      spawn,
+    );
+  });
+
+  test('does not block objectives truncated at the 48-char label boundary', async () => {
+    const board = new BackgroundJobBoard();
+    const sharedPrefix = 'x'.repeat(48);
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: `${sharedPrefix} distinct suffix A`,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Different suffix after the shared 48-char prefix: the full objective
+    // differs, so the guard must not treat it as a duplicate.
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'long-objective' },
+      {
+        args: {
+          subagent_type: 'oracle',
+          background: true,
+          description: `${sharedPrefix} distinct suffix B`,
+        },
+      },
+    );
+  });
+
+  test('blocks an exact duplicate whose objective exceeds the 48-char label', async () => {
+    const board = new BackgroundJobBoard();
+    const longObjective = `${'y'.repeat(60)} exact duplicate`;
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: longObjective,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Identical long objective: even though the derived label truncates at
+    // 48 chars, the full-objective comparison must still block the duplicate.
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'exact-long-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
   });
 
   test('after output errors still release a pending relaunch lease', async () => {
