@@ -9,14 +9,23 @@ import { log } from '../../utils/logger';
  * calls forever).
  *
  * Behavior:
- * - N identical consecutive calls (LOOP_GUARD_WARN_AT): append corrective
- *   text to the tool output telling the model to stop and change approach.
- * - For read-only file tools (READONLY_BLOCK_TOOLS), M identical consecutive
- *   calls (LOOP_GUARD_BLOCK_AT): refuse the call in tool.execute.before by
- *   throwing, so the loop terminates instead of running forever.
+ * - N consecutive calls with identical arguments AND identical results
+ *   (LOOP_GUARD_WARN_AT): append corrective text to the tool output telling
+ *   the model to stop and change approach.
+ * - For read-only file tools (READONLY_BLOCK_TOOLS), M consecutive calls
+ *   with identical arguments AND identical results (LOOP_GUARD_BLOCK_AT):
+ *   refuse the next identical call in tool.execute.before by throwing, so
+ *   the loop terminates instead of running forever.
+ * - The run counter only advances in tool.execute.after, when an identical-
+ *   args call produced an output byte-identical to the prior call. A call
+ *   that returns NEW information resets the run, so it can never accumulate
+ *   toward a block (a legitimate re-read after the file changed).
+ * - tool.execute.before never increments the counter, so overlapping
+ *   parallel calls cannot inflate the count before their results are known.
+ *   A refusal only happens after the run is already confirmed identical.
  *
  * Scope is deliberately narrow to avoid breaking legitimate repeated calls:
- * - All tools warn at N identical consecutive calls.
+ * - All tools warn at N confirmed-identical consecutive calls.
  * - Only the read-only file-analysis tools hard-block: polling tools
  *   (task_*, wait_for_*) legitimately re-issue identical calls waiting on a
  *   long-running background task and must never be refused.
@@ -92,11 +101,11 @@ function stableStringify(value: unknown): string {
 }
 
 interface SessionState {
-  /** Fingerprint of the most recent eligible call in this session. */
+  /** Fingerprint of the most recent completed eligible call (args). */
   last: string;
-  /** How many consecutive identical (args) calls have been observed. */
-  count: number;
-  /** Fingerprint of the most recent eligible call's output. */
+  /** Consecutive completed calls with identical args AND identical output. */
+  runs: number;
+  /** Fingerprint of the most recent completed call's output. */
   lastOutput: string;
 }
 
@@ -138,27 +147,24 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       if (LOOP_GUARD_EXEMPT[tool]) return;
 
       const key = fingerprint(tool, output.args);
-
       const existing = sessions.get(sessionID);
-      const sameArgs = existing !== undefined && existing.last === key;
-      const count = sameArgs ? existing.count + 1 : 1;
-      sessions.set(sessionID, {
-        last: key,
-        count,
-        // New args start a fresh run; identical args carry the prior output
-        // forward so the after-hook can detect when the result changed.
-        lastOutput: sameArgs ? existing.lastOutput : '',
-      });
-      keepSessionsBounded();
 
-      if (count >= LOOP_GUARD_BLOCK_AT && LOOP_GUARD_BLOCK_TOOLS[tool]) {
+      // Refuse only on a CONFIRMED identical run: the previous BLOCK_AT
+      // calls all had identical args AND identical results. The current
+      // call's result is not yet known, but the run is already degenerate.
+      if (
+        existing &&
+        existing.last === key &&
+        existing.runs >= LOOP_GUARD_BLOCK_AT &&
+        LOOP_GUARD_BLOCK_TOOLS[tool]
+      ) {
         log('[tool-loop-guard] blocked repeated tool call', {
           sessionID,
           tool,
-          count,
+          runs: existing.runs,
         });
         throw new Error(
-          `Refusing to execute "${tool}": this exact call (same tool, same arguments) has been issued ${count} times in a row with identical results and constitutes an infinite loop. Stop repeating it. Reassess your goal, make a different call, or produce your final answer.`,
+          `Refusing to execute "${tool}": this exact call (same tool, same arguments) has returned identical results ${existing.runs} times in a row and constitutes an infinite loop. Stop repeating it. Reassess your goal, make a different call, or produce your final answer.`,
         );
       }
 
@@ -173,36 +179,39 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       if (!sessionID) return;
       const tool = input.tool.toLowerCase();
       if (LOOP_GUARD_EXEMPT[tool]) return;
-      const state = sessions.get(sessionID);
-      if (!state) return;
 
       const key = input.callID ? callKeys.get(input.callID) : undefined;
       if (input.callID) callKeys.delete(input.callID);
+      const outputHash = fingerprint(tool, output.output);
 
-      if (key === state.last) {
-        // Identical args. If the result differs from the prior call's result,
-        // this is progress, not a loop — reset the run so it cannot block.
-        const outputHash = fingerprint(tool, output.output);
-        if (state.lastOutput !== '' && outputHash !== state.lastOutput) {
-          state.count = 1;
-        }
-        state.lastOutput = outputHash;
+      const existing = sessions.get(sessionID);
+      let state: SessionState;
+      if (existing && key !== undefined && key === existing.last) {
+        // Identical args. Advance the run only when the result is also
+        // identical; a changed result is progress and restarts the run.
+        state = {
+          last: key,
+          runs: outputHash === existing.lastOutput ? existing.runs + 1 : 1,
+          lastOutput: outputHash,
+        };
+      } else {
+        // Different args or untracked call: start a fresh run.
+        state = {
+          last: key ?? `${tool}:<untracked>`,
+          runs: 1,
+          lastOutput: outputHash,
+        };
       }
+      sessions.set(sessionID, state);
+      keepSessionsBounded();
 
-      if (
-        key !== undefined &&
-        (key !== state.last || state.count < LOOP_GUARD_WARN_AT)
-      ) {
-        return;
-      }
-      if (key === undefined && state.count < LOOP_GUARD_WARN_AT) return;
-
+      if (state.runs < LOOP_GUARD_WARN_AT) return;
       if (typeof output.output !== 'string') return;
       if (output.output.includes(LOOP_GUARD_MARKER)) return;
       log('[tool-loop-guard] warned repeated tool call', {
         sessionID,
-        tool: input.tool.toLowerCase(),
-        count: state.count,
+        tool,
+        runs: state.runs,
       });
       output.output += `\n${LOOP_GUARD_WARNING}`;
     },

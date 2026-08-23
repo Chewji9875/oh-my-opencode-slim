@@ -62,28 +62,28 @@ describe('tool-loop-guard', () => {
     expect(o3.output).toContain(LOOP_GUARD_WARNING);
   });
 
-  test('fifth identical call is refused in tool.execute.before', async () => {
-    for (let i = 1; i <= 4; i++) {
+  test('sixth identical call with stable identical results is refused', async () => {
+    for (let i = 1; i <= 5; i++) {
       await runIdenticalCall(`c${i}`, { filePath: 'a.ts' });
     }
     await expect(
-      hook['tool.execute.before'](beforeInput({ callID: 'c5' }), {
+      hook['tool.execute.before'](beforeInput({ callID: 'c6' }), {
         args: { filePath: 'a.ts' },
       }),
     ).rejects.toThrow('infinite loop');
   });
 
   test('blocked fingerprint stays blocked', async () => {
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 5; i++) {
       await runIdenticalCall(`c${i}`, { filePath: 'a.ts' });
     }
     await expect(
-      hook['tool.execute.before'](beforeInput({ callID: 'c5' }), {
+      hook['tool.execute.before'](beforeInput({ callID: 'c6' }), {
         args: { filePath: 'a.ts' },
       }),
     ).rejects.toThrow();
     await expect(
-      hook['tool.execute.before'](beforeInput({ callID: 'c6' }), {
+      hook['tool.execute.before'](beforeInput({ callID: 'c7' }), {
         args: { filePath: 'a.ts' },
       }),
     ).rejects.toThrow();
@@ -115,19 +115,21 @@ describe('tool-loop-guard', () => {
   });
 
   test('non-readonly tools warn but are never hard-blocked', async () => {
-    // bash repeats warn at 3 but must not throw at 5+
+    // bash is not in BLOCK_TOOLS: confirmed identical runs warn at 3 but
+    // even a long identical run never throws.
     for (let i = 1; i <= 6; i++) {
       await hook['tool.execute.before'](
         beforeInput({ tool: 'bash', callID: `b${i}` }),
         { args: { command: 'uname' } },
       );
+      const output = { output: 'Linux', metadata: {} };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'bash', callID: `b${i}` }),
+        output,
+      );
+      // never throws (bash is not in BLOCK_TOOLS)
+      expect(output.output).toContain(i >= 3 ? LOOP_GUARD_WARNING : 'Linux');
     }
-    const output = { output: 'Linux', metadata: {} };
-    await hook['tool.execute.after'](
-      afterInput({ tool: 'bash', callID: 'b6' }),
-      output,
-    );
-    expect(output.output).toContain(LOOP_GUARD_WARNING);
   });
 
   test('identical args returning changing results never block', async () => {
@@ -150,21 +152,49 @@ describe('tool-loop-guard', () => {
         beforeInput({ tool: 'bash', callID: `e${i}` }),
         { args: { command: 'uname' } },
       );
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'bash', callID: `e${i}` }),
+        { output: 'Linux', metadata: {} },
+      );
     }
-    const output = { output: 'Linux', metadata: {} };
-    await hook['tool.execute.after'](
-      afterInput({ tool: 'bash', callID: 'e6' }),
-      output,
-    );
-    expect(output.output).toContain(LOOP_GUARD_WARNING);
+    // never throws (bash is not in BLOCK_TOOLS)
   });
 
-  test('identical args with stable identical output still block at 5', async () => {
-    for (let i = 1; i <= 4; i++) {
-      await runIdenticalCall(`f${i}`, { filePath: 'a.ts' }); // output identical each time
+  test('overlapping same-args calls with changing results never block', async () => {
+    // All befores fire before any after — simulates parallel execution
+    // where the counter previously inflated past the threshold.
+    for (let i = 1; i <= 6; i++) {
+      await hook['tool.execute.before'](beforeInput({ callID: `o${i}` }), {
+        args: { filePath: 'a.ts' },
+      });
     }
+    // then results arrive, each different (file was being modified)
+    for (let i = 1; i <= 6; i++) {
+      const output = { output: `revision ${i}`, metadata: {} };
+      await hook['tool.execute.after'](afterInput({ callID: `o${i}` }), output);
+      expect(output.output).toBe(`revision ${i}`); // never warned
+    }
+    // next same-args call is still allowed
+    await hook['tool.execute.before'](beforeInput({ callID: 'o7' }), {
+      args: { filePath: 'a.ts' },
+    });
+  });
+
+  test('overlapping same-args calls with identical results block the next call', async () => {
+    for (let i = 1; i <= 6; i++) {
+      await hook['tool.execute.before'](beforeInput({ callID: `p${i}` }), {
+        args: { filePath: 'a.ts' },
+      });
+    }
+    for (let i = 1; i <= 5; i++) {
+      await hook['tool.execute.after'](afterInput({ callID: `p${i}` }), {
+        output: 'same',
+        metadata: {},
+      });
+    }
+    // 5 confirmed identical results: the next same-args call is refused
     await expect(
-      hook['tool.execute.before'](beforeInput({ callID: 'f5' }), {
+      hook['tool.execute.before'](beforeInput({ callID: 'p7' }), {
         args: { filePath: 'a.ts' },
       }),
     ).rejects.toThrow('infinite loop');
