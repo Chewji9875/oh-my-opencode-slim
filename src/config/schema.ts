@@ -212,6 +212,12 @@ export const BackgroundJobsConfigSchema = z.object({
     .describe(
       'Grace period after a wall-clock deadline while OpenCode confirms the child terminal state (1,000–60,000ms).',
     ),
+  waitForUserGuard: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When true, intercept wait_for_user calls made while background tasks are still outstanding for the session, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
+    ),
 });
 
 export type BackgroundJobsConfig = z.infer<typeof BackgroundJobsConfigSchema>;
