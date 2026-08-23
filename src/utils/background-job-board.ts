@@ -1129,7 +1129,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       : 'reconciled';
     const lines = [
       `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(terminal ?? job.state)}, ${reconciliation}`,
-      `  Objective: ${promptSafe(job.objective || job.description)}`,
+      `  Objective: ${promptSafe(job.description || job.objective || '')}`,
     ];
     const context = formatContextFiles(
       job.contextFiles,
@@ -1238,7 +1238,7 @@ function formatJob(job: BackgroundJobRecord): string {
         : displayState;
   const lines = [
     `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(status)}`,
-    `  Objective: ${promptSafe(job.objective || job.description)}`,
+    `  Objective: ${promptSafe(job.description || job.objective || '')}`,
   ];
 
   if (job.resultSummary && job.terminalUnreconciled) {

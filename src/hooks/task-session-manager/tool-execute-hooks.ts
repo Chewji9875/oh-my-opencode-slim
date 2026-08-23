@@ -36,6 +36,23 @@ const earlyRegistrationGenerations = new WeakMap<PendingTaskCall, number>();
 function normalizeObjectiveKey(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
 }
+/**
+ * Full objective text before deriveTaskSessionLabel truncates it: the
+ * whitespace-normalized description, else the first non-empty prompt line.
+ * Board records store this untruncated so the duplicate-spawn guard can
+ * match long exact duplicates without colliding on shared 48-char prefixes.
+ */
+function deriveFullObjective(args: TaskArgs): string | undefined {
+  const description =
+    typeof args.description === 'string' ? args.description : '';
+  const preferred = description.replace(/\s+/g, ' ').trim();
+  if (preferred) return preferred;
+  const firstPromptLine = (typeof args.prompt === 'string' ? args.prompt : '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  return firstPromptLine ?? undefined;
+}
 
 /**
  * session.created writes earlyRegisteredTaskID through the pending-call
@@ -126,6 +143,8 @@ export async function handleToolExecuteBefore(
     background,
     lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
   };
+  const fullObjective = deriveFullObjective(args);
+  pendingCall.fullObjective = fullObjective;
   installEarlyRegistrationGenerationFence(pendingCall, deps.backgroundJobBoard);
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
@@ -179,17 +198,13 @@ export async function handleToolExecuteBefore(
 
   // New spawns only: block re-dispatch of an objective already owned by an
   // unreconciled terminal job from this parent (self-reinforcing dispatch
-  // loop, #1070). Both sides pass through deriveTaskSessionLabel, which truncates
-  // to 48 chars; a key of exactly that length is ambiguous (exact match vs prefix
-  // collision), so the guard skips it and leaves long/distinct objectives alone.
+  // loop, #1070). The full objective text is compared, not the 48-char display
+  // label, so long exact duplicates match while distinct objectives that only
+  // share a truncated prefix stay unaffected.
   // Escape hatch: task_result retrieval after completion updates lastUsedAt
   // beyond completedAt, marking the result as consumed and authorizing retry.
-  const TASK_LABEL_MAX = 48;
-  if (
-    !pendingCall.resumedTaskId &&
-    normalizeObjectiveKey(label).length < TASK_LABEL_MAX
-  ) {
-    const objectiveKey = normalizeObjectiveKey(label);
+  if (!pendingCall.resumedTaskId) {
+    const objectiveKey = normalizeObjectiveKey(fullObjective ?? label);
     const duplicate = deps.backgroundJobBoard
       .list(input.sessionID)
       .find(
@@ -470,7 +485,7 @@ function registerTaskOutputLaunch(
       parentSessionID: pending.parentSessionId,
       agent: pending.agentType,
       description: pending.label,
-      objective: pending.label,
+      objective: pending.fullObjective ?? pending.label,
       background: exactCallConfirmed && pending.background,
       preserveRun:
         pending.earlyRegisteredTaskID === taskID ||

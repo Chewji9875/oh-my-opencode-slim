@@ -1796,8 +1796,8 @@ describe('task-session-manager hook', () => {
     });
     const { hook } = createHook({ backgroundJobBoard: board });
 
-    // Different suffix after the shared 48-char prefix: the derived label is
-    // truncated to the same key, so the guard must not treat it as a duplicate.
+    // Different suffix after the shared 48-char prefix: the full objective
+    // differs, so the guard must not treat it as a duplicate.
     await hook['tool.execute.before'](
       { tool: 'task', sessionID: 'parent-1', callID: 'long-objective' },
       {
@@ -1808,6 +1808,44 @@ describe('task-session-manager hook', () => {
         },
       },
     );
+  });
+
+  test('blocks an exact duplicate whose objective exceeds the 48-char label', async () => {
+    const board = new BackgroundJobBoard();
+    const longObjective = `${'y'.repeat(60)} exact duplicate`;
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: longObjective,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Identical long objective: even though the derived label truncates at
+    // 48 chars, the full-objective comparison must still block the duplicate.
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'exact-long-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
   });
 
   test('after output errors still release a pending relaunch lease', async () => {
