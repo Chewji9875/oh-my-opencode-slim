@@ -99,6 +99,37 @@ describe('tool-loop-guard', () => {
     // no throw
   });
 
+  test('polling tools are exempt from warn and block', async () => {
+    for (let i = 1; i <= 8; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'task_status', callID: `s${i}` }),
+        { args: { task_id: 'child-1' } },
+      );
+      const output = { output: 'state: running', metadata: {} };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'task_status', callID: `s${i}` }),
+        output,
+      );
+      expect(output.output).toBe('state: running'); // never warned
+    }
+  });
+
+  test('non-readonly tools warn but are never hard-blocked', async () => {
+    // bash repeats warn at 3 but must not throw at 5+
+    for (let i = 1; i <= 6; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'bash', callID: `b${i}` }),
+        { args: { command: 'uname' } },
+      );
+    }
+    const output = { output: 'Linux', metadata: {} };
+    await hook['tool.execute.after'](
+      afterInput({ tool: 'bash', callID: 'b6' }),
+      output,
+    );
+    expect(output.output).toContain(LOOP_GUARD_WARNING);
+  });
+
   test('sessions are isolated', async () => {
     for (let i = 1; i <= 2; i++) {
       await runIdenticalCall(`a${i}`, { filePath: 'a.ts' });

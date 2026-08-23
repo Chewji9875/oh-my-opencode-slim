@@ -9,20 +9,50 @@
  * Behavior:
  * - N identical consecutive calls (LOOP_GUARD_WARN_AT): append corrective
  *   text to the tool output telling the model to stop and change approach.
- * - M identical consecutive calls (LOOP_GUARD_BLOCK_AT): refuse the call in
- *   tool.execute.before by throwing, so the loop terminates instead of
- *   running forever.
+ * - For read-only file tools (READONLY_BLOCK_TOOLS), M identical consecutive
+ *   calls (LOOP_GUARD_BLOCK_AT): refuse the call in tool.execute.before by
+ *   throwing, so the loop terminates instead of running forever.
+ *
+ * Scope is deliberately narrow to avoid breaking legitimate repeated calls:
+ * - All tools warn at N identical consecutive calls.
+ * - Only the read-only file-analysis tools hard-block: polling tools
+ *   (task_*, wait_for_*) legitimately re-issue identical calls waiting on a
+ *   long-running background task and must never be refused.
+ * - The task tool is exempt entirely for both axes; task-session-manager
+ *   owns its own duplicate-spawn guards (#1056/#1070).
  *
  * Precedent: json-error-recovery (output warning) and task-session-manager
- * (before-hook refusal). The `task` tool is exempt: task-session-manager
- * already owns its duplicate-spawn guards (#1056/#1070).
+ * (before-hook refusal).
  */
 
 const LOOP_GUARD_WARN_AT = 3;
 const LOOP_GUARD_BLOCK_AT = 5;
 
-/** Exempt: task-session-manager already owns duplicate-spawn guards. */
-const EXEMPT_TOOL = 'task';
+/**
+ * Tools exempt from the entire guard: long-lived task supervision/polling
+ * tools whose identical repeated invocation is legitimate.
+ */
+const LOOP_GUARD_EXEMPT: Record<string, true> = {
+  task: true,
+  task_status: true,
+  task_result: true,
+  task_cancel: true,
+  task_message: true,
+  task_revive: true,
+  wait_for_user: true,
+  wait_for_background_tasks: true,
+};
+
+/**
+ * Tools that may be hard-blocked when repeated. Read-only file analysis is
+ * the reported loop surface (#1071); anything with side effects or that
+ * polls external state stays warn-only.
+ */
+const LOOP_GUARD_BLOCK_TOOLS: Record<string, true> = {
+  read: true,
+  grep: true,
+  glob: true,
+};
 
 const LOOP_GUARD_MARKER = '[REPEATED TOOL CALLS - STOP]';
 
@@ -36,6 +66,9 @@ STOP repeating this call. Instead:
 2. If you need different information, make a DIFFERENT call (different path, pattern, or tool).
 3. If the task is actually done, produce your final answer now instead of calling more tools.
 `;
+
+/** Max sessions tracked before evicting the least-recently-observed session. */
+const MAX_TRACKED_SESSIONS = 512;
 
 /** Deterministic fingerprint of tool + args, insensitive to key order. */
 function fingerprint(tool: string, args: unknown): string {
@@ -81,34 +114,50 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
   /** Fingerprint per callID so `after` can re-check without re-deriving args. */
   const callKeys = new Map<string, string>();
 
+  /** Prune the session map to MAX_TRACKED_SESSIONS (FIFO by insertion). */
+  function keepSessionsBounded(): void {
+    while (sessions.size > MAX_TRACKED_SESSIONS) {
+      const oldest = sessions.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      sessions.delete(oldest);
+    }
+  }
+
   return {
     'tool.execute.before': async (
       input: { tool: string; sessionID?: string; callID?: string },
       output: { args?: unknown },
     ): Promise<void> => {
       const sessionID = input.sessionID;
-      if (!sessionID || input.tool.toLowerCase() === EXEMPT_TOOL) return;
+      if (!sessionID) return;
+      const tool = input.tool.toLowerCase();
+      if (LOOP_GUARD_EXEMPT[tool]) return;
 
-      const key = fingerprint(input.tool, output.args);
-      if (input.callID) callKeys.set(input.callID, key);
+      const key = fingerprint(tool, output.args);
 
       const existing = sessions.get(sessionID);
       const count = existing && existing.last === key ? existing.count + 1 : 1;
       sessions.set(sessionID, { last: key, count });
+      keepSessionsBounded();
 
-      if (count >= LOOP_GUARD_BLOCK_AT) {
+      if (count >= LOOP_GUARD_BLOCK_AT && LOOP_GUARD_BLOCK_TOOLS[tool]) {
         throw new Error(
-          `Refusing to execute "${input.tool}": this exact call (same tool, same arguments) has been issued ${count} times in a row with identical results and constitutes an infinite loop. Stop repeating it. Reassess your goal, make a different call, or produce your final answer.`,
+          `Refusing to execute "${tool}": this exact call (same tool, same arguments) has been issued ${count} times in a row with identical results and constitutes an infinite loop. Stop repeating it. Reassess your goal, make a different call, or produce your final answer.`,
         );
       }
+
+      if (input.callID) callKeys.set(input.callID, key);
     },
 
     'tool.execute.after': async (
       input: { tool: string; sessionID?: string; callID?: string },
       output: { output: unknown; metadata?: unknown },
     ): Promise<void> => {
-      if (!input.sessionID || input.tool.toLowerCase() === EXEMPT_TOOL) return;
-      const state = sessions.get(input.sessionID);
+      const sessionID = input.sessionID;
+      if (!sessionID) return;
+      const tool = input.tool.toLowerCase();
+      if (LOOP_GUARD_EXEMPT[tool]) return;
+      const state = sessions.get(sessionID);
       if (!state) return;
 
       const key = input.callID ? callKeys.get(input.callID) : undefined;
