@@ -179,9 +179,16 @@ export async function handleToolExecuteBefore(
 
   // New spawns only: block re-dispatch of an objective already owned by an
   // unreconciled terminal job from this parent (self-reinforcing dispatch
-  // loop, #1070). Escape hatch: task_result retrieval updates lastUsedAt
-  // beyond completedAt, which marks the result as consumed.
-  if (!pendingCall.resumedTaskId) {
+  // loop, #1070). Both sides pass through deriveTaskSessionLabel, which truncates
+  // to 48 chars; a key of exactly that length is ambiguous (exact match vs prefix
+  // collision), so the guard skips it and leaves long/distinct objectives alone.
+  // Escape hatch: task_result retrieval after completion updates lastUsedAt
+  // beyond completedAt, marking the result as consumed and authorizing retry.
+  const TASK_LABEL_MAX = 48;
+  if (
+    !pendingCall.resumedTaskId &&
+    normalizeObjectiveKey(label).length < TASK_LABEL_MAX
+  ) {
     const objectiveKey = normalizeObjectiveKey(label);
     const duplicate = deps.backgroundJobBoard
       .list(input.sessionID)

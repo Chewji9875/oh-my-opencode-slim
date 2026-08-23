@@ -1774,41 +1774,37 @@ describe('task-session-manager hook', () => {
     );
   });
 
-  test('does not block distinct objectives, agents, or parent sessions', async () => {
+  test('does not block objectives truncated at the 48-char label boundary', async () => {
     const board = new BackgroundJobBoard();
+    const sharedPrefix = 'x'.repeat(48);
     setupCompletedJob(board, {
       taskID: 'child-1',
       parentSessionID: 'parent-1',
     });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: `${sharedPrefix} distinct suffix A`,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
     const { hook } = createHook({ backgroundJobBoard: board });
 
+    // Different suffix after the shared 48-char prefix: the derived label is
+    // truncated to the same key, so the guard must not treat it as a duplicate.
     await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'distinct-objective' },
+      { tool: 'task', sessionID: 'parent-1', callID: 'long-objective' },
       {
         args: {
           subagent_type: 'oracle',
           background: true,
-          description: 'write tests',
-        },
-      },
-    );
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'distinct-agent' },
-      {
-        args: {
-          subagent_type: 'explorer',
-          background: true,
-          description: 'review plan',
-        },
-      },
-    );
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-2', callID: 'distinct-parent' },
-      {
-        args: {
-          subagent_type: 'oracle',
-          background: true,
-          description: 'review plan',
+          description: `${sharedPrefix} distinct suffix B`,
         },
       },
     );
