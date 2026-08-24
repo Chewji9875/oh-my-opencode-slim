@@ -508,6 +508,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         taskSessionManagerHook.beginUserWait(sessionID);
         orchestratorWakeScheduler.suppress(sessionID);
       },
+      waitForUserGuardEnabled: runtime.backgroundJobs.waitForUserGuard,
+      hasOutstandingBackgroundTasks: (sessionID) =>
+        runtime.backgroundJobs.orchestratorWake.enabled &&
+        backgroundJobCoordinator.hasRunning(sessionID),
     });
 
     const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
