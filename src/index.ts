@@ -27,11 +27,13 @@ import {
   createPostFileToolNudgeHook,
   createReflectCommandHook,
   createTaskSessionManagerHook,
+  createToolLoopGuardHook,
   ForegroundFallbackManager,
   SessionLifecycle,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
+import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import { isMessageWithParts, type MessageWithParts } from './hooks/types';
 import { handleTaskSessionEvent } from './index-event';
 import { createInterviewManager } from './interview';
@@ -170,6 +172,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let postFileToolNudge: ReturnType<typeof createPostFileToolNudgeHook>;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let jsonErrorRecovery: ReturnType<typeof createJsonErrorRecoveryHook>;
+  let toolLoopGuard: ToolLoopGuardHook;
   let postFileToolNudgeAfter: (i: unknown, o: unknown) => Promise<void>;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
@@ -449,6 +452,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     applyPatch = createApplyPatchHook(ctx);
 
     jsonErrorRecovery = createJsonErrorRecoveryHook(ctx);
+    toolLoopGuard = createToolLoopGuardHook();
 
     // Pre-created wrapped handlers for tool.execute.after (error-isolated)
     postFileToolNudgeAfter = wrapPostToolHook('post-file-tool-nudge', (i, o) =>
@@ -1110,6 +1114,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.before': async (input, output) => {
+      await toolLoopGuard['tool.execute.before'](
+        input as never,
+        output as never,
+      );
       await applyPatch['tool.execute.before'](input as never, output as never);
       await taskSessionManagerHook['tool.execute.before'](
         input as never,
@@ -1344,6 +1352,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'tool.execute.after': async (input, output) => {
       await postFileToolNudgeAfter(input, output);
       await jsonErrorRecoveryAfter(input, output);
+      await toolLoopGuard['tool.execute.after'](
+        input as never,
+        output as never,
+      );
       await taskSessionManagerAfter(input, output);
     },
   };
