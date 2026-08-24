@@ -216,7 +216,7 @@ export const BackgroundJobsConfigSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      'When true, intercept wait_for_user calls made while background tasks are still outstanding for the session, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
+      'When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
     ),
 });
 
