@@ -463,6 +463,7 @@ export function createOrchestratorWakeScheduler(
         return;
       }
       if (!recoveryWake && hasActiveChild(snapshot.children, snapshot.status)) {
+        schedule(sessionID);
         return;
       }
       if (!recoveryWake && !hasIncompleteTodos(snapshot.todos)) {
@@ -502,6 +503,7 @@ export function createOrchestratorWakeScheduler(
         return;
       }
       if (!recoveryWake && hasActiveChild(latest.children, latest.status)) {
+        schedule(sessionID);
         return;
       }
       if (!recoveryWake && !hasIncompleteTodos(latest.todos)) {

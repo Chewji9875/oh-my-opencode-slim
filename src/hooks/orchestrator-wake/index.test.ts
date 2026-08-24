@@ -327,11 +327,14 @@ describe('orchestrator wake scheduler', () => {
 
   test('suppresses a periodic wake when the initial snapshot has an active child', async () => {
     const promptAsync = mock(async () => ({}));
+    let statusReads = 0;
     const { scheduler } = createScheduler({
       sessionClient: makeClient({
         promptAsync,
         childrenData: [{ id: 'child-1', time: { updated: 1 } }],
-        statusData: { 'child-1': { type: 'busy' } },
+        status: mock(async () => ({
+          data: statusReads++ === 0 ? { 'child-1': { type: 'busy' } } : {},
+        })),
       }),
     });
     await scheduler.event({
@@ -339,6 +342,10 @@ describe('orchestrator wake scheduler', () => {
     });
     await clock.advance(60_000);
     expect(promptAsync).not.toHaveBeenCalled();
+    expect(clock.pendingCount()).toBe(1);
+
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
   test('suppresses a periodic wake when a child becomes active before the latest snapshot', async () => {
@@ -377,6 +384,7 @@ describe('orchestrator wake scheduler', () => {
     await clock.advance(0);
 
     expect(promptAsync).not.toHaveBeenCalled();
+    expect(clock.pendingCount()).toBe(1);
   });
 
   test('wakes when host children have no active status', async () => {
