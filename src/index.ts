@@ -1,5 +1,10 @@
 import type { Plugin, ToolDefinition } from '@opencode-ai/plugin';
-import { createAgents, getAgentConfigs, isSubagent } from './agents';
+import {
+  applyModelInheritanceToConfig,
+  createAgents,
+  getAgentConfigs,
+  isSubagent,
+} from './agents';
 import { buildOrchestratorPrompt } from './agents/orchestrator';
 import { CompanionManager } from './companion/manager';
 import { ensureCompanionVersion } from './companion/updater';
@@ -707,6 +712,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
       const configAgent = opencodeConfig.agent as Record<string, unknown>;
+      applyModelInheritanceToConfig(configAgent, runtime);
 
       // Model resolution for foreground agents: use _modelArray entries
       // to pick the first model for startup-time selection.
