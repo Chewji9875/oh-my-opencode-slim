@@ -243,6 +243,24 @@ describe('fixer agent fallback', () => {
     expect(fixer?.config.model).toBeUndefined();
   });
 
+  test('legacy alias inheritance clears a canonical lower-layer model', () => {
+    const config: PluginConfig = {
+      preset: 'split',
+      presets: {
+        split: {
+          explorer: { model: 'preset/explorer' },
+        },
+      },
+      agents: {
+        explore: { inheritModelFrom: 'session' },
+      },
+    };
+    const agents = createAgents(runtimeFor(config));
+    const explorer = agents.find((a) => a.name === 'explorer');
+
+    expect(explorer?.config.model).toBeUndefined();
+  });
+
   test('fixer uses its own model when explicitly configured', () => {
     const config: PluginConfig = {
       agents: {

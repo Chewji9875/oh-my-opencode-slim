@@ -123,9 +123,21 @@ function mergeAgentOverrides(
     ) {
       continue;
     }
-    const entry = merged[name];
+    const resolvedName = AGENT_ALIASES[name] ?? name;
+    // A canonical key in the same layer remains authoritative over its
+    // legacy alias. Otherwise, apply the alias directive to the canonical
+    // lower-layer entry so getOverrideFromAgents sees the effective policy.
+    if (resolvedName !== name && Object.hasOwn(override, resolvedName)) {
+      continue;
+    }
+    const entry = merged[resolvedName] ?? merged[name];
     if (entry) {
-      delete entry.model;
+      const updatedEntry = { ...entry };
+      delete updatedEntry.model;
+      if (resolvedName !== name) {
+        updatedEntry.inheritModelFrom = agentOverride.inheritModelFrom;
+      }
+      merged[resolvedName] = updatedEntry;
     }
   }
   return merged;
