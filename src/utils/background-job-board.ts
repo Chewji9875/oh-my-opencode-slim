@@ -64,6 +64,8 @@ export interface BackgroundJobRecord {
   lastLaunchedAt: number;
   /** Monotonic run identity. Explicit relaunch/reuse increments it. */
   generation: number;
+  /** Task-local run identity; unlike generation, unrelated tasks do not affect it. */
+  taskGeneration: number;
   /** First launch observation for the current generation. */
   runStartedAt: number;
   /** Persistent hard wall-clock marker; distinct from external task wait timeout. */
@@ -263,6 +265,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       const updated = {
         ...existing,
         generation,
+        taskGeneration: existing.taskGeneration + 1,
         agent: input.agent || existing.agent,
         description: input.description || existing.description,
         objective: input.objective ?? existing.objective,
@@ -294,6 +297,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
       generation,
+      taskGeneration: 1,
       parentSessionID: input.parentSessionID,
       agent: input.agent,
       description: input.description || `background ${input.agent} task`,
