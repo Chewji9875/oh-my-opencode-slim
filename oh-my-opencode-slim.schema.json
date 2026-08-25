@@ -1099,6 +1099,11 @@
           "type": "integer",
           "minimum": 1000,
           "maximum": 60000
+        },
+        "waitForUserGuard": {
+          "default": true,
+          "description": "When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.",
+          "type": "boolean"
         }
       }
     },
