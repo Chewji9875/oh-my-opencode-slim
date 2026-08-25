@@ -105,6 +105,32 @@ function primaryModelFromOverride(
   return undefined;
 }
 
+/**
+ * Merge agent layers while allowing an explicit inheritance policy to clear a
+ * model supplied by a lower-precedence layer. A missing `model` normally
+ * means "keep the lower layer", but `inheritModelFrom` is an intentional
+ * request to use another source instead.
+ */
+function mergeAgentOverrides(
+  base: Record<string, AgentOverrideConfig>,
+  override: Record<string, AgentOverrideConfig>,
+): Record<string, AgentOverrideConfig> {
+  const merged = deepMerge(base, override) ?? base;
+  for (const [name, agentOverride] of Object.entries(override)) {
+    if (
+      agentOverride.model !== undefined ||
+      agentOverride.inheritModelFrom === undefined
+    ) {
+      continue;
+    }
+    const entry = merged[name];
+    if (entry) {
+      delete entry.model;
+    }
+  }
+  return merged;
+}
+
 /** Recursive clone of plain JSON data (drops prototypes, no functions). */
 function clonePlain<T>(value: T): T {
   if (Array.isArray(value)) {
@@ -221,13 +247,13 @@ export class RuntimeConfig {
       ? this.pluginConfig.presets?.[this.pluginConfig.preset]
       : undefined;
     if (filePreset) {
-      base = deepMerge(filePreset, base) ?? base;
+      base = mergeAgentOverrides(filePreset, base);
     }
     const runtimePreset = this.runtimePresetAgents();
     if (!runtimePreset) {
       return base;
     }
-    return deepMerge(base, runtimePreset) ?? base;
+    return mergeAgentOverrides(base, runtimePreset);
   }
 
   /**

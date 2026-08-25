@@ -65,6 +65,13 @@
                 }
               ]
             },
+            "inheritModelFrom": {
+              "type": "string",
+              "enum": [
+                "session",
+                "orchestrator"
+              ]
+            },
             "temperature": {
               "type": "number",
               "minimum": 0,
@@ -502,6 +509,13 @@
                   ]
                 }
               }
+            ]
+          },
+          "inheritModelFrom": {
+            "type": "string",
+            "enum": [
+              "session",
+              "orchestrator"
             ]
           },
           "temperature": {

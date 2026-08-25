@@ -361,6 +361,47 @@ Notes:
 - Display names must be unique
 - Display names cannot conflict with internal agent names like `oracle` or `explorer`
 
+### Independent agent model inheritance
+
+By default, the `fixer` agent inherits the `librarian` model when no fixer
+model is configured. To decouple agents, set `inheritModelFrom` on the agent
+that should follow the current session or the configured orchestrator model:
+
+```jsonc
+{
+  "agents": {
+    "librarian": {
+      "model": "ollama/qwen3.8:27B"
+    },
+    "fixer": {
+      "inheritModelFrom": "session"
+    }
+  }
+}
+```
+
+Supported values are:
+
+- `session`: omit the agent model so OpenCode uses the current session model
+- `orchestrator`: use the orchestrator model resolved during configuration; if
+  none is configured, fall back to the current session model
+
+`orchestrator` means the model resolved during plugin configuration. It does
+not dynamically follow a later foreground fallback to another model.
+Runtime fallback behavior is independent of `inheritModelFrom`.
+
+Model selection follows these rules:
+
+- If the same effective agent override contains both `model` and
+  `inheritModelFrom`, the explicit `model` wins.
+- If `model` is omitted, `inheritModelFrom` is an explicit higher-layer
+  directive: it clears a lower-layer `model` value, including a model supplied
+  by the host agent configuration, and resolves the requested source.
+- If neither field is present, the existing model precedence and the historical
+  fixer-to-librarian fallback remain unchanged.
+
+The setting works in both root `agents` overrides and preset agent overrides.
+
 ### Per-preset agent configuration
 
 To get per-preset behavior for any agent, built-in (`council`, `oracle`,
