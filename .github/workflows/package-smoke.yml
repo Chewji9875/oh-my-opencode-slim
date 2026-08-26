@@ -8,6 +8,7 @@ on:
       - '.github/workflows/package-smoke.yml'
       - 'package.json'
       - 'bun.lock'
+      - 'bunfig.toml'
       - 'tsconfig.json'
       - 'oh-my-opencode-slim.schema.json'
       - 'LICENSE'
