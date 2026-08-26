@@ -71,8 +71,8 @@ OpenCode Core → Plugin Initialization (index.ts)
 3. **Config Validation**: Checks if current directory has valid plugin config
 4. **Snapshot Loading**: Reads agent models, variants, and per-session activity
    from `tui-state.ts`
-5. **Live Updates**: Refreshes persisted state every 1000ms and requests
-   160ms animation frames only while agents are active
+5. **Live Updates**: Refreshes persisted state every 1000ms and reactively
+   advances 160ms animation frames only while agents are active
 6. **Tmux registration**: Refreshes the active session-to-`TMUX_PANE`
    registration for parent-aware child-pane routing
 7. **Sidebar Rendering**: Renders sidebar with:

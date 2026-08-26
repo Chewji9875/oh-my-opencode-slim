@@ -6,6 +6,7 @@ import type {
 import { type ColorInput, parseColor, RGBA } from '@opentui/core';
 import type { JSX } from '@opentui/solid';
 import { createElement, insert, setProp } from '@opentui/solid';
+import { createSignal } from 'solid-js';
 import { DEFAULT_DISABLED_AGENTS, SUBAGENT_NAMES } from './config/constants';
 import { loadPluginConfig } from './config/loader';
 import {
@@ -85,6 +86,12 @@ function text(props: Record<string, unknown>, children: Child[]) {
 
 function box(props: Record<string, unknown>, children: Child[] = []) {
   return element('box', props, children);
+}
+
+function reactiveElement(render: () => JSX.Element): JSX.Element {
+  const root = box({ width: '100%', flexDirection: 'column' });
+  insert(root, render);
+  return root;
 }
 
 function getTuiDirectory(api: {
@@ -352,10 +359,10 @@ function renderSidebar(
   },
   configInvalid: boolean,
   compactSidebar: boolean,
+  now = Date.now(),
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
   const activeAgents = getActiveSidebarAgentNames(snapshot);
-  const now = Date.now();
   return box(
     {
       width: '100%',
@@ -518,7 +525,10 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   const version = (await readPackageVersion()) ?? 'dev';
   let configDirectory = ctx.location?.directory ?? process.cwd();
   let { configInvalid, compactSidebar } = readConfigState(configDirectory);
-  let snapshot = readTuiSnapshot(configDirectory);
+  const [snapshot, setSnapshot] = createSignal(
+    readTuiSnapshot(configDirectory),
+  );
+  const [animationNow, setAnimationNow] = createSignal(Date.now());
   const tmuxRegistration: ActiveTmuxPaneRegistration = {
     ownerPid: process.pid,
     lastRecordedAt: 0,
@@ -530,32 +540,36 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     try {
       const currentDirectory = ctx.location?.directory ?? process.cwd();
       syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
-      snapshot = await readTuiSnapshotAsync(currentDirectory);
+      const nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
       if (disposed) return;
       if (currentDirectory !== configDirectory) {
         configDirectory = currentDirectory;
         ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
       }
+      setSnapshot(nextSnapshot);
       ctx.renderer.requestRender();
     } catch {
       // Ignore render errors; this is best-effort live status.
     }
   }, 1000);
   const animationTimer = setInterval(() => {
-    if (!disposed && Object.keys(snapshot.activeSessions).length > 0) {
-      ctx.renderer.requestRender();
+    if (!disposed && Object.keys(snapshot().activeSessions).length > 0) {
+      setAnimationNow(Date.now());
     }
   }, ACTIVITY_FRAME_MS);
 
   const disposeSlot = ctx.ui.slot({
     append: 'sidebar.content',
     render: () =>
-      renderSidebar(
-        snapshot,
-        version,
-        v2ThemeView(ctx.theme),
-        configInvalid,
-        compactSidebar,
+      reactiveElement(() =>
+        renderSidebar(
+          snapshot(),
+          version,
+          v2ThemeView(ctx.theme),
+          configInvalid,
+          compactSidebar,
+          animationNow(),
+        ),
       ),
   });
 
@@ -612,7 +626,10 @@ const plugin: TuiDualContractModule = {
     const version = meta.version ?? (await readPackageVersion()) ?? 'dev';
     let configDirectory = getTuiDirectory(api);
     let { configInvalid, compactSidebar } = readConfigState(configDirectory);
-    let snapshot = readTuiSnapshot(configDirectory);
+    const [snapshot, setSnapshot] = createSignal(
+      readTuiSnapshot(configDirectory),
+    );
+    const [animationNow, setAnimationNow] = createSignal(Date.now());
     const tmuxRegistration: ActiveTmuxPaneRegistration = {
       ownerPid: process.pid,
       lastRecordedAt: 0,
@@ -622,20 +639,21 @@ const plugin: TuiDualContractModule = {
       try {
         const currentDirectory = getTuiDirectory(api);
         syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
-        snapshot = await readTuiSnapshotAsync(currentDirectory);
+        const nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
         if (currentDirectory !== configDirectory) {
           configDirectory = currentDirectory;
           ({ configInvalid, compactSidebar } =
             readConfigState(configDirectory));
         }
+        setSnapshot(nextSnapshot);
         api.renderer.requestRender();
       } catch {
         // Ignore render errors; this is best-effort live status.
       }
     }, 1000);
     const animationTimer = setInterval(() => {
-      if (Object.keys(snapshot.activeSessions).length > 0) {
-        api.renderer.requestRender();
+      if (Object.keys(snapshot().activeSessions).length > 0) {
+        setAnimationNow(Date.now());
       }
     }, ACTIVITY_FRAME_MS);
 
@@ -649,12 +667,15 @@ const plugin: TuiDualContractModule = {
       order: 900,
       slots: {
         sidebar_content() {
-          return renderSidebar(
-            snapshot,
-            version,
-            api.theme.current,
-            configInvalid,
-            compactSidebar,
+          return reactiveElement(() =>
+            renderSidebar(
+              snapshot(),
+              version,
+              api.theme.current,
+              configInvalid,
+              compactSidebar,
+              animationNow(),
+            ),
           );
         },
       },
@@ -668,10 +689,10 @@ const plugin: TuiDualContractModule = {
     if (api.command) {
       const snapshotRef: { snapshot: TuiSnapshot } = {
         get snapshot() {
-          return snapshot;
+          return snapshot();
         },
         set snapshot(value: TuiSnapshot) {
-          snapshot = value;
+          setSnapshot(value);
         },
       };
       const disposeCommands = api.command.register(() => [
