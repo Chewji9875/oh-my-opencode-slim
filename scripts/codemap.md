@@ -21,6 +21,8 @@
 - `verify-opencode-host-smoke.ts`
   - Builds temporary OpenCode environment (bin from `bun add opencode-ai`), mounts the plugin tarball,
     launches `opencode serve`, and probes `http://127.0.0.1:<port>/global/health`.
+  - Uses `OPENCODE_SMOKE_VERSION` when set so scheduled CI can test the pinned supported host and latest-host canary;
+    defaults to `latest` for local and release smoke runs.
   - Captures logs and fails on `failed to load plugin` and `cannot find module` patterns.
 - All scripts are executable boundary files (`#!/usr/bin/env bun` / Node), with explicit temp-dir lifecycle management
   and defensive cleanup via `rmSync(..., { force: true, recursive: true })`.
