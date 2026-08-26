@@ -287,6 +287,13 @@ describe('plugin TUI agent activity', () => {
   let originalEnv: typeof process.env;
   let projectDir: string;
   let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+  const createActivityPlugin = () =>
+    plugin({
+      client: createPluginClient(async () => ({})),
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
@@ -304,12 +311,7 @@ describe('plugin TUI agent activity', () => {
       JSON.stringify({ companion: { enabled: false } }),
     );
 
-    hooks = await plugin({
-      client: createPluginClient(async () => ({})),
-      directory: projectDir,
-      worktree: projectDir,
-      serverUrl: new URL('http://127.0.0.1:4096'),
-    } as never);
+    hooks = await createActivityPlugin();
   });
 
   afterEach(async () => {
@@ -361,6 +363,31 @@ describe('plugin TUI agent activity', () => {
     await hooks?.dispose?.();
 
     expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
+  });
+
+  test('server disposal preserves activity owned by another plugin instance', async () => {
+    const otherHooks = await createActivityPlugin();
+
+    try {
+      await hooks?.['chat.message']?.(
+        { sessionID: 'oracle-a', agent: 'oracle' } as never,
+        {} as never,
+      );
+      await otherHooks['chat.message']?.(
+        { sessionID: 'explorer-b', agent: 'explorer' } as never,
+        {} as never,
+      );
+
+      await hooks?.event?.({
+        event: { type: 'server.instance.disposed' },
+      } as never);
+
+      expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
+        'explorer-b': 'explorer',
+      });
+    } finally {
+      await otherHooks.dispose?.();
+    }
   });
 });
 
