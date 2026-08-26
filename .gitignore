@@ -101,5 +101,4 @@ companion/target/
 # Deepwork session artifacts
 .slim/deepwork/
 .codegraph/
-companion/VIDEOS/
 .worktrees/
