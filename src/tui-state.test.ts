@@ -3,8 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  clearTuiAgentActivities,
   getTuiStatePath,
   readTuiSnapshot,
+  recordTuiAgentActivity,
   recordTuiAgentModel,
   recordTuiAgentModels,
 } from './tui-state';
@@ -110,6 +112,42 @@ describe('tui-state persistence', () => {
     });
   });
 
+  test('tracks concurrent activity by session without clearing the agent early', () => {
+    recordTuiAgentActivity(
+      { sessionID: 'fixer-a', agentName: 'fixer', active: true },
+      tempDir,
+    );
+    recordTuiAgentActivity(
+      { sessionID: 'fixer-b', agentName: 'fixer', active: true },
+      tempDir,
+    );
+
+    recordTuiAgentActivity({ sessionID: 'fixer-a', active: false }, tempDir);
+
+    expect(readTuiSnapshot(tempDir).activeSessions).toEqual({
+      'fixer-b': 'fixer',
+    });
+  });
+
+  test('clears persisted activity while preserving model state', () => {
+    recordTuiAgentModels(
+      { agentModels: { explorer: 'openai/gpt-5.6-luna' } },
+      tempDir,
+    );
+    recordTuiAgentActivity(
+      { sessionID: 'explorer-a', agentName: 'explorer', active: true },
+      tempDir,
+    );
+
+    clearTuiAgentActivities(tempDir);
+
+    const snapshot = readTuiSnapshot(tempDir);
+    expect(snapshot.activeSessions).toEqual({});
+    expect(snapshot.agentModels).toEqual({
+      explorer: 'openai/gpt-5.6-luna',
+    });
+  });
+
   test('ignores legacy config status fields in old snapshots', () => {
     const filePath = getTuiStatePath(tempDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -129,6 +167,7 @@ describe('tui-state persistence', () => {
       explorer: 'openai/gpt-5.6-luna',
     });
     expect(snapshot.agentVariants).toEqual({});
+    expect(snapshot.activeSessions).toEqual({});
   });
 
   test('cross-project isolation — different directories write independent state files', () => {

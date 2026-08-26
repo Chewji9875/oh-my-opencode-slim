@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { OhMyOpenCodeLite as plugin } from './index';
+import { readTuiSnapshot } from './tui-state';
 
 function createPluginClient(
   noop: () => Promise<unknown>,
@@ -279,6 +280,87 @@ describe('plugin tool registration', () => {
       Date.now = originalNow;
       await rm(configDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('plugin TUI agent activity', () => {
+  let originalEnv: typeof process.env;
+  let projectDir: string;
+  let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-tui-activity-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: projectDir,
+      XDG_DATA_HOME: `${projectDir}/data`,
+      XDG_CACHE_HOME: `${projectDir}/cache`,
+      OPENCODE_LOG_DIR: `${projectDir}/logs`,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+
+    hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+  });
+
+  afterEach(async () => {
+    await hooks?.dispose?.();
+    process.env = originalEnv;
+    await rm(projectDir, { recursive: true, force: true });
+  });
+
+  test('keeps an agent active until all of its sessions stop', async () => {
+    const chatMessage = hooks?.['chat.message'];
+    expect(chatMessage).toBeFunction();
+
+    await chatMessage?.(
+      { sessionID: 'fixer-a', agent: 'fixer' } as never,
+      {} as never,
+    );
+    await chatMessage?.(
+      { sessionID: 'fixer-b', agent: 'fixer' } as never,
+      {} as never,
+    );
+
+    await hooks?.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'fixer-a', status: { type: 'idle' } },
+      },
+    } as never);
+
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
+      'fixer-b': 'fixer',
+    });
+
+    await hooks?.event?.({
+      event: {
+        type: 'session.deleted',
+        properties: { info: { id: 'fixer-b' } },
+      },
+    } as never);
+
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
+  });
+
+  test('clears active sessions when plugin disposes', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'oracle-a', agent: 'oracle' } as never,
+      {} as never,
+    );
+
+    await hooks?.dispose?.();
+
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
   });
 });
 
