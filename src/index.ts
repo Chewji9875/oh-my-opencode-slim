@@ -166,28 +166,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
     },
   });
-  const tuiActivityDirectories = new Set([ctx.directory]);
+  const ownedTuiActivitySessions = new Map<string, string>();
   const tuiActivityDirectory = (sessionID: string): string => {
-    const directory = sessionMetadata.getDirectory(sessionID) ?? ctx.directory;
-    tuiActivityDirectories.add(directory);
-    return directory;
+    return sessionMetadata.getDirectory(sessionID) ?? ctx.directory;
   };
   const markTuiAgentActive = (sessionID: string, agentName: string): void => {
-    recordTuiAgentActivity(
-      { sessionID, agentName, active: true },
-      tuiActivityDirectory(sessionID),
-    );
+    const directory = tuiActivityDirectory(sessionID);
+    recordTuiAgentActivity({ sessionID, agentName, active: true }, directory);
+    ownedTuiActivitySessions.set(sessionID, directory);
   };
   const markTuiAgentInactive = (sessionID: string): void => {
-    recordTuiAgentActivity(
-      { sessionID, active: false },
-      tuiActivityDirectory(sessionID),
-    );
+    const directory =
+      ownedTuiActivitySessions.get(sessionID) ??
+      tuiActivityDirectory(sessionID);
+    recordTuiAgentActivity({ sessionID, active: false }, directory);
+    ownedTuiActivitySessions.delete(sessionID);
   };
   const clearTuiActivities = (): void => {
-    for (const directory of tuiActivityDirectories) {
-      clearTuiAgentActivities(directory);
+    for (const [sessionID, directory] of ownedTuiActivitySessions) {
+      recordTuiAgentActivity({ sessionID, active: false }, directory);
     }
+    ownedTuiActivitySessions.clear();
   };
   clearTuiAgentActivities(ctx.directory);
   let sessionLifecycle: SessionLifecycle;

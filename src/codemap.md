@@ -92,10 +92,11 @@ OpenCode Core → Plugin Initialization (index.ts)
    - `recordTuiAgentModel()`: Updates single agent's model/variant
    - `recordTuiAgentActivity()`: Tracks active agents by session so concurrent
      runs of the same agent remain visible until all runs finish
-   - `clearTuiAgentActivities()`: Removes stale activity during startup and
-     shutdown
+   - `clearTuiAgentActivities()`: Removes stale activity during startup
 3. **Atomic Writes**: State updates are atomic (read → mutate → write with timestamp)
 4. **Error Handling**: All operations are best-effort; failures don't crash plugin
+5. **Instance Cleanup**: On shutdown, each plugin instance removes only sessions
+   it marked active, preserving activity owned by other running instances
 
 ### Event Handling Flow (index.ts)
 
