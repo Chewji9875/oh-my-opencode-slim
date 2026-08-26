@@ -8,6 +8,7 @@ export interface TuiSnapshot {
   updatedAt: number;
   agentModels: Record<string, string>;
   agentVariants: Record<string, string>;
+  activeSessions: Record<string, string>;
 }
 
 const STATE_DIR = 'oh-my-opencode-slim';
@@ -44,6 +45,7 @@ function emptySnapshot(): TuiSnapshot {
     updatedAt: Date.now(),
     agentModels: {},
     agentVariants: {},
+    activeSessions: {},
   };
 }
 
@@ -57,6 +59,7 @@ function parseSnapshot(value: string): TuiSnapshot {
       typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
     agentModels: parsed.agentModels ?? {},
     agentVariants: parsed.agentVariants ?? {},
+    activeSessions: parsed.activeSessions ?? {},
   };
 }
 
@@ -109,10 +112,12 @@ function updateSnapshot(
   const snapshot = readTuiSnapshot(projectDir);
   const beforeModels = JSON.stringify(snapshot.agentModels);
   const beforeVariants = JSON.stringify(snapshot.agentVariants);
+  const beforeActiveSessions = JSON.stringify(snapshot.activeSessions);
   mutator(snapshot);
   if (
     JSON.stringify(snapshot.agentModels) === beforeModels &&
-    JSON.stringify(snapshot.agentVariants) === beforeVariants
+    JSON.stringify(snapshot.agentVariants) === beforeVariants &&
+    JSON.stringify(snapshot.activeSessions) === beforeActiveSessions
   ) {
     return; // state unchanged — skip the disk write
   }
@@ -150,5 +155,26 @@ export function recordTuiAgentModel(
         snapshot.agentVariants[input.agentName] = input.variant;
       }
     }
+  });
+}
+
+export function recordTuiAgentActivity(
+  input:
+    | { sessionID: string; agentName: string; active: true }
+    | { sessionID: string; active: false },
+  projectDir: string,
+): void {
+  updateSnapshot(projectDir, (snapshot) => {
+    if (input.active) {
+      snapshot.activeSessions[input.sessionID] = input.agentName;
+    } else {
+      delete snapshot.activeSessions[input.sessionID];
+    }
+  });
+}
+
+export function clearTuiAgentActivities(projectDir: string): void {
+  updateSnapshot(projectDir, (snapshot) => {
+    snapshot.activeSessions = {};
   });
 }

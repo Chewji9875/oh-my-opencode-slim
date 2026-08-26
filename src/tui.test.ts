@@ -6,7 +6,9 @@ import { RGBA } from '@opentui/core';
 import { readTmuxPane } from './multiplexer/tmux-pane-registry';
 import {
   type ActiveTmuxPaneRegistration,
+  getActiveSidebarAgentNames,
   getContrastForeground,
+  getSidebarActivityIndicator,
   getSidebarAgentNames,
   readCompactSidebar,
   readConfigInvalid,
@@ -22,6 +24,7 @@ function createSnapshot(overrides: Partial<TuiSnapshot> = {}): TuiSnapshot {
     updatedAt: 0,
     agentModels: {},
     agentVariants: {},
+    activeSessions: {},
     ...overrides,
   };
 }
@@ -50,6 +53,27 @@ describe('tui sidebar agents', () => {
     expect(agentNames).not.toContain('observer');
     expect(agentNames).not.toContain('council');
     expect(agentNames).not.toContain('councillor');
+  });
+
+  test('derives active agents from concurrent session activity', () => {
+    const activeAgents = getActiveSidebarAgentNames(
+      createSnapshot({
+        activeSessions: {
+          'fixer-a': 'fixer',
+          'fixer-b': 'fixer',
+          'oracle-a': 'oracle',
+        },
+      }),
+    );
+
+    expect([...activeAgents]).toEqual(['fixer', 'oracle']);
+  });
+
+  test('renders a stable blank column or deterministic braille frame', () => {
+    expect(getSidebarActivityIndicator(false, 0)).toBe(' ');
+    expect(getSidebarActivityIndicator(true, 0)).toBe('⠋');
+    expect(getSidebarActivityIndicator(true, 160)).toBe('⠙');
+    expect(getSidebarActivityIndicator(true, 1_600)).toBe('⠋');
   });
 });
 

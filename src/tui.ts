@@ -30,6 +30,19 @@ const FALLBACK_SIDEBAR_AGENTS = SUBAGENT_NAMES.filter(
 );
 const BORDER = { type: 'single' };
 const TMUX_PANE_HEARTBEAT_MS = 10_000;
+const ACTIVITY_FRAME_MS = 160;
+const ACTIVITY_FRAMES = [
+  '⠋',
+  '⠙',
+  '⠹',
+  '⠸',
+  '⠼',
+  '⠴',
+  '⠦',
+  '⠧',
+  '⠇',
+  '⠏',
+] as const;
 
 type Child = JSX.Element | string | number | null | undefined | false;
 
@@ -177,11 +190,48 @@ export function getSidebarAgentNames(snapshot: TuiSnapshot): string[] {
     : FALLBACK_SIDEBAR_AGENTS;
 }
 
+export function getActiveSidebarAgentNames(
+  snapshot: TuiSnapshot,
+): ReadonlySet<string> {
+  return new Set(Object.values(snapshot.activeSessions));
+}
+
+export function getSidebarActivityIndicator(
+  active: boolean,
+  now = Date.now(),
+): string {
+  if (!active) return ' ';
+  const frame = Math.floor(now / ACTIVITY_FRAME_MS) % ACTIVITY_FRAMES.length;
+  return ACTIVITY_FRAMES[frame];
+}
+
+interface AgentRowTheme {
+  accent: unknown;
+  text: unknown;
+  textMuted: unknown;
+}
+
+function activityIndicator(
+  active: boolean,
+  now: number,
+  theme: AgentRowTheme,
+): JSX.Element {
+  return text(
+    {
+      fg: active ? (theme.accent ?? theme.text) : theme.textMuted,
+      width: 2,
+    },
+    [getSidebarActivityIndicator(active, now)],
+  );
+}
+
 function agentRow(
   label: string,
   model: string,
   variant: string | undefined,
-  theme: { textMuted: unknown },
+  active: boolean,
+  now: number,
+  theme: AgentRowTheme,
 ): JSX.Element {
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
@@ -202,7 +252,10 @@ function agentRow(
   }
 
   return box({ width: '100%', flexDirection: 'column', marginBottom: 1 }, [
-    text({ fg: theme.textMuted }, [label]),
+    box({ width: '100%', flexDirection: 'row' }, [
+      activityIndicator(active, now, theme),
+      text({ fg: theme.textMuted }, [label]),
+    ]),
     ...detailRows,
   ]);
 }
@@ -211,7 +264,9 @@ function compactAgentRow(
   label: string,
   model: string,
   _variant: string | undefined,
-  theme: { textMuted: unknown },
+  active: boolean,
+  now: number,
+  theme: AgentRowTheme,
 ): JSX.Element {
   const modelName = splitSidebarModelId(model).model;
   return box(
@@ -221,7 +276,10 @@ function compactAgentRow(
       justifyContent: 'space-between',
     },
     [
-      text({ fg: theme.textMuted, width: 14 }, [label]),
+      box({ width: 16, flexDirection: 'row' }, [
+        activityIndicator(active, now, theme),
+        text({ fg: theme.textMuted, width: 14 }, [label]),
+      ]),
       text({ fg: theme.textMuted }, [modelName]),
     ],
   );
@@ -296,6 +354,8 @@ function renderSidebar(
   compactSidebar: boolean,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const activeAgents = getActiveSidebarAgentNames(snapshot);
+  const now = Date.now();
   return box(
     {
       width: '100%',
@@ -341,10 +401,11 @@ function renderSidebar(
       ...getSidebarAgentNames(snapshot).map((agentName) => {
         const model = snapshot.agentModels[agentName] ?? 'pending';
         const variant = snapshot.agentVariants[agentName];
+        const active = activeAgents.has(agentName);
         if (compactSidebar) {
-          return compactAgentRow(agentName, model, variant, theme);
+          return compactAgentRow(agentName, model, variant, active, now, theme);
         }
-        return agentRow(agentName, model, variant, theme);
+        return agentRow(agentName, model, variant, active, now, theme);
       }),
     ],
   );
@@ -480,6 +541,11 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       // Ignore render errors; this is best-effort live status.
     }
   }, 1000);
+  const animationTimer = setInterval(() => {
+    if (!disposed && Object.keys(snapshot.activeSessions).length > 0) {
+      ctx.renderer.requestRender();
+    }
+  }, ACTIVITY_FRAME_MS);
 
   const disposeSlot = ctx.ui.slot({
     append: 'sidebar.content',
@@ -497,6 +563,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     disposed = true;
     disposeSlot();
     clearInterval(renderTimer);
+    clearInterval(animationTimer);
     clearTmuxPaneRegistration(tmuxRegistration);
   };
 }
@@ -566,9 +633,15 @@ const plugin: TuiDualContractModule = {
         // Ignore render errors; this is best-effort live status.
       }
     }, 1000);
+    const animationTimer = setInterval(() => {
+      if (Object.keys(snapshot.activeSessions).length > 0) {
+        api.renderer.requestRender();
+      }
+    }, ACTIVITY_FRAME_MS);
 
     api.lifecycle.onDispose(() => {
       clearInterval(renderTimer);
+      clearInterval(animationTimer);
       clearTmuxPaneRegistration(tmuxRegistration);
     });
 
