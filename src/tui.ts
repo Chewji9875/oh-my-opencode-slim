@@ -31,7 +31,7 @@ const FALLBACK_SIDEBAR_AGENTS = SUBAGENT_NAMES.filter(
 );
 const BORDER = { type: 'single' };
 const TMUX_PANE_HEARTBEAT_MS = 10_000;
-const ACTIVITY_FRAME_MS = 160;
+const ACTIVITY_FRAME_MS = 120;
 const ACTIVITY_FRAMES = [
   '⠋',
   '⠙',
