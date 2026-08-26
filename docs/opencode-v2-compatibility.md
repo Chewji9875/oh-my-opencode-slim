@@ -29,8 +29,8 @@ Two builds are produced:
 
 | Export | File | Build | Externals |
 |---|---|---|---|
-| `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @ast-grep/napi, @opencode-ai/* (shared with v1 host) |
-| `./server` | `dist/server.js` | `build:v2` | @ast-grep/napi, jsdom only (self-contained for v2) |
+| `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @opencode-ai/*, @opentui/* (shared with v1 host) |
+| `./server` | `dist/server.js` | `build:v2` | jsdom only (self-contained for v2) |
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), so a v2 package install loads the self-contained
@@ -69,7 +69,7 @@ the rest.
 | Orchestrator + specialist agents | ✅ | ✅ | |
 | Agent prompts / system injection | ✅ | ✅ | via `session.hook("context")` |
 | Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2 |
-| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep/webfetch need `@ast-grep/napi`/`jsdom` resolvable |
+| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep needs a CLI binary (installed package, system binary, or lazy download); webfetch needs `jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ | |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ | |
 | Event handling (session tracking, lifecycle) | ✅ | ✅ | |
@@ -191,11 +191,12 @@ plugin without v2 adding the corresponding capability:
 These are adapter/environment caveats that can be worked around:
 
 - **Path-based dev loading.** When v2 loads the plugin by absolute file path it
-  appends a `?mtime=` cache-busting query, which can break resolution of
-  externalized bare imports (`@ast-grep/napi`, `jsdom`) from the plugin's
-  `node_modules`. The plugin still loads (these are lazy-imported only by the
-  ast-grep and webfetch tools); install as a package or ensure the externals are
-  resolvable to enable those tools locally.
+  appends a `?mtime=` cache-busting query, which can break resolution of the
+  externalized `jsdom` import from the plugin's `node_modules`. The plugin still
+  loads because webfetch imports it lazily; install as a package or ensure
+  `jsdom` is resolvable to enable webfetch locally. AST-grep resolves its CLI
+  independently and lazily downloads a binary when no package or system binary
+  is available.
 - **directory source.** v2's plugin context does not expose the project
   directory, so the adapter uses `process.cwd()`. Run `opencode2` from your
   project root (or use `--standalone`, which sets cwd to the project).
