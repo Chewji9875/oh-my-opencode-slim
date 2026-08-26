@@ -253,8 +253,8 @@ function agentRow(
 
   return box({ width: '100%', flexDirection: 'column', marginBottom: 1 }, [
     box({ width: '100%', flexDirection: 'row' }, [
+      text({ fg: theme.textMuted, width: 14 }, [label]),
       activityIndicator(active, now, theme),
-      text({ fg: theme.textMuted }, [label]),
     ]),
     ...detailRows,
   ]);
@@ -277,8 +277,8 @@ function compactAgentRow(
     },
     [
       box({ width: 16, flexDirection: 'row' }, [
-        activityIndicator(active, now, theme),
         text({ fg: theme.textMuted, width: 14 }, [label]),
+        activityIndicator(active, now, theme),
       ]),
       text({ fg: theme.textMuted }, [modelName]),
     ],
