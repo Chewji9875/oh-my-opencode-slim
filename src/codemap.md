@@ -72,7 +72,7 @@ OpenCode Core → Plugin Initialization (index.ts)
 4. **Snapshot Loading**: Reads agent models, variants, and per-session activity
    from `tui-state.ts`
 5. **Live Updates**: Refreshes persisted state every 1000ms and reactively
-   advances 120ms animation frames only while agents are active
+   advances 100ms animation frames only while agents are active
 6. **Tmux registration**: Refreshes the active session-to-`TMUX_PANE`
    registration for parent-aware child-pane routing
 7. **Sidebar Rendering**: Renders sidebar with:
@@ -182,7 +182,7 @@ Key event flows:
 ## Performance Considerations
 
 - **Live Updates**: TUI reads state every 1000ms and animates active Braille
-  indicators every 120ms without extra disk reads
+  indicators every 100ms without extra disk reads
 - **Atomic State**: State writes are atomic to prevent corruption
 - **Lazy Initialization**: Some subsystems (e.g., webfetch probe) run async without blocking init
 - **Event-Driven**: Minimal polling; relies on OpenCode's event system

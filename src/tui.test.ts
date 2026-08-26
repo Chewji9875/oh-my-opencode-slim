@@ -79,8 +79,8 @@ describe('tui sidebar agents', () => {
   test('renders a stable blank column or deterministic braille frame', () => {
     expect(getSidebarActivityIndicator(false, 0)).toBe(' ');
     expect(getSidebarActivityIndicator(true, 0)).toBe('⠋');
-    expect(getSidebarActivityIndicator(true, 120)).toBe('⠙');
-    expect(getSidebarActivityIndicator(true, 1_200)).toBe('⠋');
+    expect(getSidebarActivityIndicator(true, 100)).toBe('⠙');
+    expect(getSidebarActivityIndicator(true, 1_000)).toBe('⠋');
   });
 });
 
