@@ -69,7 +69,7 @@ expanding the global v2 client surface.
 - `src/index.ts`: imports `createV2Setup` for the dual `default` export and
   exports `OhMyOpenCodeLite` (named) for the adapter to wrap.
 - Build: `build:v2` bundles `src/index.ts` (which pulls in `src/v2/`) into
-  `dist/server.js` (self-contained except `@ast-grep/napi` + `jsdom`).
+  `dist/server.js` (self-contained except `jsdom`).
 
 ## Limitations (see `docs/opencode-v2-compatibility.md`)
 
