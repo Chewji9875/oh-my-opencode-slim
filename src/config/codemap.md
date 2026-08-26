@@ -11,14 +11,14 @@ The config system follows a layered architecture:
 - **Schema Layer**: Defines Zod schemas for all configuration objects (PluginConfig, AgentOverrideConfig, CouncilConfig, etc.) ensuring runtime validation and type safety
 - **Loader Layer**: Implements configuration discovery, merging, and environment variable interpolation across user and project scopes
 - **Utility Layer**: Provides helper functions for agent-specific configuration lookup and MCP permission resolution
-- **Runtime State**: Manages active preset state across plugin re-initializations
+- **Runtime State**: Manages active preset state and derived runtime configuration across plugin re-initializations
 
 ### Design Patterns
 
 - **Factory Pattern**: `loadPluginConfig()` creates the merged configuration object
 - **Strategy Pattern**: Presets allow swapping entire agent configurations via `preset` field
 - **Decorator Pattern**: Agent overrides decorate default agent behavior with per-model, skill, and MCP restrictions
-- **Singleton Pattern**: Runtime preset state persists across plugin re-inits via module-level variables
+- **Singleton Pattern**: Runtime config and active preset state persist per project directory via the `RuntimeConfig` registry (`runtime.ts`)
 
 ### Key Abstractions
 
@@ -28,6 +28,8 @@ The config system follows a layered architecture:
 | `AgentOverrideConfig` | Per-agent configuration (model, temperature, skills, MCPs) | schema.ts |
 | `CouncilConfig` | Multi-LLM council configuration with presets and execution modes | council-schema.ts |
 | `MultiplexerConfig` | Unified pane management configuration (tmux/zellij) | schema.ts |
+| `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
+| `RuntimeConfig` | Per-directory runtime config singleton with derived getters, host-config snapshot, and preset/model overrides | runtime.ts |
 
 ## Flow
 
@@ -51,8 +53,9 @@ The config system follows a layered architecture:
    └─ Normalization: companion defaults, ACP agent defaults
 
 4. Runtime Phase
-   ├─ Active preset state persisted across plugin re-inits
-   └─ Previous preset tracked for reset diff computation
+   ├─ RuntimeConfig seeded with deep-frozen plugin config snapshot
+   ├─ captureHostConfig() snapshots the host opencode.json BEFORE the config hook mutates it
+   └─ Derived getters (agents, modelArrays, disabled*, presets) computed on demand
 ```
 
 ### Agent Configuration Resolution
@@ -128,17 +131,21 @@ This allows consumers to import directly from `src/config` rather than individua
 - `getCustomAgentNames(config)`: List custom agents declared in config.agents
 - `getAcpAgentNames(config)`: List ACP agent names from config.acpAgents
 - `loadAgentPrompt(agentName, preset?)`: Load custom prompt files for agents
+- `stripOrchestratorModel` / `applyOrchestratorModelConfig` (strip-orchestrator-model.ts): Strip the orchestrator's single model/variant when a fallback chain is configured
 
 ### Runtime State
 
-- `setActiveRuntimePreset(name)`: Set currently active preset
-- `getActiveRuntimePreset()`: Get currently active preset
-- `getPreviousRuntimePreset()`: Get previously active preset
+- `RuntimeConfig.init(directory, pluginConfig)`: Seed the per-directory singleton with a deep-frozen plugin config snapshot
+- `RuntimeConfig.get(directory)`: Get (lazily creating) the singleton for a directory
+- `RuntimeConfig.reset(directory)`: Clear the singleton for a directory
+- `RuntimeConfig.captureHostConfig(opencodeConfig)`: Capture host-side config before the config hook mutates it
+- `setRuntimePreset(name)` / `getRuntimePreset()`: Runtime preset override (stale names clear it)
+- Derived getters: `plugin`, `preset`, `agents()`, `agent(name)`, `disabledAgents`, `disabledTools`, `disabledSkills`, `customAgentNames`, `disabledMcps`, `imageRouting`, `multiplexer`, `backgroundJobs` (incl. `orchestratorWake`), `fallback`, `webfetch`, `acpAgents`, `companion`, `council`, `autoUpdate`, `stripOrchestratorModel`, `setDefaultAgent`, `compactSidebar`, `modelArrays` (incl. councillor chains), `runtimeChains`, `primaryModel`, `smallModel()`, `hostAgent(name)`
 
 ### MCP Management
 
-- `getAgentMcpList(agentName, config?)`: Resolve MCP permissions for an agent
-- `parseList(items, allAvailable)`: Parse wildcard and exclusion syntax in MCP lists
+- `DEFAULT_AGENT_MCPS` + `parseList` (agent-mcps.ts): Per-agent default MCP lists and wildcard/exclusion parsing
+- `getAgentMcpList(agentName, config?)`: Resolve effective MCP permissions for an agent
 
 ## Configuration Schema Overview
 
@@ -154,6 +161,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `disabled_skills`: List of skills to disable
 - `multiplexer`: Unified pane management config (type, layout, sizes)
 - `tmux`: Legacy tmux configuration (migrated to multiplexer)
+- `interview`: Interview feature configuration
 - `backgroundJobs`: Background job configuration
 - `fallback`: Failover/retry configuration
 - `council`: Council configuration with presets and execution modes
@@ -162,6 +170,7 @@ This allows consumers to import directly from `src/config` rather than individua
 
 ### AgentOverrideConfig
 - `model`: Model ID or array of model IDs
+- `inheritModelFrom`: Explicitly inherit the current `session` model or the configured `orchestrator` model when `model` is omitted; supported for built-in and custom agents
 - `temperature`: Sampling temperature (0-2)
 - `variant`: Model variant identifier
 - `skills`: Skill allow/deny list ("*" = all, "!item" = exclude)
@@ -208,3 +217,4 @@ Configuration loading is tested via:
 - `src/config/utils.test.ts`: Agent configuration utilities
 - `src/config/agent-mcps.test.ts`: MCP permission resolution
 - `src/config/council-schema.test.ts`: Council configuration validation
+- `src/config/runtime.test.ts`: RuntimeConfig seeding, derived getters, preset state, and host capture

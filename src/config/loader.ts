@@ -4,6 +4,8 @@ import { stripJsonComments } from '../cli/config-io';
 import { getConfigSearchDirs } from '../cli/paths';
 import { DEFAULT_DISABLED_AGENTS } from './constants';
 import {
+  BackgroundJobsConfigSchema,
+  InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type PluginConfig,
   PluginConfigSchema,
@@ -18,7 +20,8 @@ export type ConfigLoadWarningKind =
   | 'invalid-schema'
   | 'read-error'
   | 'missing-preset'
-  | 'deprecated-key';
+  | 'deprecated-key'
+  | 'normalized';
 
 /**
  * A warning emitted while loading plugin configuration.
@@ -47,6 +50,214 @@ export interface LoadPluginConfigOptions {
 }
 
 const PROMPTS_DIR_NAME = 'oh-my-opencode-slim';
+const INTERVIEW_CONFIG_KEYS = [
+  'maxQuestions',
+  'outputFolder',
+  'autoOpenBrowser',
+  'port',
+  'dashboard',
+] as const;
+const LEGACY_BACKGROUND_JOBS_KEYS = ['continueOnIdle'] as const;
+
+// Config keys that must be arrays. A string value (e.g. "explorer") is
+// normalized to a single-element array; any other non-array value is
+// dropped. Normalization happens before schema validation so a typo in one
+// key does not silently discard the user's entire config (issue #1027).
+const DISABLED_CONFIG_KEYS = [
+  'disabled_agents',
+  'disabled_tools',
+  'disabled_mcps',
+  'disabled_skills',
+] as const;
+
+/**
+ * Normalize disabled_* config keys in place so a non-array value does not
+ * reject the whole config object during schema validation. A string value
+ * (e.g. "explorer") becomes a single-element array so the user's disable
+ * intent survives; any other non-array value (number, boolean, object, ...)
+ * is dropped. Array and undefined values are left untouched. Each
+ * normalization is reported through `warn` (if provided) with a plain
+ * message; callers wrap it in their own warning channel (loader uses
+ * onWarning + console.warn, doctor just reports the message).
+ *
+ * @param rawConfig - Parsed config to normalize (mutated in place)
+ * @param warn - Optional callback invoked with each warning message
+ */
+export function normalizeDisabledArrayKeys(
+  rawConfig: unknown,
+  warn?: (message: string) => void,
+): void {
+  if (
+    typeof rawConfig !== 'object' ||
+    rawConfig === null ||
+    Array.isArray(rawConfig)
+  ) {
+    return;
+  }
+
+  const configRecord = rawConfig as Record<string, unknown>;
+  for (const key of DISABLED_CONFIG_KEYS) {
+    const value = configRecord[key];
+    if (value === undefined || Array.isArray(value)) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      configRecord[key] = [value];
+      warn?.(
+        `Config key "${key}" should be an array; ` +
+          `normalized to ["${value}"].`,
+      );
+    } else {
+      delete configRecord[key];
+      warn?.(`Config key "${key}" must be an array; ignoring invalid value.`);
+    }
+  }
+}
+
+function migrateLegacyBackgroundJobsConfig(rawConfig: unknown): unknown {
+  if (
+    typeof rawConfig !== 'object' ||
+    rawConfig === null ||
+    Array.isArray(rawConfig)
+  ) {
+    return rawConfig;
+  }
+
+  const configRecord = rawConfig as Record<string, unknown>;
+  const backgroundJobs = configRecord.backgroundJobs;
+  if (
+    typeof backgroundJobs !== 'object' ||
+    backgroundJobs === null ||
+    Array.isArray(backgroundJobs) ||
+    !Object.hasOwn(backgroundJobs, 'continueOnIdle')
+  ) {
+    return rawConfig;
+  }
+
+  const migratedBackgroundJobs = {
+    ...(backgroundJobs as Record<string, unknown>),
+  };
+  const legacyContinueOnIdle = migratedBackgroundJobs.continueOnIdle;
+  delete migratedBackgroundJobs.continueOnIdle;
+
+  const wake = migratedBackgroundJobs.orchestratorWake;
+  if (
+    typeof legacyContinueOnIdle === 'boolean' &&
+    (wake === undefined ||
+      (typeof wake === 'object' && wake !== null && !Array.isArray(wake)))
+  ) {
+    const wakeConfig = (wake ?? {}) as Record<string, unknown>;
+    if (!Object.hasOwn(wakeConfig, 'enabled')) {
+      migratedBackgroundJobs.orchestratorWake = {
+        ...wakeConfig,
+        enabled: legacyContinueOnIdle,
+      };
+    }
+  }
+
+  return { ...configRecord, backgroundJobs: migratedBackgroundJobs };
+}
+
+function retainExplicitInterviewFields(
+  parsedConfig: PluginConfig,
+  rawConfig: unknown,
+): PluginConfig {
+  if (!parsedConfig.interview) {
+    return parsedConfig;
+  }
+
+  const rawInterview =
+    typeof rawConfig === 'object' &&
+    rawConfig !== null &&
+    !Array.isArray(rawConfig) &&
+    typeof (rawConfig as Record<string, unknown>).interview === 'object' &&
+    (rawConfig as Record<string, unknown>).interview !== null &&
+    !Array.isArray((rawConfig as Record<string, unknown>).interview)
+      ? ((rawConfig as Record<string, unknown>).interview as Record<
+          string,
+          unknown
+        >)
+      : undefined;
+
+  if (!rawInterview) {
+    return { ...parsedConfig, interview: undefined };
+  }
+
+  const interview: Record<string, unknown> = {};
+  for (const key of INTERVIEW_CONFIG_KEYS) {
+    if (Object.hasOwn(rawInterview, key)) {
+      interview[key] = parsedConfig.interview[key];
+    }
+  }
+
+  return {
+    ...parsedConfig,
+    interview: interview as PluginConfig['interview'],
+  };
+}
+
+function retainExplicitBackgroundJobsFields(
+  parsedConfig: PluginConfig,
+  rawConfig: unknown,
+): PluginConfig {
+  if (!parsedConfig.backgroundJobs) {
+    return parsedConfig;
+  }
+
+  const rawBackgroundJobs =
+    typeof rawConfig === 'object' &&
+    rawConfig !== null &&
+    !Array.isArray(rawConfig) &&
+    typeof (rawConfig as Record<string, unknown>).backgroundJobs === 'object' &&
+    (rawConfig as Record<string, unknown>).backgroundJobs !== null &&
+    !Array.isArray((rawConfig as Record<string, unknown>).backgroundJobs)
+      ? ((rawConfig as Record<string, unknown>).backgroundJobs as Record<
+          string,
+          unknown
+        >)
+      : undefined;
+
+  if (!rawBackgroundJobs) {
+    return parsedConfig;
+  }
+
+  const backgroundJobs: Record<string, unknown> = {};
+  const parsedBackgroundJobs = parsedConfig.backgroundJobs as unknown as Record<
+    string,
+    unknown
+  >;
+  for (const key of Object.keys(rawBackgroundJobs)) {
+    if (
+      key !== 'orchestratorWake' &&
+      Object.hasOwn(parsedBackgroundJobs, key)
+    ) {
+      backgroundJobs[key] = parsedBackgroundJobs[key];
+    }
+  }
+
+  const rawWake =
+    typeof rawBackgroundJobs.orchestratorWake === 'object' &&
+    rawBackgroundJobs.orchestratorWake !== null &&
+    !Array.isArray(rawBackgroundJobs.orchestratorWake)
+      ? (rawBackgroundJobs.orchestratorWake as Record<string, unknown>)
+      : undefined;
+  const orchestratorWake: Record<string, unknown> = {};
+  const parsedWake = parsedConfig.backgroundJobs
+    .orchestratorWake as unknown as Record<string, unknown>;
+  for (const key of Object.keys(rawWake ?? {})) {
+    if (Object.hasOwn(parsedWake, key)) {
+      orchestratorWake[key] = parsedWake[key];
+    }
+  }
+  if (Object.keys(orchestratorWake).length > 0) {
+    backgroundJobs.orchestratorWake = orchestratorWake;
+  }
+
+  return {
+    ...parsedConfig,
+    backgroundJobs: backgroundJobs as PluginConfig['backgroundJobs'],
+  };
+}
 
 /**
  * Load and validate plugin configuration from a specific file path.
@@ -63,7 +274,9 @@ function loadConfigFromPath(
   options?: LoadPluginConfigOptions,
 ): PluginConfig | null {
   try {
-    const content = fs.readFileSync(configPath, 'utf-8');
+    // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
+    // fail with "Unrecognized token" and silently drop the whole config.
+    const content = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
     // Use stripJsonComments to support JSONC format (comments and trailing commas)
     let rawConfig: unknown;
     try {
@@ -131,6 +344,38 @@ function loadConfigFromPath(
       }
     }
 
+    // Preserve the opt-out behavior of the removed continueOnIdle key for
+    // one compatibility window by migrating it before schema validation.
+    if (
+      typeof rawConfig === 'object' &&
+      rawConfig !== null &&
+      typeof (rawConfig as Record<string, unknown>).backgroundJobs ===
+        'object' &&
+      (rawConfig as Record<string, unknown>).backgroundJobs !== null
+    ) {
+      const backgroundJobs = (rawConfig as Record<string, unknown>)
+        .backgroundJobs as Record<string, unknown>;
+      const present = LEGACY_BACKGROUND_JOBS_KEYS.filter(
+        (key) => key in backgroundJobs,
+      );
+      if (present.length > 0) {
+        const backgroundJobsMsg =
+          'Deprecated backgroundJobs.continueOnIdle config key found. ' +
+          'Boolean values are migrated to backgroundJobs.orchestratorWake.enabled ' +
+          'unless that replacement is explicit in the same config file; other values are ignored. ' +
+          'Use backgroundJobs.orchestratorWake.enabled instead.';
+        options?.onWarning?.({
+          path: configPath,
+          kind: 'deprecated-key',
+          message: backgroundJobsMsg,
+        });
+        if (!options?.silent) {
+          console.warn(`[oh-my-opencode-slim] ${backgroundJobsMsg}`);
+        }
+      }
+    }
+    rawConfig = migrateLegacyBackgroundJobsConfig(rawConfig);
+
     // Warn about deprecated fallback.* keys. The schema strips these before
     // validation so the rest of the config still loads; without this warning
     // users would not know their stale keys are ignored.
@@ -156,6 +401,21 @@ function loadConfigFromPath(
       }
     }
 
+    // Normalize disabled_* config keys before schema validation so a
+    // non-array value does not reject the whole config object (which would
+    // silently discard every other user setting). Reported with the
+    // 'normalized' kind so TUI/doctor do not treat a fixed config as invalid.
+    normalizeDisabledArrayKeys(rawConfig, (message) => {
+      options?.onWarning?.({
+        path: configPath,
+        kind: 'normalized',
+        message,
+      });
+      if (!options?.silent) {
+        console.warn(`[oh-my-opencode-slim] ${message}`);
+      }
+    });
+
     const result = PluginConfigSchema.safeParse(rawConfig);
 
     if (!result.success) {
@@ -172,11 +432,17 @@ function loadConfigFromPath(
       return null;
     }
 
+    // Zod applies nested defaults while parsing each layer. Keep interview
+    // defaults from masquerading as explicitly configured overrides; the
+    // merged interview config is normalized after all layers are merged.
+    let layerConfig = retainExplicitInterviewFields(result.data, rawConfig);
+    layerConfig = retainExplicitBackgroundJobsFields(layerConfig, rawConfig);
+
     // Zod applies webfetch.enabled's default while parsing each layer. Keep
     // that default from masquerading as an explicitly configured override;
     // the merged webfetch config is normalized after all layers are merged.
     if (
-      result.data.webfetch &&
+      layerConfig.webfetch &&
       typeof rawConfig === 'object' &&
       rawConfig !== null &&
       'webfetch' in rawConfig &&
@@ -185,14 +451,14 @@ function loadConfigFromPath(
       !Array.isArray(rawConfig.webfetch) &&
       !Object.hasOwn(rawConfig.webfetch, 'enabled')
     ) {
-      const { enabled: _enabled, ...webfetch } = result.data.webfetch;
+      const { enabled: _enabled, ...webfetch } = layerConfig.webfetch;
       return {
-        ...result.data,
+        ...layerConfig,
         webfetch: webfetch as PluginConfig['webfetch'],
       };
     }
 
-    return result.data;
+    return layerConfig;
   } catch (error) {
     // File doesn't exist or isn't readable - this is expected and fine
     if (
@@ -330,6 +596,7 @@ export function mergePluginConfigs(
     agents: deepMerge(base.agents, override.agents),
     presets: deepMerge(base.presets, override.presets),
     multiplexer: deepMerge(base.multiplexer, override.multiplexer),
+    interview: deepMerge(base.interview, override.interview),
     backgroundJobs: deepMerge(base.backgroundJobs, override.backgroundJobs),
     fallback: deepMerge(base.fallback, override.fallback),
     council: deepMerge(base.council, override.council),
@@ -421,6 +688,14 @@ export function loadPluginConfig(
   if (config.webfetch) {
     config.webfetch = WebfetchConfigSchema.parse(config.webfetch);
   }
+  if (config.interview) {
+    config.interview = InterviewConfigSchema.parse(config.interview);
+  }
+  if (config.backgroundJobs) {
+    config.backgroundJobs = BackgroundJobsConfigSchema.parse(
+      config.backgroundJobs,
+    );
+  }
 
   // Override preset from environment variable if set
   const envPreset = process.env.OH_MY_OPENCODE_SLIM_PRESET;
@@ -477,39 +752,6 @@ export function loadPluginConfig(
   // auto+observer-disabled case by returning true, which triggers the
   // debounced toast in index.ts. Overriding to 'direct' here would prevent
   // processImageAttachments from returning true and suppress the toast.
-
-  // Normalize disabled_* config keys to ensure they are arrays or undefined.
-  // This loop is currently unreachable via the normal file-loading path:
-  // PluginConfigSchema.safeParse() rejects the WHOLE config object if any
-  // disabled_* field is non-array (no .catch() on these fields), so
-  // loadConfigFromPath returns null and the file falls back to {} BEFORE this
-  // loop ever runs. Retained only as defense-in-depth against a future schema
-  // relaxation (e.g. adding .catch() to these fields) or a construction path
-  // that bypasses safeParse entirely — not as a proven/tested fix for the
-  // originally reported crash (root cause not reproduced).
-  const ARRAY_CONFIG_KEYS = [
-    'disabled_agents',
-    'disabled_tools',
-    'disabled_mcps',
-    'disabled_skills',
-  ] as const;
-
-  const configPathForWarning = projectConfigPath ?? userConfigPath ?? '';
-  for (const key of ARRAY_CONFIG_KEYS) {
-    const value = config[key as keyof PluginConfig];
-    if (value !== undefined && !Array.isArray(value)) {
-      const message = `Config key "${key}" must be an array; ignoring invalid value.`;
-      options?.onWarning?.({
-        path: configPathForWarning,
-        kind: 'invalid-schema',
-        message,
-      });
-      if (!options?.silent) {
-        console.warn(`[oh-my-opencode-slim] ${message}`);
-      }
-      delete config[key as keyof PluginConfig];
-    }
-  }
 
   return config;
 }

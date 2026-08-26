@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/alvinunreal/oh-my-opencode-slim/stargazers">
-    <img src="img/v2.webp" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
+    <img src="img/v2.jpg" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
   </a>
   <h3>✨ oh-my-opencode-slim ✨</h3>
 
@@ -132,34 +132,6 @@ bun install
 bun run build
 ```
 
-### OpenCode v2 (`opencode2`) Compatibility
-
-The plugin is **dual-compatible**: the same published package installs and runs
-on both OpenCode v1 (`opencode`) and OpenCode v2 (`opencode2`).
-
-- The package default export is `{ id, server, setup }`. v1 loads `server` (the
-  classic plugin function); v2 loads `setup` (the v2 promise-plugin adapter).
-- v2 loads the self-contained `./server` build (`dist/server.js`) via the
-  `server` export subpath, so no extra dependencies need to be resolvable on the
-  v2 host (except the optional native `@ast-grep/napi` and `jsdom` for the
-  ast-grep / webfetch tools).
-
-To use it with `opencode2`, add the package to your v2 config
-(`~/.config/opencode2/opencode.json`):
-
-```json
-{
-  "plugin": ["oh-my-opencode-slim@latest"]
-}
-```
-
-Then run `opencode2`. The orchestrator + specialist agents, tools, slash
-commands (`/deepwork`, `/reflect`, `/loop`), and the system-prompt / message
-transforms all work on v2. Configure agent models and any MCP servers in your
-v2 `opencode.json` (v2 has no programmatic MCP-registration hook, so built-in
-MCPs must be declared in config). See `docs/opencode-v2-compatibility.md` for the full
-feature matrix and limitations.
-
 ### Getting Started
 
 The installer generates both OpenAI and OpenCode Go presets, with OpenAI active by default.
@@ -200,12 +172,12 @@ The default generated configuration includes both `openai` and `opencode-go` pre
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
+      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
       "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
+      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -264,7 +236,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/orchestrator.png" width="240" style="border-radius: 10px;">
+      <img src="img/orchestrator.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>Forged in the void of complexity.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -305,7 +277,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/explorer.png" width="240" style="border-radius: 10px;">
+      <img src="img/explorer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>The wind that carries knowledge.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -346,7 +318,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/oracle.png" width="240" style="border-radius: 10px;">
+      <img src="img/oracle.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>The voice at the crossroads.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -390,7 +362,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/council.png" width="240" style="border-radius: 10px;">
+      <img src="img/council.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>Many minds, one verdict.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -436,7 +408,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/librarian.png" width="240" style="border-radius: 10px;">
+      <img src="img/librarian.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>The weaver of understanding.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -477,7 +449,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/designer.png" width="240" style="border-radius: 10px;">
+      <img src="img/designer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>Beauty is essential.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -518,7 +490,7 @@ If any agent fails to respond, check your provider authentication and config fil
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/fixer.png" width="240" style="border-radius: 10px;">
+      <img src="img/fixer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>The final step between vision and reality.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -681,6 +653,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Clonedeps](docs/clonedeps.md)** | Clone selected dependency source into an ignored local workspace for inspection |
 | **[Worktrees](docs/worktrees.md)** | Use `.slim/worktrees/` lanes for isolated parallel or risky coding work |
 | **[Preset Switching](docs/preset-switching.md)** | Switch agent model presets at runtime with `/preset` |
+| **[Interview](docs/interview.md)** | Turn rough ideas into a structured markdown spec through a browser-based Q&A flow |
 | **[Companion](docs/companion.md)** | Floating window companion for parsing, help, and types |
 
 ### ⚙️ Config & Reference
@@ -705,7 +678,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-93-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-104-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -840,6 +813,21 @@ Use this section as a map: start with installation, then jump to features, confi
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/brucemead"><img src="https://avatars.githubusercontent.com/u/5895525?v=4?s=100" width="100px;" alt="Bruce"/><br /><sub><b>Bruce</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=brucemead" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/lih54767-coder"><img src="https://avatars.githubusercontent.com/u/271720354?v=4?s=100" width="100px;" alt="zhaohaofan"/><br /><sub><b>zhaohaofan</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=lih54767-coder" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/adevwithpurpose"><img src="https://avatars.githubusercontent.com/u/197252873?v=4?s=100" width="100px;" alt="adevwithpurpose"/><br /><sub><b>adevwithpurpose</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=adevwithpurpose" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://space.bilibili.com/67279156"><img src="https://avatars.githubusercontent.com/u/26923626?v=4?s=100" width="100px;" alt="Gold John King"/><br /><sub><b>Gold John King</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=GoldJohnKing" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/pxmpsdev"><img src="https://avatars.githubusercontent.com/u/180872771?v=4?s=100" width="100px;" alt="pxmps"/><br /><sub><b>pxmps</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=pxmpsdev" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/raphaelwdrf"><img src="https://avatars.githubusercontent.com/u/61286068?v=4?s=100" width="100px;" alt="raphaelwdrf"/><br /><sub><b>raphaelwdrf</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=raphaelwdrf" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/KomeijiReimu"><img src="https://avatars.githubusercontent.com/u/118449321?v=4?s=100" width="100px;" alt="Brant"/><br /><sub><b>Brant</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=KomeijiReimu" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/ermanhavuc"><img src="https://avatars.githubusercontent.com/u/29822518?v=4?s=100" width="100px;" alt="Erman HAVUÇ"/><br /><sub><b>Erman HAVUÇ</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=ermanhavuc" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/HeZ2z"><img src="https://avatars.githubusercontent.com/u/142383180?v=4?s=100" width="100px;" alt="HeZzz"/><br /><sub><b>HeZzz</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=HeZ2z" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/Qiaoyi-Li"><img src="https://avatars.githubusercontent.com/u/76148131?v=4?s=100" width="100px;" alt="Qiaoyi Li"/><br /><sub><b>Qiaoyi Li</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=Qiaoyi-Li" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://arpankanwer.ai.studio/"><img src="https://avatars.githubusercontent.com/u/35032317?v=4?s=100" width="100px;" alt="Birarpanjot Singh Kanwer"/><br /><sub><b>Birarpanjot Singh Kanwer</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=arpankanwer" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/Iams4kura"><img src="https://avatars.githubusercontent.com/u/126048986?v=4?s=100" width="100px;" alt="s4kura"/><br /><sub><b>s4kura</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=Iams4kura" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/zjm54321"><img src="https://avatars.githubusercontent.com/u/20168947?v=4?s=100" width="100px;" alt="落花有意"/><br /><sub><b>落花有意</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=zjm54321" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/JoJohanse"><img src="https://avatars.githubusercontent.com/u/97782983?v=4?s=100" width="100px;" alt="JoJohanse"/><br /><sub><b>JoJohanse</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=JoJohanse" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

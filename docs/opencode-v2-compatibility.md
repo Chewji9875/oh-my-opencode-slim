@@ -69,7 +69,7 @@ the rest.
 | Orchestrator + specialist agents | ✅ | ✅ | |
 | Agent prompts / system injection | ✅ | ✅ | via `session.hook("context")` |
 | Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2 |
-| Tools (ast-grep, webfetch, cancel_task, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep/webfetch need `@ast-grep/napi`/`jsdom` resolvable |
+| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep/webfetch need `@ast-grep/napi`/`jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ | |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ | |
 | Event handling (session tracking, lifecycle) | ✅ | ✅ | |
@@ -77,6 +77,7 @@ the rest.
 | Built-in MCPs (context7, grep.app) | ✅ | ⚠️ config-only | v2 has no programmatic MCP hook; add 2 lines to `opencode.json` — see [below](#restoring-built-in-mcps-on-v2) |
 | `/preset` (interactive switcher) | ✅ | ❌ at load only | the switcher is a v1-TUI 3-level UI; on v2 set `"preset"` in the config file (applies at load) |
 | Foreground model fallback (rate-limit failover) | ✅ | ❌ | v2 locks the model at session creation; the plugin API has no per-prompt model override, session model-setter, or `/model` command, so mid-flight switching is impossible |
+| Orchestrator wake scheduler (`backgroundJobs.orchestratorWake`) | ✅ | ❌ | Requires host `session.get` / `todo` / `children` / `status` / `promptAsync`; the v2 shim lacks these APIs so the capability-gated feature stays inactive |
 | Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ | v1-TUI-pane integration; v2 renders subagents natively instead |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
 | Default agent on new session | ✅ orchestrator | ⚠️ TUI shows `build` | v1 sets `default_agent`; v2's TUI ignores that field and defaults to the first agent in its list (`build`). `run`/API still default to orchestrator. See [limitations](#limitations) |
@@ -146,6 +147,15 @@ if unused.) The librarian agent uses these for library-docs lookup and
 GitHub-wide code search; without them it still works via `webfetch`.
 
 ## Limitations
+
+### Interview
+
+`/interview` is supported on v2 through a marker command and a trailing-message
+context bridge. The bridge keeps an in-memory transcript projection from v2
+context and streamed text events, and uses the v2 session methods for prompts,
+notifications, and renames. The markdown document remains the durable source
+of truth; completion responses without `<interview_state>` rewrite the current
+spec while retaining frontmatter and Q&A history.
 
 These are **v2 API constraints**, not adapter gaps — they cannot be fixed in the
 plugin without v2 adding the corresponding capability:

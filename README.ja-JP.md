@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/alvinunreal/oh-my-opencode-slim/stargazers">
-    <img src="img/v2.webp" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
+    <img src="img/v2.jpg" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
   </a>
   <h3>✨ oh-my-opencode-slim ✨</h3>
 
@@ -153,12 +153,12 @@ bun run build
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
+      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
       "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
+      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -218,7 +218,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/orchestrator.png" width="240" style="border-radius: 10px;">
+      <img src="img/orchestrator.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>複雑性の虚無から鍛え上げられし者。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -259,7 +259,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/explorer.png" width="240" style="border-radius: 10px;">
+      <img src="img/explorer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>知識を運ぶ風。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -300,7 +300,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/oracle.png" width="240" style="border-radius: 10px;">
+      <img src="img/oracle.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>分岐点に佇む声。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -344,7 +344,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/council.png" width="240" style="border-radius: 10px;">
+      <img src="img/council.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>多くの知性、ひとつの結論。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -390,7 +390,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/librarian.png" width="240" style="border-radius: 10px;">
+      <img src="img/librarian.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>理解を編み上げる者。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -431,7 +431,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/designer.png" width="240" style="border-radius: 10px;">
+      <img src="img/designer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>美は不可欠なもの。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -472,7 +472,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/fixer.png" width="240" style="border-radius: 10px;">
+      <img src="img/fixer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>構想と現実を結ぶ最後の一歩。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -612,6 +612,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Clonedeps](docs/clonedeps.md)** | 選択した依存関係のソースを ignore 済みのローカルワークスペースにクローンし、調査できるようにします |
 | **[Worktrees](docs/worktrees.md)** | `.slim/worktrees/` lane を使い、隔離された並列または高リスクなコーディング作業を行います |
 | **[Preset Switching](docs/preset-switching.md)** | `/preset` で実行時にエージェントモデルのプリセットを切り替えます |
+| **[Interview](docs/interview.md)** | ブラウザベースの Q&A フローで、ざっくりとしたアイデアを構造化された Markdown 仕様に変換します |
 | **[Companion](docs/companion.md)** | 解析、ヘルプ、型情報のためのフローティングウィンドウ companion |
 
 ### ⚙️ 設定 & リファレンス

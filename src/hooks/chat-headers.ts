@@ -45,9 +45,8 @@ async function hasInternalMarker(
 
   try {
     const response = await getClient(input).session.message({
-      sessionID,
-      messageID,
-      directory: input.directory,
+      path: { id: sessionID, messageID },
+      query: { directory: input.directory },
     });
     const hasMarker = (response.data?.parts ?? []).some(
       isInternalInitiatorPart,

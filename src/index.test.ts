@@ -133,6 +133,11 @@ describe('plugin tool registration', () => {
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
 
+    expect(hooks.tool?.task_status).toBeDefined();
+    expect(hooks.tool?.task_result).toBeDefined();
+    expect(hooks.tool?.task_message).toBeDefined();
+    expect(hooks.tool?.task_cancel).toBeDefined();
+    expect(hooks.tool?.task_revive).toBeDefined();
     expect(hooks.tool?.wait_for_user).toBeDefined();
     await expect(
       hooks.tool?.wait_for_user?.execute(
@@ -273,6 +278,135 @@ describe('plugin tool registration', () => {
       globalThis.clearTimeout = originalClearTimeout;
       Date.now = originalNow;
       await rm(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('plugin config model inheritance', () => {
+  let originalEnv: typeof process.env;
+  const configDirs: string[] = [];
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    while (configDirs.length > 0) {
+      const configDir = configDirs.pop();
+      if (configDir) {
+        await rm(configDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  async function loadConfiguredPlugin(config: Record<string, unknown>) {
+    const configDir = await mkdtemp('/tmp/oh-my-opencode-inheritance-');
+    configDirs.push(configDir);
+    await Bun.write(
+      `${configDir}/oh-my-opencode-slim.json`,
+      JSON.stringify(config),
+    );
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: `${configDir}/data`,
+      XDG_CACHE_HOME: `${configDir}/cache`,
+      OPENCODE_LOG_DIR: `${configDir}/logs`,
+    };
+
+    const client = createPluginClient(async () => ({}));
+    return plugin({
+      client,
+      directory: configDir,
+      worktree: configDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+  }
+
+  test('session inheritance removes a stale host model in the final config', async () => {
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        librarian: { model: 'local/librarian' },
+        fixer: { inheritModelFrom: 'session' },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'host/stale-fixer', temperature: 0.2 },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.fixer?.model).toBeUndefined();
+      expect(agents.fixer?.temperature).toBe(0.2);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('orchestrator inheritance uses the host orchestrator model in the final config', async () => {
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        librarian: { inheritModelFrom: 'orchestrator' },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        librarian: { model: 'host/stale-librarian' },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.librarian?.model).toBe('host/orchestrator');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('preset inheritance clears a stale host model in the final config', async () => {
+    const hooks = await loadConfiguredPlugin({
+      preset: 'split',
+      presets: {
+        split: {
+          orchestrator: { model: 'preset/orchestrator' },
+          fixer: { inheritModelFrom: 'session' },
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'host/stale-fixer', temperature: 0.4 },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.fixer?.model).toBeUndefined();
+      expect(agents.fixer?.temperature).toBe(0.4);
+    } finally {
+      await hooks.dispose?.();
     }
   });
 });

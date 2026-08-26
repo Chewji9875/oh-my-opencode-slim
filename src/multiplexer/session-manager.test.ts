@@ -33,12 +33,14 @@ const mockMultiplexer = {
   applyLayout: mock(async () => {}),
 };
 const mockIsServerRunning = mock(async () => true);
+const mockWaitForSessionReady = mock(async () => true);
 
 // Mock the multiplexer module
 mock.module('../multiplexer', () => ({
   getMultiplexer: () => mockMultiplexer,
   isServerRunning: mockIsServerRunning,
   startAvailabilityCheck: () => {},
+  waitForSessionReady: mockWaitForSessionReady,
 }));
 
 // Mock the plugin context
@@ -106,6 +108,8 @@ describe('MultiplexerSessionManager', () => {
     mockMultiplexerType = 'tmux';
     mockIsServerRunning.mockReset();
     mockIsServerRunning.mockResolvedValue(true);
+    mockWaitForSessionReady.mockReset();
+    mockWaitForSessionReady.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -148,6 +152,7 @@ describe('MultiplexerSessionManager', () => {
         'Test Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-456' },
       );
     });
 
@@ -195,6 +200,7 @@ describe('MultiplexerSessionManager', () => {
         'Nested Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/child/directory',
+        { parentSessionId: 'parent-456' },
       );
     });
 
@@ -239,11 +245,268 @@ describe('MultiplexerSessionManager', () => {
       const firstCreate = manager.onSessionCreated(event);
       const secondCreate = manager.onSessionCreated(event);
 
-      await Promise.resolve();
+      await flushPromises();
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
 
       deferred.resolve({ success: true, paneId: 'p-race' });
+
+      await Promise.all([firstCreate, secondCreate]);
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+    });
+
+    test('waits for child session readiness before spawning the pane', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+      const readiness = createDeferred<boolean>();
+
+      mockWaitForSessionReady.mockImplementationOnce(() => readiness.promise);
+
+      const create = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-ready',
+            parentID: 'parent-ready',
+            title: 'Ready Worker',
+          },
+        },
+      });
+
+      await flushPromises();
+
+      // Readiness still pending: no pane may be spawned yet.
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      readiness.resolve(true);
+      await create;
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledWith(
+        'child-ready',
+        'Ready Worker',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+        { parentSessionId: 'parent-ready' },
+      );
+    });
+
+    test('skips spawn when child session readiness times out', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      mockWaitForSessionReady.mockResolvedValueOnce(false);
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-timeout',
+            parentID: 'parent-timeout',
+            title: 'Timeout Worker',
+          },
+        },
+      });
+
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+      expect(mockWaitForSessionReady).toHaveBeenCalledWith(
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        'child-timeout',
+        expect.any(Object),
+      );
+    });
+
+    test('recovers a session whose initial readiness timed out on a later busy event', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      mockWaitForSessionReady.mockResolvedValueOnce(false);
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-recover-timeout',
+            parentID: 'parent-recover-timeout',
+            title: 'Recover Worker',
+          },
+        },
+      });
+
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      // The session stays known; a later busy status runs a fresh readiness
+      // pass and recovers the pane.
+      mockWaitForSessionReady.mockResolvedValueOnce(true);
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-recover-timeout',
+          status: { type: 'busy' },
+        },
+      });
+
+      expect(mockWaitForSessionReady).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
+        'child-recover-timeout',
+        'Recover Worker',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+        { parentSessionId: 'parent-recover-timeout' },
+      );
+    });
+
+    test('busy during the initial readiness wait triggers immediate recovery on timeout', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+      const readiness = createDeferred<boolean>();
+
+      mockWaitForSessionReady.mockImplementationOnce(() => readiness.promise);
+
+      const creating = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-busy-during-wait',
+            parentID: 'parent-busy-during-wait',
+            title: 'Busy During Wait',
+          },
+        },
+      });
+
+      await flushPromises();
+
+      // Busy while the initial wait is in flight: deferred to the pending
+      // spawn instead of being dropped.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-busy-during-wait',
+          status: { type: 'busy' },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      // The wait times out; the deferred busy signal runs one recovery pass,
+      // which now finds the session visible and spawns the pane.
+      mockWaitForSessionReady.mockResolvedValueOnce(true);
+      readiness.resolve(false);
+      await creating;
+
+      expect(mockWaitForSessionReady).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
+        'child-busy-during-wait',
+        'Busy During Wait',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+        { parentSessionId: 'parent-busy-during-wait' },
+      );
+    });
+
+    test('respawns only after readiness when a known session goes busy', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-respawn',
+            parentID: 'parent-respawn',
+            title: 'Respawn Worker',
+          },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+
+      // Idle close untracks the pane so a later busy event respawns it.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'idle' },
+        },
+      });
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      // First respawn attempt: readiness times out, no pane.
+      mockWaitForSessionReady.mockResolvedValueOnce(false);
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'busy' },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+
+      // Session becomes visible; respawn proceeds.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'child-respawn',
+          status: { type: 'busy' },
+        },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
+        'child-respawn',
+        'Respawn Worker',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+        { parentSessionId: 'parent-respawn' },
+      );
+    });
+
+    test('duplicate create events do not double-wait or double-spawn', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+      const readiness = createDeferred<boolean>();
+
+      mockWaitForSessionReady.mockImplementation(() => readiness.promise);
+
+      const event = {
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'child-dupe',
+            parentID: 'parent-dupe',
+            title: 'Dupe Worker',
+          },
+        },
+      };
+
+      const firstCreate = manager.onSessionCreated(event);
+      const secondCreate = manager.onSessionCreated(event);
+
+      await Promise.resolve();
+
+      // Spawning guard held: readiness is polled once, spawn deferred.
+      expect(mockWaitForSessionReady).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
+      readiness.resolve(true);
 
       await Promise.all([firstCreate, secondCreate]);
 
@@ -275,6 +538,133 @@ describe('MultiplexerSessionManager', () => {
       await (manager as any).pollSessions();
 
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
+    });
+
+    test('retains a false close and retries it through polling', async () => {
+      mockMultiplexer.spawnPane.mockResolvedValue({
+        success: true,
+        paneId: 'p-false-retry',
+      });
+      mockMultiplexer.closePane
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0 },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'false-retry', parentID: 'parent' } },
+      });
+      await manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'false-retry' },
+      });
+
+      const state = manager as unknown as {
+        sessions: Map<
+          string,
+          { paneId: string; closeState?: Record<string, unknown> }
+        >;
+      };
+      expect(state.sessions.get('false-retry')).toMatchObject({
+        paneId: 'p-false-retry',
+        closeState: { phase: 'retrying', attempts: 1 },
+      });
+
+      await (manager as any).pollSessions();
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has('false-retry')).toBe(false);
+    });
+
+    test('retains a thrown close and retries it through polling', async () => {
+      mockMultiplexer.spawnPane.mockResolvedValue({
+        success: true,
+        paneId: 'p-throw-retry',
+      });
+      mockMultiplexer.closePane
+        .mockRejectedValueOnce(new Error('socket closed'))
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0 },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'throw-retry', parentID: 'parent' } },
+      });
+      await manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'throw-retry' },
+      });
+
+      const state = manager as unknown as {
+        sessions: Map<
+          string,
+          { paneId: string; closeState?: Record<string, unknown> }
+        >;
+      };
+      expect(state.sessions.get('throw-retry')).toMatchObject({
+        paneId: 'p-throw-retry',
+        closeState: {
+          phase: 'retrying',
+          attempts: 1,
+          lastError: 'Error: socket closed',
+        },
+      });
+
+      await (manager as any).pollSessions();
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has('throw-retry')).toBe(false);
+    });
+
+    test('stops polling after a generic close retry is exhausted', async () => {
+      mockMultiplexer.spawnPane.mockResolvedValue({
+        success: true,
+        paneId: 'p-exhausted',
+      });
+      mockMultiplexer.closePane.mockResolvedValue(false);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMaxAttempts: 1 },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'exhausted', parentID: 'parent' } },
+      });
+      await manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: 'exhausted' },
+      });
+
+      const state = manager as unknown as {
+        sessions: Map<
+          string,
+          { paneId: string; closeState?: Record<string, unknown> }
+        >;
+        pollInterval?: unknown;
+      };
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+      expect(state.sessions.get('exhausted')).toMatchObject({
+        paneId: 'p-exhausted',
+        closeState: { phase: 'exhausted', attempts: 1 },
+      });
+      expect(state.pollInterval).toBeUndefined();
+
+      await (manager as any).pollSessions();
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+      expect(state.sessions.has('exhausted')).toBe(true);
     });
 
     test('closes pane immediately on session.idle event', async () => {
@@ -384,6 +774,7 @@ describe('MultiplexerSessionManager', () => {
         'Resumed Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/resumed/dir',
+        { parentSessionId: 'parent' },
       );
     });
 
@@ -1075,7 +1466,7 @@ describe('MultiplexerSessionManager', () => {
       );
     });
 
-    test('does not close on transient status absence', async () => {
+    test('retains pane when status remains absent', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(
         ctx,
@@ -1088,9 +1479,11 @@ describe('MultiplexerSessionManager', () => {
       });
 
       setMockSessionStatuses({});
-      await (manager as any).pollSessions();
+      for (let index = 0; index < 5; index++)
+        await (manager as any).pollSessions();
 
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
+      expect((manager as any).sessions.has('c1')).toBe(true);
     });
 
     test('keeps background child pane open while status is running until deleted', async () => {
@@ -1308,6 +1701,7 @@ describe('MultiplexerSessionManager', () => {
         'Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/task/dir',
+        { parentSessionId: 'parent-789' },
       );
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
       expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
@@ -1375,6 +1769,7 @@ describe('MultiplexerSessionManager', () => {
         'Worker',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
+        { parentSessionId: 'parent-close-race' },
       );
     });
 
@@ -2284,38 +2679,26 @@ describe('MultiplexerSessionManager', () => {
       await Promise.all([first, second]);
     });
 
-    test('missing resets idle streak and closes after grace expires', async () => {
+    test('missing status never confirms close', async () => {
       mockMultiplexerType = 'cmux';
       let now = 0;
       const manager = new MultiplexerSessionManager(
         createMockContext(),
         cmuxConfig,
         undefined,
-        { now: () => now, missingGraceMs: 30 },
+        { now: () => now },
       );
       await manager.onSessionCreated({
         type: 'session.created',
         properties: { info: { id: 'missing', parentID: 'parent' } },
       });
       now = 10_000;
-      setMockSessionStatuses({ missing: { type: 'idle' } });
-      await (manager as any).pollSessions();
       setMockSessionStatuses({});
-      await (manager as any).pollSessions();
-      now += 29;
-      await (manager as any).pollSessions();
+      for (let index = 0; index < 6; index++) {
+        await (manager as any).pollSessions();
+        now += 30_000;
+      }
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
-      setMockSessionStatuses({ missing: { type: 'idle' } });
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
-      setMockSessionStatuses({});
-      await (manager as any).pollSessions();
-      now += 30;
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      await (manager as any).pollSessions();
-      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
     });
 
     test('background job policy still gates stable cmux idle close', async () => {
@@ -2465,10 +2848,38 @@ describe('MultiplexerSessionManager', () => {
       });
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('%mock-pane');
     });
+
+    test('cmux adapter is excluded from the generic readiness gate', async () => {
+      mockMultiplexerType = 'cmux';
+      const probe = mock(async () => true);
+      mockWaitForSessionReady.mockClear();
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        cmuxConfig,
+        undefined,
+        {
+          checkSessionReady: probe,
+          readinessAttemptTimeoutMs: 5,
+          readinessDeadlineMs: 1,
+        },
+      );
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'cmux-excluded', parentID: 'parent' } },
+      });
+
+      // The cmux lifecycle has its own spawn machinery (health check plus
+      // deferred spawn retry) and must never consult the generic readiness
+      // gate or its injectable probe.
+      expect(mockWaitForSessionReady).not.toHaveBeenCalled();
+      expect(probe).not.toHaveBeenCalled();
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalled();
+    });
   });
 
   describe('cleanup', () => {
-    test('instance disposal cleanup is a no-op for non-cmux multiplexers', async () => {
+    test('instance disposal does not close tracked panes or fence later spawns for non-cmux', async () => {
       const manager = new MultiplexerSessionManager(
         createMockContext(),
         defaultMultiplexerConfig,
@@ -2480,6 +2891,74 @@ describe('MultiplexerSessionManager', () => {
       mockMultiplexer.closePane.mockClear();
       await manager.cleanupOnInstanceDisposed();
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
+
+      // Disposal only fences in-flight work; the shared manager keeps
+      // spawning for later sessions.
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: 'tmux-after-disposal', parentID: 'parent' } },
+      });
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+    });
+
+    test('cleanup aborts an in-flight readiness wait and prevents a late spawn', async () => {
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+      );
+      let capturedSignal: AbortSignal | undefined;
+      const readiness = createDeferred<boolean>();
+      mockWaitForSessionReady.mockImplementationOnce((_url, _id, options) => {
+        capturedSignal = options?.signal;
+        return readiness.promise;
+      });
+
+      const creating = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'fence-wait', parentID: 'parent' },
+        },
+      });
+
+      await flushPromises();
+      expect(capturedSignal?.aborted).toBe(false);
+
+      await manager.cleanup();
+      expect(capturedSignal?.aborted).toBe(true);
+
+      // Even a late `true` from the readiness wait cannot spawn a pane after
+      // cleanup tore the manager down.
+      readiness.resolve(true);
+      await creating;
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+    });
+
+    test('instance disposal aborts an in-flight readiness wait', async () => {
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+      );
+      let capturedSignal: AbortSignal | undefined;
+      const readiness = createDeferred<boolean>();
+      mockWaitForSessionReady.mockImplementationOnce((_url, _id, options) => {
+        capturedSignal = options?.signal;
+        return readiness.promise;
+      });
+
+      const creating = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'fence-disposal', parentID: 'parent' },
+        },
+      });
+
+      await flushPromises();
+      await manager.cleanupOnInstanceDisposed();
+      expect(capturedSignal?.aborted).toBe(true);
+
+      readiness.resolve(true);
+      await creating;
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
     });
 
     test('cmux cleanup has a shutdown deadline for a hanging spawn', async () => {
@@ -2500,6 +2979,140 @@ describe('MultiplexerSessionManager', () => {
       await manager.cleanup();
       expect(mockMultiplexer.closePane).not.toHaveBeenCalled();
     });
+
+    test('generic cleanup bounds a pending close and retries after false', async () => {
+      const close = createDeferred<boolean>();
+      mockMultiplexer.closePane
+        .mockImplementationOnce(() => close.promise)
+        .mockResolvedValueOnce(true);
+      const manager = new MultiplexerSessionManager(
+        createMockContext(),
+        defaultMultiplexerConfig,
+        undefined,
+        { closeRetryMs: 0, shutdownTimeoutMs: 1 },
+      );
+      const sessionId = 'generic-cleanup-pending';
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: { info: { id: sessionId, parentID: 'parent' } },
+      });
+      const deleting = manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: { sessionID: sessionId },
+      });
+      await flushPromises();
+
+      const state = manager as unknown as {
+        sessions: Map<string, { paneId: string; closeState?: unknown }>;
+        closingSessions: Map<string, Promise<void>>;
+      };
+      const tracked = state.sessions.get(sessionId);
+      const closing = state.closingSessions.get(sessionId);
+      expect(tracked).toMatchObject({ paneId: '%mock-pane' });
+      expect(closing).toBeDefined();
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      await manager.cleanup();
+
+      expect(state.sessions.get(sessionId)).toBe(tracked);
+      expect(state.sessions.get(sessionId)).toMatchObject({
+        paneId: '%mock-pane',
+        closeState: { phase: 'closing', attempts: 1 },
+      });
+      expect(state.closingSessions.get(sessionId)).toBe(closing);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      close.resolve(false);
+      await deleting;
+      await flushPromises();
+      expect(state.sessions.get(sessionId)).toMatchObject({
+        paneId: '%mock-pane',
+        closeState: { phase: 'retrying', attempts: 1 },
+      });
+      expect(state.closingSessions.has(sessionId)).toBe(false);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      await (manager as any).pollSessions();
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+      expect(state.sessions.has(sessionId)).toBe(false);
+    });
+
+    for (const result of [true, false]) {
+      test(`generic cleanup ${result ? 'success' : 'failure'} cannot mutate a replacement record`, async () => {
+        const close = createDeferred<boolean>();
+        mockMultiplexer.closePane.mockImplementationOnce(() => close.promise);
+        const manager = new MultiplexerSessionManager(
+          createMockContext(),
+          defaultMultiplexerConfig,
+          undefined,
+          { shutdownTimeoutMs: 1 },
+        );
+        const sessionId = `generic-replacement-${result}`;
+
+        await manager.onSessionCreated({
+          type: 'session.created',
+          properties: { info: { id: sessionId, parentID: 'parent' } },
+        });
+        const deleting = manager.onSessionDeleted({
+          type: 'session.deleted',
+          properties: { sessionID: sessionId },
+        });
+        await flushPromises();
+
+        const state = manager as unknown as {
+          sessions: Map<
+            string,
+            {
+              sessionId: string;
+              paneId: string;
+              parentId: string;
+              title: string;
+              directory: string;
+              ownerInstanceId: string;
+            }
+          >;
+          closingSessions: Map<string, Promise<void>>;
+        };
+        await manager.cleanup();
+        const oldClosing = state.closingSessions.get(sessionId);
+        expect(oldClosing).toBeDefined();
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+        const next = new MultiplexerSessionManager(
+          createMockContext(),
+          defaultMultiplexerConfig,
+        );
+        const replacement = {
+          sessionId,
+          paneId: 'replacement-pane',
+          parentId: 'parent',
+          title: 'Replacement',
+          directory: '/test/directory',
+          ownerInstanceId: (next as any).instanceId as string,
+        };
+        state.sessions.set(sessionId, replacement);
+
+        close.resolve(result);
+        await deleting;
+        await flushPromises();
+
+        expect(state.sessions.get(sessionId)).toBe(replacement);
+        expect(state.closingSessions.has(sessionId)).toBe(false);
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+        await next.onSessionDeleted({
+          type: 'session.deleted',
+          properties: { sessionID: sessionId },
+        });
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+        expect(mockMultiplexer.closePane).toHaveBeenLastCalledWith(
+          'replacement-pane',
+        );
+        expect(state.sessions.has(sessionId)).toBe(false);
+        await next.cleanup();
+      });
+    }
 
     test('closes all tracked panes concurrently', async () => {
       const ctx = createMockContext();
@@ -2528,7 +3141,62 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p2');
     });
 
-    test('clears spawning sessions during cleanup', async () => {
+    test('cleanup keeps polling retries alive after false and thrown closes', async () => {
+      for (const failure of ['false', 'throw'] as const) {
+        resetMultiplexerSessionManagerState();
+        mockSessionStatuses = {};
+        mockMultiplexer.spawnPane.mockReset();
+        mockMultiplexer.spawnPane.mockResolvedValue({
+          success: true,
+          paneId: `p-cleanup-retry-${failure}`,
+        });
+        mockMultiplexer.closePane.mockReset();
+        if (failure === 'false') {
+          mockMultiplexer.closePane
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true);
+        } else {
+          mockMultiplexer.closePane
+            .mockRejectedValueOnce(new Error('cleanup socket'))
+            .mockResolvedValueOnce(true);
+        }
+
+        const sessionId = `cleanup-retry-${failure}`;
+        const manager = new MultiplexerSessionManager(
+          createMockContext(),
+          defaultMultiplexerConfig,
+          undefined,
+          { closeRetryMs: 0 },
+        );
+        await manager.onSessionCreated({
+          type: 'session.created',
+          properties: { info: { id: sessionId, parentID: 'parent' } },
+        });
+
+        await manager.cleanup();
+
+        const state = manager as unknown as {
+          sessions: Map<
+            string,
+            { paneId: string; closeState?: Record<string, unknown> }
+          >;
+          pollInterval?: unknown;
+        };
+        expect(state.sessions.get(sessionId)).toMatchObject({
+          paneId: `p-cleanup-retry-${failure}`,
+          closeState: { phase: 'retrying', attempts: 1 },
+        });
+        expect(state.pollInterval).toBeDefined();
+
+        await (manager as any).pollSessions();
+
+        expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(2);
+        expect(state.sessions.has(sessionId)).toBe(false);
+        expect(state.pollInterval).toBeUndefined();
+      }
+    });
+
+    test('cleanup fences the in-flight spawn and clears spawning for later creates', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(
         ctx,
@@ -2556,9 +3224,13 @@ describe('MultiplexerSessionManager', () => {
       deferred.resolve({ success: true, paneId: 'p-cleanup' });
       await Promise.all([createPromise, cleanupPromise]);
 
+      // The in-flight readiness pass was fenced by cleanup: no pane spawns.
+      expect(mockMultiplexer.spawnPane).not.toHaveBeenCalled();
+
       await manager.onSessionCreated(event);
 
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
+      await manager.cleanup();
     });
   });
 });

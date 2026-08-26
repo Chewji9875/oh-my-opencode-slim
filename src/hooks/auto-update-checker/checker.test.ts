@@ -108,6 +108,49 @@ describe('auto-update-checker/checker', () => {
       statSpy.mockRestore();
       readSpy.mockRestore();
     });
+
+    test('returns version from a BOM-prefixed config', async () => {
+      const existsSpy = spyOn(fs, 'existsSync').mockImplementation(
+        (p: string) => {
+          if (p.includes('opencode.json')) return true;
+          if (p.includes('package.json')) return true;
+          return false;
+        },
+      );
+      const statSpy = spyOn(fs, 'statSync').mockImplementation(
+        () =>
+          ({
+            isDirectory: () => true,
+          }) as unknown as fs.Stats,
+      );
+      const readSpy = spyOn(fs, 'readFileSync').mockImplementation(
+        (p: string) => {
+          if (p.includes('opencode.json')) {
+            // A UTF-8 BOM (RFC 8259 permits one) must not break JSON.parse.
+            return `\uFEFF${JSON.stringify({
+              plugin: ['file:///dev/oh-my-opencode-slim'],
+            })}`;
+          }
+          if (p.includes('package.json')) {
+            return JSON.stringify({
+              name: 'oh-my-opencode-slim',
+              version: '1.2.3-dev',
+            });
+          }
+          return '';
+        },
+      );
+
+      const { getLocalDevVersion } = await import(
+        `./checker?test=${importCounter++}`
+      );
+
+      expect(getLocalDevVersion('/test')).toBe('1.2.3-dev');
+
+      existsSpy.mockRestore();
+      statSpy.mockRestore();
+      readSpy.mockRestore();
+    });
   });
 
   describe('findPluginEntry', () => {
@@ -130,6 +173,28 @@ describe('auto-update-checker/checker', () => {
       expect(entry?.entry).toBe('oh-my-opencode-slim');
       expect(entry?.isPinned).toBe(false);
       expect(entry?.pinnedVersion).toBeNull();
+
+      existsSpy.mockRestore();
+      readSpy.mockRestore();
+    });
+
+    test('detects entry in a BOM-prefixed config', async () => {
+      const existsSpy = spyOn(fs, 'existsSync').mockImplementation(
+        (p: string) => p.includes('opencode.json'),
+      );
+      const readSpy = spyOn(fs, 'readFileSync').mockReturnValue(
+        `\uFEFF${JSON.stringify({
+          plugin: ['oh-my-opencode-slim'],
+        })}`,
+      );
+
+      const { findPluginEntry } = await import(
+        `./checker?test=${importCounter++}`
+      );
+
+      const entry = findPluginEntry('/test');
+      expect(entry).not.toBeNull();
+      expect(entry?.entry).toBe('oh-my-opencode-slim');
 
       existsSpy.mockRestore();
       readSpy.mockRestore();

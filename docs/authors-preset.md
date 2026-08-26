@@ -82,8 +82,7 @@ This is the exact configuration the author runs day-to-day.
         ]
       },
       "fixer": {
-        "model": "omniroute/antigravity/gemini-3-flash-agent",
-        "variant": "low",
+        "model": "xai/grok-4.5",
         "skills": [
           "vitest",
           "pnpm",
@@ -106,6 +105,16 @@ This is the exact configuration the author runs day-to-day.
       "orchestratorPrompt": "Delegate to @fast-generic for routine mechanical command work: git status/diff/log reconnaissance, normal commit preparation, creating commits, pushing commits, and no-edit command validation such as lint, typecheck, static verification, tests, builds, or package-manager equivalents. Ask it to inspect diffs before committing, stage only intended files, avoid secrets, preserve repository commit-message style, and report final commit hashes or push results. Do not use it for code edits, design work, architecture, debugging strategy, docs research, or destructive git history operations such as amend, rebase, reset --hard, clean, force-push, or deleting branches unless the user explicitly requested that exact operation.",
       "skills": [],
       "mcps": []
+    }
+  },
+  "acpAgents": {
+    "claude-acp": {
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+      "description": "Claude ACP agent for launching Claude Code",
+      "wrapperModel": "openai/gpt-5.6-luna-fast",
+      "permissionMode": "allow",
+      "timeoutMs": 0
     }
   },
   "tmux": {
@@ -147,4 +156,3 @@ Each skill is listed with a short description and its source. The config block a
 | `workers-best-practices` | Worker best practices | `author` |
 
 For the complete configuration reference, see [Configuration](configuration.md).
-

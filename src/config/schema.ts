@@ -50,6 +50,11 @@ export const PermissionConfigSchema = z.union([
 ]);
 
 // Agent override configuration (distinct from SDK's AgentConfig)
+export const ModelInheritanceSourceSchema = z.enum(['session', 'orchestrator']);
+export type ModelInheritanceSource = z.infer<
+  typeof ModelInheritanceSourceSchema
+>;
+
 export const AgentOverrideConfigSchema = z
   .object({
     model: z
@@ -68,6 +73,7 @@ export const AgentOverrideConfigSchema = z
           .min(1),
       ])
       .optional(),
+    inheritModelFrom: ModelInheritanceSourceSchema.optional(),
     temperature: z.number().min(0).max(2).optional(),
     variant: z.string().optional().catch(undefined),
     skills: z.array(z.string()).optional(), // skills this agent can use ("*" = all, "!item" = exclude)
@@ -131,6 +137,30 @@ export type Preset = z.infer<typeof PresetSchema>;
 export const McpNameSchema = z.enum(['context7', 'gh_grep']);
 export type McpName = z.infer<typeof McpNameSchema>;
 
+const InterviewOutputFolderSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .regex(
+    /^(?![\\/])(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/,
+    'outputFolder must be a relative path without parent-directory traversal',
+  );
+
+export const InterviewConfigSchema = z.object({
+  maxQuestions: z.number().int().min(1).max(10).default(2),
+  outputFolder: InterviewOutputFolderSchema.default('interview'),
+  autoOpenBrowser: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Automatically open the interview UI in your default browser during interactive runs. Disabled automatically in tests and CI.',
+    ),
+  port: z.number().int().min(0).max(65535).default(0),
+  dashboard: z.boolean().default(false),
+});
+
+export type InterviewConfig = z.infer<typeof InterviewConfigSchema>;
+
 export const BackgroundJobsConfigSchema = z.object({
   strategy: z
     .enum(['latest', 'checkpoint-compatible'])
@@ -151,11 +181,27 @@ export const BackgroundJobsConfigSchema = z.object({
     .describe(
       'Maximum board snapshots retained per checkpoint cache epoch (1–100). Exceeding the limit starts a new epoch with the current snapshot and intentionally creates one cache miss.',
     ),
-  continueOnIdle: z
-    .boolean()
-    .default(false)
+  orchestratorWake: z
+    .object({
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe(
+          'When true, idle orchestrator sessions with incomplete todos may receive periodic internal wake prompts. Default enabled.',
+        ),
+      intervalMs: z
+        .number()
+        .int()
+        .min(60_000)
+        .max(2_147_483_647)
+        .default(300_000)
+        .describe(
+          'Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 300,000 (5 minutes). 0 is invalid.',
+        ),
+    })
+    .default({ enabled: true, intervalMs: 300_000 })
     .describe(
-      'Beta opt-in. When true, idle orchestrator sessions with incomplete todos may receive one automatic hidden continuation prompt. Disabled by default; idle reconciliation and background-job orchestration continue without automatic continuation prompts.',
+      'Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 5-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.',
     ),
   wallClockTimeoutMs: z
     .union([z.literal(0), z.number().int().min(60_000).max(2_147_483_647)])
@@ -171,6 +217,12 @@ export const BackgroundJobsConfigSchema = z.object({
     .default(10_000)
     .describe(
       'Grace period after a wall-clock deadline while OpenCode confirms the child terminal state (1,000–60,000ms).',
+    ),
+  waitForUserGuard: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
     ),
 });
 
@@ -399,6 +451,7 @@ export const PluginConfigSchema = z
       ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),
+    interview: InterviewConfigSchema.optional(),
     backgroundJobs: BackgroundJobsConfigSchema.optional(),
     fallback: FailoverConfigSchema.optional(),
     council: CouncilConfigSchema.optional(),

@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/alvinunreal/oh-my-opencode-slim/stargazers">
-    <img src="img/v2.webp" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
+    <img src="img/v2.jpg" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
   </a>
   <h3>✨ oh-my-opencode-slim ✨</h3>
 
@@ -171,12 +171,12 @@ bun run build
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
+      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
       "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
+      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -235,7 +235,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/orchestrator.png" width="240" style="border-radius: 10px;">
+      <img src="img/orchestrator.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>복잡성의 공허 속에서 단련되다.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -276,7 +276,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/explorer.png" width="240" style="border-radius: 10px;">
+      <img src="img/explorer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>지식을 나르는 바람.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -317,7 +317,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/oracle.png" width="240" style="border-radius: 10px;">
+      <img src="img/oracle.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>갈림길에서 들리는 목소리.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -361,7 +361,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/council.png" width="240" style="border-radius: 10px;">
+      <img src="img/council.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>여러 정신, 하나의 결론.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -407,7 +407,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/librarian.png" width="240" style="border-radius: 10px;">
+      <img src="img/librarian.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>이해를 엮는 자.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -448,7 +448,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/designer.png" width="240" style="border-radius: 10px;">
+      <img src="img/designer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>아름다움은 필수적이다.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -489,7 +489,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/fixer.png" width="240" style="border-radius: 10px;">
+      <img src="img/fixer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>비전과 현실 사이의 마지막 단계.</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -650,6 +650,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Clonedeps](docs/clonedeps.md)** | 선택한 의존성 소스를 무시된 로컬 워크스페이스에 복제하여 검사 |
 | **[Worktrees](docs/worktrees.md)** | `.slim/worktrees/` lane을 사용해 격리된 병렬 또는 고위험 코딩 작업 수행 |
 | **[Preset Switching](docs/preset-switching.md)** | `/preset`으로 런타임에 에이전트 모델 프리셋 전환 |
+| **[Interview](docs/interview.md)** | 브라우저 기반 Q&A 흐름을 통해 거친 아이디어를 구조화된 마크다운 명세로 변환 |
 | **[Companion](docs/companion.md)** | 파싱, 도움말, 타입을 위한 플로팅 창 companion |
 
 ### ⚙️ 설정 & 레퍼런스

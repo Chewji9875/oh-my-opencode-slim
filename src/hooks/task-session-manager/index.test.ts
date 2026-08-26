@@ -5,6 +5,7 @@ import {
   BackgroundJobBoard,
   BackgroundJobSupervisor,
   createInternalAgentTextPart,
+  getBackgroundJobLifecycleLedger,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils';
 import {
@@ -13,13 +14,10 @@ import {
 } from '../phase-reminder';
 import { createPostFileToolNudgeHook } from '../post-file-tool-nudge';
 import {
-  hasConsumedContinuationAttempt,
-  resetContinuationAttemptGateForTests,
-} from './continuation-attempt-gate';
-import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
   createTaskSessionManagerHook,
 } from './index';
+import { resetUserWaitGateForTests } from './user-wait-gate';
 
 // Route getClient back to _ctx.client so existing _ctx.client.session
 // mocks continue to work through the new v2 lookup path.
@@ -80,6 +78,26 @@ function taskLaunchOutput(taskID: string): string {
   ].join('\n');
 }
 
+function historicalRunningTaskPart(
+  taskID: string,
+  input: Record<string, unknown> = {
+    background: true,
+    subagent_type: 'explorer',
+    description: 'recover scheduler task',
+    prompt: 'inspect scheduler state',
+  },
+) {
+  return {
+    type: 'tool',
+    tool: 'task',
+    state: {
+      status: 'running',
+      input,
+      output: taskLaunchOutput(taskID),
+    },
+  };
+}
+
 type HookOptions = {
   shouldManageSession?: (sessionID: string) => boolean;
   registerSessionAsOrchestrator?: (sessionID: string) => void;
@@ -87,12 +105,13 @@ type HookOptions = {
   readContextMaxFiles?: number;
   strategy?: 'latest' | 'checkpoint-compatible';
   maxRetainedSnapshots?: number;
-  continueOnIdle?: boolean;
   backgroundJobBoard?: BackgroundJobBoard;
   sessionStatus?: unknown;
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
+  runtimeStatusReconcileDelayMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
+  willAttemptFallback?: (sessionID: string) => boolean;
   coordinator?: SessionLifecycle;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
 };
@@ -116,74 +135,19 @@ function createHook(options?: HookOptions) {
       strategy: options?.strategy,
       readContextMinLines: options?.readContextMinLines,
       readContextMaxFiles: options?.readContextMaxFiles,
-      continueOnIdle: options?.continueOnIdle ?? false,
       backgroundJobBoard: options?.backgroundJobBoard,
       backgroundJobSupervisor: options?.backgroundJobSupervisor,
       shouldManageSession: options?.shouldManageSession ?? (() => true),
       registerSessionAsOrchestrator: options?.registerSessionAsOrchestrator,
       isFallbackInProgress: options?.isFallbackInProgress,
+      willAttemptFallback: options?.willAttemptFallback,
       coordinator: options?.coordinator,
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
+      runtimeStatusReconcileDelayMs: options?.runtimeStatusReconcileDelayMs,
     },
   );
 
   return { hook };
-}
-
-function createContinuationHook(options?: HookOptions) {
-  return createHook({
-    ...options,
-    continueOnIdle: options?.continueOnIdle ?? true,
-  });
-}
-
-function createContinuationSessionClient(
-  promptAsync: unknown,
-  overrides?: Record<string, unknown>,
-): Record<string, unknown> {
-  return {
-    todo: mock(async () => ({ data: [{ status: 'in_progress' }] })),
-    children: mock(async () => ({ data: [] })),
-    status: mock(async () => ({ data: {} })),
-    promptAsync,
-    ...overrides,
-  };
-}
-
-function createRuntimeUserTurn(options: {
-  sessionID?: string;
-  messageID: string;
-  providerID: string;
-  modelID: string;
-  variant?: string;
-}) {
-  const sessionID = options.sessionID ?? 'parent-1';
-  const model = {
-    providerID: options.providerID,
-    modelID: options.modelID,
-  };
-  const parts = [{ type: 'text', text: 'continue with this model' }];
-  return {
-    input: {
-      sessionID,
-      messageID: options.messageID,
-      model,
-      ...(options.variant ? { variant: options.variant } : {}),
-      parts,
-    },
-    output: {
-      message: {
-        id: options.messageID,
-        sessionID,
-        role: 'user' as const,
-        model: {
-          ...model,
-          ...(options.variant ? { variant: options.variant } : {}),
-        },
-      },
-      parts,
-    },
-  };
 }
 
 function createMessages(sessionID: string, text = 'user message') {
@@ -269,7 +233,7 @@ function setupCompletedJob(
 describe('task-session-manager hook', () => {
   beforeEach(() => {
     // Process-global gate only — never reset inside createHook/production paths.
-    resetContinuationAttemptGateForTests();
+    resetUserWaitGateForTests();
   });
 
   test('ignores messages without OpenCode info or parts', async () => {
@@ -308,6 +272,294 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain(
       'exp-1 / child-1 / explorer / running',
     );
+  });
+
+  test('rehydrates historical background tasks and keeps absent children provisional', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('historical-child')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      background: true,
+      agent: 'explorer',
+      description: 'recover scheduler task',
+      objective: 'recover scheduler task',
+    });
+    expect(boardText(messages)).toContain(
+      'historical-child / explorer / running, status uncertain',
+    );
+  });
+
+  test('rehydrated long objectives keep the duplicate-spawn guard effective', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const longObjective = `${'z'.repeat(60)} rehydrated objective`;
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            historicalRunningTaskPart('historical-long', {
+              background: true,
+              subagent_type: 'oracle',
+              description: longObjective,
+            }),
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    // Rehydration stores the untruncated objective, not just the label.
+    expect(board.get('historical-long')).toMatchObject({
+      description: longObjective.slice(0, 48),
+      objective: longObjective,
+    });
+
+    // Mark it terminal-unreconciled, then spawn an exact duplicate.
+    board.updateStatus({
+      taskID: 'historical-long',
+      state: 'stopped',
+      resultSummary: 'no result',
+      now: 200,
+    });
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'rehydrated-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
+  test('rehydrates a completed tool call when its child output is still running', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionStatus: {},
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const taskPart = historicalRunningTaskPart('completed-call-child');
+    taskPart.state.status = 'completed';
+    const messages = {
+      messages: [
+        {
+          info: { role: 'assistant', sessionID: 'parent-1' },
+          parts: [taskPart],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('completed-call-child')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+  });
+
+  test('consumes historical terminal completion before restart reconciliation', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: { role: 'assistant', sessionID: 'parent-1' },
+          parts: [historicalRunningTaskPart('completed-child')],
+        },
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              synthetic: true,
+              text: [
+                '<task id="completed-child" state="completed">',
+                '<summary>Background task completed: recovered</summary>',
+                '<task_result>',
+                'historical result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('completed-child')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+      resultSummary: 'historical result',
+    });
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  test('keeps a rehydrated child running when live status is busy', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionStatus: { 'historical-child': { type: 'busy' } },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+    expect(board.get('historical-child')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+    });
+    expect(boardText(messages)).toContain(
+      'historical-child / explorer / running',
+    );
+  });
+
+  test('ignores foreground, terminal, and malformed historical task parts', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            historicalRunningTaskPart('foreground-child', {
+              background: false,
+              subagent_type: 'explorer',
+            }),
+            {
+              ...historicalRunningTaskPart('terminal-child'),
+              state: {
+                ...historicalRunningTaskPart('terminal-child').state,
+                status: 'completed',
+                output: [
+                  'task_id: terminal-child',
+                  'state: completed',
+                  '',
+                  '<task_result>',
+                  'done',
+                  '</task_result>',
+                ].join('\n'),
+              },
+            },
+            historicalRunningTaskPart('missing-id', {
+              background: true,
+              subagent_type: 'explorer',
+            }),
+          ],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    (
+      messages.messages[0].parts[2] as { state: { output: string } }
+    ).state.output = 'state: running\nmalformed output';
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.list()).toHaveLength(0);
+  });
+
+  test('rehydration is idempotent across repeated transforms', async () => {
+    const board = new BackgroundJobBoard();
+    const status = mock(async () => ({ data: {} }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('historical-child')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+    const first = board.get('historical-child');
+    await transformMessages(hook, messages as never);
+    const second = board.get('historical-child');
+
+    expect(second).toMatchObject({
+      alias: first?.alias,
+      generation: first?.generation,
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(status).toHaveBeenCalledTimes(1);
   });
 
   test('stores background task launches in job board prompt context', async () => {
@@ -1235,6 +1487,53 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain('Result: plan is sound');
   });
 
+  test('resumes acknowledged cancelled and errored sessions through task_id', async () => {
+    for (const state of ['cancelled', 'error'] as const) {
+      const board = new BackgroundJobBoard();
+      const original = board.registerLaunch({
+        taskID: `child-${state}`,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: `${state} review`,
+      });
+      board.updateStatus({ taskID: original.taskID, state });
+      const { hook } = createHook({ backgroundJobBoard: board });
+
+      const beforeAcknowledgement = {
+        args: { subagent_type: 'oracle', task_id: original.alias },
+      };
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-before-ack` },
+        beforeAcknowledgement,
+      );
+      expect(beforeAcknowledgement.args.task_id).toBeUndefined();
+
+      board.markReconciled(original.taskID);
+
+      const resume = {
+        args: { subagent_type: 'oracle', task_id: original.alias },
+      };
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-resume` },
+        resume,
+      );
+      expect(resume.args.task_id).toBe(original.taskID);
+
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: `${state}-resume` },
+        {
+          output: [`task_id: ${original.taskID}`, 'state: running'].join('\n'),
+        },
+      );
+
+      expect(board.get(original.taskID)).toMatchObject({
+        generation: original.generation + 1,
+        state: 'running',
+        terminalUnreconciled: false,
+      });
+    }
+  });
+
   test('keeps task timeout as a running timed-out job', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -1351,6 +1650,313 @@ describe('task-session-manager hook', () => {
       timedOut: false,
       recoverableAfterLiveBusy: true,
     });
+  });
+
+  test('holds a relaunch lease through after and releases it after registration', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.markReconciled('child-1');
+    const { hook } = createHook({ backgroundJobBoard: board });
+    const resume = {
+      args: { subagent_type: 'oracle', task_id: 'ora-1' },
+    };
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      resume,
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    const relaunched = board.get('child-1');
+    expect(resume.args.task_id).toBe('child-1');
+    expect(relaunched).toMatchObject({ generation: 2, state: 'running' });
+    const cancellationLease = board.acquireCancellationLease(
+      'child-1',
+      relaunched?.generation ?? -1,
+    );
+    expect(cancellationLease).toBeDefined();
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('session.created cannot early-register over a live cancellation lease', async () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+    });
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(cancellationLease).toBeDefined();
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { args: { subagent_type: 'oracle', background: true } },
+    );
+    await hook.event({
+      event: {
+        type: 'session.created',
+        properties: {
+          info: { id: 'child-1', parentID: 'parent-1', agent: 'oracle' },
+        },
+      },
+    });
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { output: ['task_id: child-1', 'state: running'].join('\n') },
+    );
+
+    expect(board.get('child-1')).toMatchObject({
+      generation: first.generation,
+      state: 'running',
+    });
+    expect(board.acquireRelaunchLease('child-1', first.generation)).toBe(
+      undefined,
+    );
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('tool.execute.before refuses a relaunch while cancellation owns the generation', async () => {
+    const board = new BackgroundJobBoard();
+    const first = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+    });
+    board.updateStatus({
+      taskID: first.taskID,
+      state: 'running',
+      timedOut: true,
+    });
+    board.markRunningFromLiveSession(
+      first.taskID,
+      Date.now(),
+      first.generation,
+    );
+    const cancellationLease = board.acquireCancellationLease(
+      first.taskID,
+      first.generation,
+    );
+    expect(cancellationLease).toBeDefined();
+    const { hook } = createHook({ backgroundJobBoard: board });
+    const resume = { args: { subagent_type: 'fixer', task_id: 'fix-1' } };
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'blocked-resume' },
+        resume,
+      ),
+    ).rejects.toThrow('cannot be resumed safely');
+    expect(resume.args.task_id).toBe('fix-1');
+    expect(board.get(first.taskID)?.generation).toBe(first.generation);
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
+  });
+
+  test('blocks a new spawn duplicating an unreconciled terminal job objective', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'dup-1' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: '  Review   Plan ',
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
+  test('allows re-dispatch after the terminal result was retrieved', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'review plan',
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    const spawn = {
+      args: {
+        subagent_type: 'oracle',
+        background: true,
+        description: 'review plan',
+      },
+    };
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+        spawn,
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+
+    // task_result retrieval marks the job used after completion (#1070 escape hatch).
+    board.markUsed('parent-1', 'child-1', 300);
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'retry-1' },
+      spawn,
+    );
+  });
+
+  test('does not block objectives truncated at the 48-char label boundary', async () => {
+    const board = new BackgroundJobBoard();
+    const sharedPrefix = 'x'.repeat(48);
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: `${sharedPrefix} distinct suffix A`,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Different suffix after the shared 48-char prefix: the full objective
+    // differs, so the guard must not treat it as a duplicate.
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'long-objective' },
+      {
+        args: {
+          subagent_type: 'oracle',
+          background: true,
+          description: `${sharedPrefix} distinct suffix B`,
+        },
+      },
+    );
+  });
+
+  test('blocks an exact duplicate whose objective exceeds the 48-char label', async () => {
+    const board = new BackgroundJobBoard();
+    const longObjective = `${'y'.repeat(60)} exact duplicate`;
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: longObjective,
+      now: 100,
+    });
+    board.updateStatus({
+      taskID: 'child-2',
+      state: 'completed',
+      resultSummary: 'done',
+      now: 200,
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    // Identical long objective: even though the derived label truncates at
+    // 48 chars, the full-objective comparison must still block the duplicate.
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'exact-long-dup' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: longObjective,
+          },
+        },
+      ),
+    ).rejects.toThrow('awaiting acknowledgment');
+  });
+
+  test('after output errors still release a pending relaunch lease', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-error' },
+      { args: { subagent_type: 'oracle', task_id: 'ora-1' } },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-error' },
+      { output: undefined },
+    );
+
+    const secondLease = board.acquireRelaunchLease('child-1', 1);
+    expect(secondLease).toBeDefined();
+    if (!secondLease) throw new Error('relaunch lease was not released');
+    board.releaseLease(secondLease);
+  });
+
+  test('after handler exceptions release a pending relaunch lease', async () => {
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    board.markReconciled('child-1');
+    board.addContext = () => {
+      throw new Error('context tracking failed');
+    };
+    const { hook } = createHook({ backgroundJobBoard: board });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-throw' },
+      { args: { subagent_type: 'oracle', task_id: 'ora-1' } },
+    );
+    await expect(
+      hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'resume-throw' },
+        { output: ['task_id: child-1', 'state: running'].join('\n') },
+      ),
+    ).rejects.toThrow('context tracking failed');
+
+    const cancellationLease = board.acquireCancellationLease('child-1', 2);
+    expect(cancellationLease).toBeDefined();
+    if (!cancellationLease) {
+      throw new Error('cancellation lease was not acquired');
+    }
+    board.releaseLease(cancellationLease);
   });
 
   test('does not bypass live busy recovery gate for known raw session ids', async () => {
@@ -2319,7 +2925,7 @@ describe('task-session-manager hook', () => {
     });
   });
 
-  test('new synthetic message occurrence updates board after task relaunch with same state/result', async () => {
+  test('does not accept an unobserved weak occurrence after task relaunch', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -2361,9 +2967,9 @@ describe('task-session-manager hook', () => {
 
     await transformMessages(hook, firstMessages);
     expect(board.get('child-1')).toMatchObject({
-      state: 'completed',
-      terminalUnreconciled: true,
-      resultSummary: 'same result',
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
     });
 
     // Relaunch same task ID
@@ -2379,7 +2985,7 @@ describe('task-session-manager hook', () => {
       terminalUnreconciled: false,
     });
 
-    // New synthetic message occurrence with same state/result - should update to terminal
+    // A weak occurrence without runtime provenance remains fail-closed.
     const secondMessages = {
       messages: [
         {
@@ -2410,11 +3016,11 @@ describe('task-session-manager hook', () => {
 
     await transformMessages(hook, secondMessages);
 
-    // Should be terminal again because this is a new message occurrence
+    // The unobserved weak occurrence remains fail-closed.
     expect(board.get('child-1')).toMatchObject({
-      state: 'completed',
-      terminalUnreconciled: true,
-      resultSummary: 'same result',
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
     });
   });
 
@@ -2794,9 +3400,9 @@ describe('task-session-manager hook', () => {
     await transformMessages(hook, messages);
 
     expect(messages.messages[0].parts.at(-1)?.text).toContain(
-      'state: cancelled',
+      'cancelled, reconciled',
     );
-    expect(messages.messages[0].parts.at(-1)?.text).toContain(
+    expect(board.get('child-1')?.resultSummary).toBe(
       'cancelled: user requested',
     );
     expect(messages.messages[0].parts[0].text).not.toContain(
@@ -3517,6 +4123,134 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('LLM proxy connection refused');
   });
 
+  test('persistent 401 session.error on managed session records board error when fallback cannot recover', async () => {
+    // 401/410 are persistent (not recovered once the fallback chain is
+    // exhausted) and must surface as an error, not a false completion.
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      // No chain / chain exhausted / fallback disabled → error is final.
+      willAttemptFallback: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    const job = board.get('parent-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('Unauthorized');
+  });
+
+  test('terminalizes deferred 401 as error when the session idles unrecovered', async () => {
+    // A 401/410 with a fallback model available is reprompted by
+    // ForegroundFallbackManager; terminalizing at session.error time
+    // would leave a recovered job permanently failed. But if the session
+    // ends (idle) without recovery — e.g. execFallback failed silently —
+    // the deferred error must terminalize as 'error', not the false
+    // 'completed' the child-idle path would record.
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+
+    // Deferred: job still running while the fallback may recover.
+    expect(board.get('parent-1')?.state).toBe('running');
+
+    // The fallback never recovered the session; it went idle instead.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')).toMatchObject({
+      state: 'error',
+      resultSummary:
+        'Session error after failed model fallback (auth/model unavailable)',
+    });
+  });
+
+  test('clears deferred 401 when live busy shows the session recovered', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      willAttemptFallback: () => true,
+      idleReconcileDelayMs: 0,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: { statusCode: 401, message: 'Unauthorized' },
+        },
+      },
+    });
+    expect(board.get('parent-1')?.state).toBe('running');
+
+    // Fallback re-prompt landed: live busy cancels the deferred error.
+    await hook.event({
+      event: {
+        type: 'session.status',
+        properties: {
+          sessionID: 'parent-1',
+          status: { type: 'busy' },
+        },
+      },
+    });
+
+    // Idle after recovery completes the job normally — not as an error.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('parent-1')?.state).not.toBe('error');
+  });
+
   test('session.idle does not overwrite error state with completed', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
@@ -3678,7 +4412,7 @@ describe('task-session-manager hook', () => {
     expect(resume.args.task_id).toBe('child-1');
   });
 
-  test('only reconciled completed jobs resolve as reusable task sessions', async () => {
+  test('only acknowledged terminal jobs resolve as reusable task sessions', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -3714,7 +4448,11 @@ describe('task-session-manager hook', () => {
       { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
       failed,
     );
-    expect(failed.args.task_id).toBeUndefined();
+    expect(failed.args.task_id).toBe('err-1');
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-2' },
+      { output: ['task_id: err-1', 'state: running'].join('\n') },
+    );
 
     const completed = { args: { subagent_type: 'oracle', task_id: 'ora-1' } };
     await hook['tool.execute.before'](
@@ -4219,7 +4957,7 @@ describe('task-session-manager hook', () => {
     expect(messages.messages[0].parts[0].text).toBe('do something');
   });
 
-  test('reconciles running child session job from session.idle event', async () => {
+  test('keeps a running child provisional when idle has no terminal task result', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4241,8 +4979,114 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'running',
+      statusUncertain: true,
+      lastStatusError:
+        'Runtime session is idle; task termination is unconfirmed.',
+    });
+  });
+
+  test('idle timer does not notify terminal listeners before a late completion', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-late',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'late completion',
+    });
+    const listener = mock(() => {});
+    board.addTerminalStateListener(listener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: (id) => id === 'parent-1',
+      idleReconcileDelayMs: 0,
+    });
+
+    await hook.event({
+      event: {
+        type: 'session.idle',
+        properties: { sessionID: 'child-late' },
+      },
+    });
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-late')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(listener).not.toHaveBeenCalled();
+
+    board.updateStatus({
+      taskID: 'child-late',
+      state: 'completed',
+      resultSummary: 'late completion won',
+    });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(board.get('child-late')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'late completion won',
+    });
+  });
+
+  test('ignores an idle observation after the child has relaunched', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'first run',
+      now: 0,
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      idleReconcileDelayMs: 20,
+    });
+
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
+    });
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'second run',
+      now: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+  });
+
+  test('starts runtime reconciliation after task launch', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 0,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'runtime-check',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      { output: taskLaunchOutput('child-1') },
+    );
+    await flushChildIdleReconcile();
+
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4345,7 +5189,1216 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-2')).toBeUndefined();
   });
 
-  test('reconciles from idle when fallback guard passes', async () => {
+  test('does not rehydrate a deleted historical running task as a new alias', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-deleted',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'deleted task',
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    coordinator.dispatchSessionDeleted('child-deleted');
+    expect(board.get('child-deleted')).toBeUndefined();
+
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-deleted')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('child-deleted')).toBeUndefined();
+    expect(board.list()).toHaveLength(0);
+  });
+
+  test('clears a delete tombstone for a legitimate subsequent launch', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-relaunched',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'first run',
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'old-call' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'old run',
+        },
+      },
+    );
+    coordinator.dispatchSessionDeleted('child-relaunched');
+    expect(board.get('child-relaunched')).toBeUndefined();
+
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'old-call' },
+      { output: taskLaunchOutput('child-relaunched') },
+    );
+    expect(board.get('child-relaunched')).toBeUndefined();
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      {
+        args: {
+          subagent_type: 'fixer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'new-call' },
+      { output: taskLaunchOutput('child-relaunched') },
+    );
+
+    expect(board.get('child-relaunched')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+
+    const messages = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-relaunched')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    await transformMessages(hook, messages as never);
+
+    expect(board.get('child-relaunched')).toMatchObject({
+      state: 'running',
+      generation: 2,
+      description: 'second run',
+    });
+    expect(board.list()).toHaveLength(1);
+  });
+
+  test('fences a re-injected generation-one completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    const oldCompletion = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              id: 'generation-one-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-relaunch" state="completed">',
+                '<summary>Background task completed: first run</summary>',
+                '<task_result>',
+                'old result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+
+    await first.hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion.messages[0].parts[0] },
+      },
+    });
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 1,
+      state: 'running',
+    });
+
+    // The runtime event observed P1, but its message has not reached the
+    // transform hook yet.
+    expect(terminalListener).not.toHaveBeenCalled();
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+    expect(board.get('child-relaunch')).toBeUndefined();
+
+    // A recreated hook shares the board's lifecycle fence, while its local
+    // processed-occurrence set is intentionally fresh.
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      { output: taskLaunchOutput('child-relaunch') },
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+    expect(terminalListener).not.toHaveBeenCalled();
+
+    const replayedCompletion = {
+      messages: JSON.parse(JSON.stringify(oldCompletion.messages)),
+    };
+    await hook['experimental.chat.messages.transform'](
+      {},
+      replayedCompletion as never,
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two-result' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run result',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two-result' },
+      {
+        output: [
+          'task_id: child-relaunch',
+          'state: completed',
+          '',
+          '<task_result>',
+          'new result',
+          '</task_result>',
+        ].join('\n'),
+      },
+    );
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'completed',
+      resultSummary: 'new result',
+      statusUncertain: false,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps an ambiguous old completion fail-closed after a late event', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    const oldCompletion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'generation-one-message',
+      text: [
+        '<task id="child-relaunch" state="completed">',
+        '<summary>Background task completed: first run</summary>',
+        '<task_result>',
+        'old result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+    expect(board.get('child-relaunch')).toBeUndefined();
+
+    // The first event arrives after deletion, with no live board record to
+    // establish which generation produced the terminal part.
+    await first.hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion },
+      },
+    });
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      {
+        args: {
+          subagent_type: 'explorer',
+          background: true,
+          description: 'second run',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'generation-two' },
+      { output: taskLaunchOutput('child-relaunch') },
+    );
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+    });
+
+    // A late event for the old P1 part must not replace the ambiguous origin
+    // with G2 provenance.
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: oldCompletion },
+      },
+    });
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [oldCompletion],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('fails closed for a newly observed synthetic completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'second run',
+    });
+
+    const completion = {
+      type: 'text',
+      id: 'generation-two-completion',
+      synthetic: true,
+      sessionID: 'parent-1',
+      messageID: 'message-generation-two',
+      text: [
+        '<task id="child-relaunch" state="completed">',
+        '<summary>Background task completed: second run</summary>',
+        '<task_result>',
+        'new synthetic result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [completion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(board.get('child-relaunch')?.resultSummary).toBeUndefined();
+  });
+
+  test('allows an observed synthetic completion in the same generation', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-same-generation',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'same generation',
+    });
+
+    const completion = {
+      type: 'text',
+      id: 'same-generation-completion',
+      synthetic: true,
+      text: [
+        '<task id="child-same-generation" state="completed">',
+        '<summary>Background task completed: same generation</summary>',
+        '<task_result>',
+        'same generation result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [completion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-same-generation')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'same generation result',
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails closed for an unobserved synthetic completion after deletion', async () => {
+    const coordinator = new SessionLifecycle(() => {});
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const first = createHook({
+      backgroundJobBoard: board,
+      coordinator,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+
+    await first.hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-relaunch' },
+      },
+    });
+    coordinator.dispatchSessionDeleted('child-relaunch');
+
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'second run',
+    });
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [
+            {
+              type: 'text',
+              id: 'unobserved-completion',
+              synthetic: true,
+              text: [
+                '<task id="child-relaunch" state="completed">',
+                '<summary>Background task completed: unknown origin</summary>',
+                '<task_result>',
+                'ambiguous result',
+                '</task_result>',
+                '</task>',
+              ].join('\n'),
+            },
+          ],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-relaunch')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('accepts a host messageID occurrence in the current generation', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-ambiguous',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'ambiguous observation',
+    });
+
+    const observedCompletion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'ambiguous-message',
+      text: [
+        '<task id="child-ambiguous" state="completed">',
+        '<summary>Background task completed: uncertain</summary>',
+        '<task_result>',
+        'uncertain result',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: observedCompletion },
+      },
+    });
+    const transformedCompletion = { ...observedCompletion };
+    delete transformedCompletion.messageID;
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'ambiguous-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [transformedCompletion],
+        },
+      ],
+    } as never);
+
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'ambiguous-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...transformedCompletion }],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-ambiguous')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'uncertain result',
+      terminalUnreconciled: true,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps a host completion without observed provenance fail-closed', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-no-host-provenance',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'no host provenance',
+    });
+
+    const completion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'unobserved-host-message',
+      text: [
+        '<task id="child-no-host-provenance" state="completed">',
+        '<summary>Background task completed: unobserved</summary>',
+        '<task_result>unobserved result</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'unobserved-host-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...completion, messageID: undefined }],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-no-host-provenance')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('keeps an exact explicit ID collision independent from host provenance', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-explicit-host-prefix',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'explicit host prefix',
+    });
+    const hostCompletion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'collision-host-message',
+      text: [
+        '<task id="child-explicit-host-prefix" state="completed">',
+        '<summary>Background task completed: host</summary>',
+        '<task_result>host result</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: hostCompletion },
+      },
+    });
+    const hostOrigin = [
+      ...getBackgroundJobLifecycleLedger(board).syntheticTerminalOccurrences.values(),
+    ][0];
+    if (!hostOrigin) throw new Error('host origin was not recorded');
+
+    const explicitCompletion = {
+      type: 'text',
+      id: hostOrigin.occurrenceID,
+      synthetic: true,
+      text: [
+        '<task id="child-explicit-host-prefix" state="completed">',
+        '<summary>Background task completed: explicit</summary>',
+        '<task_result>explicit result</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: explicitCompletion },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [hostCompletion],
+        },
+      ],
+    } as never);
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [explicitCompletion],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-explicit-host-prefix')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'explicit result',
+      terminalUnreconciled: true,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects weak provenance after relaunch without session deletion', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-undetected-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'first run',
+    });
+    const completion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'undetected-relaunch-message',
+      text: [
+        '<task id="child-undetected-relaunch" state="completed">',
+        '<summary>Background task completed: first run</summary>',
+        '<task_result>old result</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    board.updateStatus({
+      taskID: 'child-undetected-relaunch',
+      state: 'completed',
+      resultSummary: 'first run',
+    });
+    const relaunched = board.registerLaunch({
+      taskID: 'child-undetected-relaunch',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'second run',
+    });
+    terminalListener.mockClear();
+    // The old message is first observed only after the same-ID relaunch.
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'undetected-relaunch-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...completion, messageID: undefined }],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-undetected-relaunch')).toMatchObject({
+      generation: relaunched.generation,
+      state: 'running',
+      statusUncertain: true,
+      resultSummary: undefined,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('does not reject weak provenance after an unrelated task deletion', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-unrelated-delete',
+      parentSessionID: 'other-parent',
+      agent: 'explorer',
+      description: 'child-unrelated-delete',
+    });
+    board.registerLaunch({
+      taskID: 'child-valid-host',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'child-valid-host',
+    });
+    const completion = {
+      type: 'text',
+      synthetic: true,
+      messageID: 'valid-host-message',
+      text: [
+        '<task id="child-valid-host" state="completed">',
+        '<summary>Background task completed: valid host</summary>',
+        '<task_result>valid result</task_result>',
+        '</task>',
+      ].join('\n'),
+    };
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: completion },
+      },
+    });
+    await hook.event({
+      event: {
+        type: 'session.deleted',
+        properties: { sessionID: 'child-unrelated-delete' },
+      },
+    });
+
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'valid-host-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...completion, messageID: undefined }],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-valid-host')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'valid result',
+      terminalUnreconciled: true,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps a distinct weak origin after processing the first one fail-closed', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-processed-weak-origin',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'processed weak origin',
+    });
+    const completion = (result: string) => ({
+      type: 'text',
+      synthetic: true,
+      messageID: 'shared-processed-message',
+      text: [
+        '<task id="child-processed-weak-origin" state="completed">',
+        '<summary>Background task completed: processed</summary>',
+        `<task_result>${result}</task_result>`,
+        '</task>',
+      ].join('\n'),
+    });
+    const first = completion('first result');
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: first },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'shared-processed-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...first, messageID: undefined }],
+        },
+      ],
+    } as never);
+
+    const second = completion('second result');
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: second },
+      },
+    });
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            id: 'shared-processed-message',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [{ ...second, messageID: undefined }],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-processed-weak-origin')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'first result',
+      terminalUnreconciled: true,
+    });
+    expect(terminalListener).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps multiple current-generation host messageID origins fail-closed', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-multiple-host-origins',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'multiple host origins',
+    });
+
+    const completion = (messageID: string, result: string) => ({
+      type: 'text',
+      synthetic: true,
+      messageID,
+      text: [
+        '<task id="child-multiple-host-origins" state="completed">',
+        '<summary>Background task completed: multiple origins</summary>',
+        '<task_result>',
+        result,
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    });
+    const first = completion('host-message-shared', 'first result');
+    const second = completion('host-message-shared', 'second result');
+
+    for (const part of [first, second]) {
+      await hook.event({
+        event: {
+          type: 'message.part.updated',
+          properties: { part },
+        },
+      });
+    }
+
+    await hook['experimental.chat.messages.transform']({}, {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [first],
+        },
+      ],
+    } as never);
+
+    expect(board.get('child-multiple-host-origins')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      terminalUnreconciled: false,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('retains an old occurrence provenance after more than 500 later occurrences', async () => {
+    const board = new BackgroundJobBoard();
+    const terminalListener = mock(() => {});
+    board.addTerminalStateListener(terminalListener);
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-occurrence-ledger',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'generation one',
+    });
+
+    const completion = (id: string, result: string) => ({
+      type: 'text',
+      id,
+      synthetic: true,
+      text: [
+        '<task id="child-occurrence-ledger" state="completed">',
+        '<summary>Background task completed: occurrence</summary>',
+        '<task_result>',
+        result,
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    });
+
+    const firstCompletion = completion('p1-occurrence', 'old result');
+    await hook.event({
+      event: {
+        type: 'message.part.updated',
+        properties: { part: firstCompletion },
+      },
+    });
+
+    for (let index = 0; index < 501; index += 1) {
+      board.registerLaunch({
+        taskID: 'child-occurrence-ledger',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: `generation ${index + 2}`,
+      });
+      const laterCompletion = completion(
+        `later-occurrence-${index}`,
+        `result ${index}`,
+      );
+      await hook.event({
+        event: {
+          type: 'message.part.updated',
+          properties: { part: laterCompletion },
+        },
+      });
+      await hook['experimental.chat.messages.transform']({}, {
+        messages: [
+          {
+            info: {
+              role: 'user',
+              agent: 'orchestrator',
+              sessionID: 'parent-1',
+            },
+            parts: [laterCompletion],
+          },
+        ],
+      } as never);
+    }
+
+    terminalListener.mockClear();
+    const current = board.registerLaunch({
+      taskID: 'child-occurrence-ledger',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'current generation',
+    });
+    expect(current.generation).toBe(503);
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [JSON.parse(JSON.stringify(firstCompletion))],
+        },
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-occurrence-ledger')).toMatchObject({
+      generation: current.generation,
+      state: 'running',
+      statusUncertain: true,
+      resultSummary: undefined,
+    });
+    expect(terminalListener).not.toHaveBeenCalled();
+  });
+
+  test('direct drop suppresses historical rehydrate until a new launch clears it', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      runtimeStatusReconcileDelayMs: 60_000,
+    });
+    board.registerLaunch({
+      taskID: 'child-direct-drop',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'dropped run',
+    });
+
+    board.drop('child-direct-drop');
+    const ledger = getBackgroundJobLifecycleLedger(board);
+    expect(ledger.tombstones.has('child-direct-drop')).toBe(true);
+
+    const historical = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-direct-drop')],
+        },
+        ...createMessages('parent-1', 'continue').messages,
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, historical as never);
+    expect(board.get('child-direct-drop')).toBeUndefined();
+
+    const relaunched = board.registerLaunch({
+      taskID: 'child-direct-drop',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'new run',
+    });
+    expect(relaunched.generation).toBe(2);
+    expect(ledger.tombstones.has('child-direct-drop')).toBe(false);
+
+    const replay = {
+      messages: [
+        {
+          info: {
+            role: 'assistant',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+          },
+          parts: [historicalRunningTaskPart('child-direct-drop')],
+        },
+        ...createMessages('parent-1', 'continue again').messages,
+      ],
+    };
+    await hook['experimental.chat.messages.transform']({}, replay as never);
+
+    expect(board.get('child-direct-drop')).toMatchObject({
+      generation: 2,
+      state: 'running',
+      description: 'new run',
+    });
+  });
+
+  test('marks idle as provisional when fallback guard passes', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4369,8 +6422,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4410,7 +6463,7 @@ describe('task-session-manager hook', () => {
     });
     expect(board.get('child-1')).toMatchObject({ state: 'running' });
 
-    // Second idle (real completion) — fallback no longer in progress
+    // Second idle remains provisional without an explicit task result.
     const hook2 = createHook({
       backgroundJobBoard: board,
       shouldManageSession: () => false,
@@ -4422,8 +6475,8 @@ describe('task-session-manager hook', () => {
     });
     await flushChildIdleReconcile();
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4541,15 +6594,15 @@ describe('task-session-manager hook', () => {
     });
 
     // Simulate parent tool never firing tool.execute.after (cancelled).
-    // Child goes idle after finishing — board must still reconcile.
+    // Child goes idle without task output — board remains provisional.
     await hook.event({
       event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
     });
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -4901,7 +6954,7 @@ describe('task-session-manager hook', () => {
     expect(job?.state).toBe('cancelled');
   });
 
-  test('idle via session.status idle path triggers reconciliation', async () => {
+  test('idle via session.status path remains provisional', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -4926,8 +6979,8 @@ describe('task-session-manager hook', () => {
     await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalState: 'completed',
+      state: 'running',
+      statusUncertain: true,
     });
   });
 
@@ -5094,40 +7147,7 @@ describe('task-session-manager hook', () => {
     ).toHaveLength(1);
   });
 
-  test('defaults continueOnIdle off: continuation SDK calls do not run', async () => {
-    const promptAsync = mock(async () => ({}));
-    const todo = mock(async () => ({ data: [{ status: 'in_progress' }] }));
-    const hook = createTaskSessionManagerHook(
-      {
-        client: {
-          session: {
-            todo,
-            children: mock(async () => ({ data: [] })),
-            status: mock(async () => ({ data: {} })),
-            promptAsync,
-          },
-        },
-        directory: '/tmp',
-        worktree: '/tmp',
-      } as never,
-      {
-        maxSessionsPerAgent: 2,
-        maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-        idleReconcileDelayMs: 0,
-        shouldManageSession: () => true,
-      },
-    );
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('explicit continueOnIdle false reconciles parent terminal job without continuation', async () => {
+  test('idle reconciliation still runs without orchestrator wake SDK calls', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -5143,7 +7163,6 @@ describe('task-session-manager hook', () => {
     const promptAsync = mock(async () => ({}));
     const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
     const { hook } = createHook({
-      continueOnIdle: false,
       backgroundJobBoard: board,
       idleReconcileDelayMs: 0,
       sessionClient: {
@@ -5173,804 +7192,11 @@ describe('task-session-manager hook', () => {
     expect(promptAsync).not.toHaveBeenCalled();
   });
 
-  test('continues after reconciling an injected parent terminal job', async () => {
-    const board = new BackgroundJobBoard();
-    setupCompletedJob(board);
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      backgroundJobBoard: board,
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.injectBackgroundJobBoard({}, createMessages('parent-1'));
-    expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
-      terminalUnreconciled: false,
-    });
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(promptAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        parts: [expect.objectContaining({ synthetic: true })],
-      }),
-    );
-  });
-
-  test('nudges once for incomplete todos when parent and children are inactive', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      continueOnIdle: true,
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'in_progress' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(promptAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionID: 'parent-1',
-        agent: 'orchestrator',
-        parts: [expect.objectContaining({ synthetic: true })],
-      }),
-    );
-  });
-
-  test('preserves the current session model and variant on continuation nudges', async () => {
-    const promptAsync = mock(async () => ({}));
-    const get = mock(async () => ({
-      data: {
-        model: {
-          providerID: 'runtime-provider',
-          id: 'selected-model',
-          variant: 'selected-variant',
-        },
-      },
-    }));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: createContinuationSessionClient(promptAsync, {
-        get,
-      }),
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(get).toHaveBeenCalledWith({
-      sessionID: 'parent-1',
-      throwOnError: true,
-    });
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(promptAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
-      }),
-    );
-  });
-
-  test('falls back to the latest external user model when session lookup fails', async () => {
-    const promptAsync = mock(async () => ({}));
-    const userTurn = createRuntimeUserTurn({
-      messageID: 'user-1',
-      providerID: 'runtime-provider',
-      modelID: 'selected-model',
-      variant: 'selected-variant',
-    });
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: createContinuationSessionClient(promptAsync, {
-        get: mock(async () => {
-          throw new Error('session lookup unavailable');
-        }),
-      }),
-    });
-
-    hook.observeChatMessage(
-      {
-        sessionID: userTurn.input.sessionID,
-        messageID: userTurn.input.messageID,
-        parts: userTurn.input.parts,
-      },
-      userTurn.output,
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(promptAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: {
-          providerID: 'runtime-provider',
-          modelID: 'selected-model',
-        },
-        variant: 'selected-variant',
-      }),
-    );
-  });
-
-  test('treats a current session model without variant as authoritative', async () => {
-    const promptAsync = mock(async (_input: unknown) => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: createContinuationSessionClient(promptAsync, {
-        get: mock(async () => ({
-          data: {
-            model: {
-              providerID: 'current-provider',
-              id: 'current-model',
-            },
-          },
-        })),
-      }),
-    });
-    const previousTurn = createRuntimeUserTurn({
-      messageID: 'user-1',
-      providerID: 'previous-provider',
-      modelID: 'previous-model',
-      variant: 'previous-variant',
-    });
-    hook.observeChatMessage(previousTurn.input, previousTurn.output);
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
-    };
-    expect(request.model).toEqual({
-      providerID: 'current-provider',
-      modelID: 'current-model',
-    });
-    expect(request).not.toHaveProperty('variant');
-  });
-
-  test('only external messages replace the model fallback and clear its variant', async () => {
-    const promptAsync = mock(async (_input: unknown) => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: createContinuationSessionClient(promptAsync),
-    });
-    const selectedTurn = createRuntimeUserTurn({
-      messageID: 'user-1',
-      providerID: 'selected-provider',
-      modelID: 'selected-model',
-      variant: 'selected-variant',
-    });
-    hook.observeChatMessage(selectedTurn.input, selectedTurn.output);
-    const newTurn = createRuntimeUserTurn({
-      messageID: 'user-2',
-      providerID: 'new-provider',
-      modelID: 'new-model',
-    });
-    hook.observeChatMessage(newTurn.input, newTurn.output);
-    hook.observeChatMessage(
-      {
-        sessionID: 'parent-1',
-        messageID: 'synthetic-1',
-        model: { providerID: 'static-provider', modelID: 'static-model' },
-        variant: 'static-variant',
-      },
-      {
-        message: {
-          id: 'synthetic-1',
-          sessionID: 'parent-1',
-          role: 'user',
-        },
-        parts: [
-          {
-            type: 'text',
-            text: 'synthetic continuation',
-            synthetic: true,
-          },
-        ],
-      },
-    );
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    const request = promptAsync.mock.calls[0]?.[0] as {
-      model?: Record<string, unknown>;
-      variant?: string;
-    };
-    expect(request.model).toEqual({
-      providerID: 'new-provider',
-      modelID: 'new-model',
-    });
-    expect(request).not.toHaveProperty('variant');
-  });
-
-  test('a user message invalidates continuation while current model lookup is pending', async () => {
-    let resolveGet!: (value: {
-      data: {
-        model: { providerID: string; id: string; variant: string };
-      };
-    }) => void;
-    const get = mock(
-      () =>
-        new Promise<{
-          data: {
-            model: { providerID: string; id: string; variant: string };
-          };
-        }>((resolve) => {
-          resolveGet = resolve;
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: createContinuationSessionClient(promptAsync, {
-        get,
-      }),
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(get).toHaveBeenCalledTimes(1);
-
-    const newTurn = createRuntimeUserTurn({
-      messageID: 'user-2',
-      providerID: 'new-provider',
-      modelID: 'new-model',
-    });
-    hook.observeChatMessage(newTurn.input, newTurn.output);
-    resolveGet({
-      data: {
-        model: {
-          providerID: 'stale-provider',
-          id: 'stale-model',
-          variant: 'stale-variant',
-        },
-      },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('paired idle events submit at most one continuation', async () => {
-    const board = new BackgroundJobBoard();
-    setupCompletedJob(board);
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      backgroundJobBoard: board,
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.injectBackgroundJobBoard({}, createMessages('parent-1'));
-
-    await Promise.all([
-      hook.event({
-        event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-      }),
-      hook.event({
-        event: {
-          type: 'session.status',
-          properties: { sessionID: 'parent-1', status: { type: 'idle' } },
-        },
-      }),
-    ]);
-    await flushContinuation();
-
-    expect(board.get('child-1')?.terminalUnreconciled).toBe(false);
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('only one of two hook instances enters deferred pre-read SDK calls', async () => {
-    let releaseTodo!: () => void;
-    const todo = mock(
-      () =>
-        new Promise<{ data: Array<{ status: string }> }>((resolve) => {
-          releaseTodo = () => resolve({ data: [{ status: 'pending' }] });
-        }),
-    );
-    const children = mock(async () => ({ data: [] }));
-    const status = mock(async () => ({ data: {} }));
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = { todo, children, status, promptAsync };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-          continueOnIdle: true,
-          idleReconcileDelayMs: 0,
-          shouldManageSession: () => true,
-        },
-      );
-    const hookA = makeHook();
-    const hookB = makeHook();
-
-    await Promise.all([
-      hookA.event({
-        event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-      }),
-      hookB.event({
-        event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-      }),
-    ]);
-    await flushContinuation();
-
-    // Reservation is taken before any SDK liveness read; loser never enters.
-    expect(todo).toHaveBeenCalledTimes(1);
-    expect(children).toHaveBeenCalledTimes(1);
-    expect(status).toHaveBeenCalledTimes(1);
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    releaseTodo();
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('non-owner disposal cannot rearm a committed continuation epoch', async () => {
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-          continueOnIdle: true,
-          idleReconcileDelayMs: 0,
-          shouldManageSession: () => true,
-        },
-      );
-    const owner = makeHook();
-    const other = makeHook();
-
-    await owner.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    // Disposing a different hook instance must not clear process-global consumed.
-    await other.event({ event: { type: 'server.instance.disposed' } });
-    await other.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    // Owner disposal after commit also leaves consumed intact.
-    await owner.event({ event: { type: 'server.instance.disposed' } });
-    const replacement = makeHook();
-    await replacement.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('committed non-settling promptAsync is not retried even through disposal', async () => {
-    let resolvePrompt!: (value: unknown) => void;
-    const promptAsync = mock(
-      () =>
-        new Promise((resolve) => {
-          resolvePrompt = resolve;
-        }),
-    );
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    await hook.event({ event: { type: 'server.instance.disposed' } });
-    const { hook: nextHook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-    await nextHook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    resolvePrompt({});
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('rejected promptAsync is not retried in the same epoch', async () => {
-    const promptAsync = mock(async () => {
-      throw new Error('prompt rejected');
-    });
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('pending read invalidated then valid idle can try again', async () => {
-    // First SDK read stays permanently unresolved — release must not depend on
-    // finally after the hung promise settles (old finally-only design fails).
-    let todoCalls = 0;
-    const todo = mock(
-      () =>
-        new Promise<{ data: Array<{ status: string }> }>((resolve) => {
-          todoCalls++;
-          if (todoCalls === 1) {
-            // Intentionally never resolve the first read.
-            return;
-          }
-          resolve({ data: [{ status: 'pending' }] });
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    // Invalidate while SDK read is still pending — releases uncommitted reservation.
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(false);
-
-    await hook.event({
-      event: {
-        type: 'question.replied',
-        properties: { sessionID: 'parent-1', requestID: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(2);
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('owner disposal while read pending lets another hook attempt', async () => {
-    let todoCalls = 0;
-    const todo = mock(
-      () =>
-        new Promise<{ data: Array<{ status: string }> }>((resolve) => {
-          todoCalls++;
-          if (todoCalls === 1) {
-            // Permanently unresolved — disposal must release without settle.
-            return;
-          }
-          resolve({ data: [{ status: 'pending' }] });
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo,
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-          continueOnIdle: true,
-          idleReconcileDelayMs: 0,
-          shouldManageSession: () => true,
-        },
-      );
-    const owner = makeHook();
-    const other = makeHook();
-
-    await owner.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await owner.event({ event: { type: 'server.instance.disposed' } });
-    await flushContinuation();
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(false);
-
-    await other.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(2);
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('fallback session deletion after commit does not resubmit', async () => {
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    let fallbackInProgress = false;
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      isFallbackInProgress: () => fallbackInProgress,
-      sessionClient,
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    fallbackInProgress = true;
-    await hook.event({
-      event: {
-        type: 'session.deleted',
-        properties: { sessionID: 'parent-1' },
-      },
-    });
-    expect(hasConsumedContinuationAttempt('parent-1')).toBe(true);
-
-    fallbackInProgress = false;
-    // After fallback teardown/recreation, idle must not rearm without a real user message.
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('malformed SDK data releases reservation so a later valid attempt can run', async () => {
-    const promptAsync = mock(async () => ({}));
-    let todoCalls = 0;
-    const todo = mock(async () => {
-      todoCalls++;
-      if (todoCalls === 1) return { data: undefined };
-      return { data: [{ status: 'pending' }] };
-    });
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('active parent releases reservation so a later idle can continue', async () => {
-    const promptAsync = mock(async () => ({}));
-    let statusCalls = 0;
-    const status = mock(async () => {
-      statusCalls++;
-      // First evaluation sees busy on the initial status read and returns.
-      if (statusCalls === 1) {
-        return { data: { 'parent-1': { type: 'busy' } } };
-      }
-      return { data: {} };
-    });
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status,
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('does not evaluate or nudge while a question or permission waits', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'permission.asked',
-        properties: { sessionID: 'parent-1', id: 'permission-1' },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not evaluate or nudge after wait_for_user requests text-only HITL', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
+  test('hasInputWait is true after wait_for_user and clears on distinct external message', async () => {
+    const { hook } = createHook();
     hook.beginUserWait('parent-1');
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
+    expect(hook.hasInputWait('parent-1')).toBe(true);
 
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('a distinct external user message releases wait_for_user', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    hook.beginUserWait('parent-1');
     hook.observeChatMessage(
       { sessionID: 'parent-1', messageID: 'msg-user-resumes' },
       {
@@ -5982,69 +7208,11 @@ describe('task-session-manager hook', () => {
         parts: [{ type: 'text', text: 'The manual step is complete.' }],
       },
     );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('a duplicate external message cannot clear a newer user wait', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-    const previousUserMessage = {
-      input: { sessionID: 'parent-1', messageID: 'msg-before-wait' },
-      output: {
-        message: {
-          id: 'msg-before-wait',
-          role: 'user' as const,
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'Start the long task.' }],
-      },
-    };
-
-    hook.observeChatMessage(
-      previousUserMessage.input,
-      previousUserMessage.output,
-    );
-    hook.beginUserWait('parent-1');
-    hook.observeChatMessage(
-      previousUserMessage.input,
-      previousUserMessage.output,
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(hook.hasInputWait('parent-1')).toBe(false);
   });
 
   test('synthetic and internal messages do not clear wait_for_user', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
+    const { hook } = createHook();
     hook.beginUserWait('parent-1');
     hook.observeChatMessage(
       { sessionID: 'parent-1', messageID: 'msg-internal' },
@@ -6060,1466 +7228,45 @@ describe('task-session-manager hook', () => {
         ],
       },
     );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(hook.hasInputWait('parent-1')).toBe(true);
   });
 
-  test('a foreground-fallback replay marker does not clear wait_for_user', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    hook.beginUserWait('parent-1');
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-fallback-replay' },
-      {
-        message: {
-          id: 'msg-fallback-replay',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [
-          { type: 'text', text: 'Start the long task.' },
-          createInternalAgentTextPart('foreground fallback replay'),
-        ],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('wait_for_user cancels a scheduled continuation before SDK reads', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const children = mock(async () => ({ data: [] }));
-    const status = mock(async () => ({ data: {} }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: { todo, children, status, promptAsync },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    hook.beginUserWait('parent-1');
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(children).not.toHaveBeenCalled();
-    expect(status).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('wait_for_user invalidates an in-flight continuation evaluation', async () => {
-    let resolveTodo!: (value: { data: { status: string }[] }) => void;
-    const todo = mock(
-      () =>
-        new Promise<{ data: { status: string }[] }>((resolveTodoRequest) => {
-          resolveTodo = resolveTodoRequest;
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-
-    hook.beginUserWait('parent-1');
-    resolveTodo({ data: [{ status: 'pending' }] });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('a user wait from another hook revokes an in-flight shared reservation', async () => {
-    let resolveTodo!: (value: { data: { status: string }[] }) => void;
-    const todo = mock(
-      () =>
-        new Promise<{ data: { status: string }[] }>((resolveTodoRequest) => {
-          resolveTodo = resolveTodoRequest;
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo,
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const owner = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient,
-    }).hook;
-    const waiter = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient,
-    }).hook;
-
-    await owner.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-
-    waiter.beginUserWait('parent-1');
-    resolveTodo({ data: [{ status: 'pending' }] });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('external user input clears only the explicit wait while a question remains', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    hook.beginUserWait('parent-1');
+  test('question/permission asks arm hasInputWait until resolved', async () => {
+    const { hook } = createHook();
     await hook.event({
       event: {
         type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
+        properties: { sessionID: 'parent-1', id: 'q-1' },
       },
     });
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-user-replied' },
-      {
-        message: {
-          id: 'msg-user-replied',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'Manual work is done.' }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-
+    expect(hook.hasInputWait('parent-1')).toBe(true);
     await hook.event({
       event: {
         type: 'question.replied',
-        properties: { sessionID: 'parent-1', requestID: 'question-1' },
+        properties: { sessionID: 'parent-1', requestID: 'q-1' },
       },
     });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(hook.hasInputWait('parent-1')).toBe(false);
   });
 
   test('user waits survive hook disposal and clear on genuine deletion', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo,
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const makeHook = () =>
-      createContinuationHook({ idleReconcileDelayMs: 0, sessionClient }).hook;
-    const owner = makeHook();
-
+    const owner = createHook().hook;
     owner.beginUserWait('parent-1');
-    await owner.event({ event: { type: 'server.instance.disposed' } });
-    const replacement = makeHook();
-    await replacement.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(owner.hasInputWait('parent-1')).toBe(true);
 
-    await replacement.event({
-      event: { type: 'session.deleted', properties: { sessionID: 'parent-1' } },
+    await owner.event({
+      event: { type: 'server.instance.disposed' },
     });
-    const afterDeletion = makeHook();
-    await afterDeletion.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
+    // Process-local wait survives disposal of one hook instance.
+    const next = createHook().hook;
+    expect(next.hasInputWait('parent-1')).toBe(true);
 
-  test('fallback session deletion preserves wait_for_user', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    let fallbackInProgress = true;
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      isFallbackInProgress: () => fallbackInProgress,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    hook.beginUserWait('parent-1');
-    await hook.event({
-      event: { type: 'session.deleted', properties: { sessionID: 'parent-1' } },
-    });
-    fallbackInProgress = false;
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('cancels a scheduled continuation when an input wait arrives before its timer fires', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const children = mock(async () => ({ data: [] }));
-    const status = mock(async () => ({ data: {} }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: { todo, children, status, promptAsync },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await hook.event({
+    await next.event({
       event: {
-        type: 'permission.asked',
-        properties: { sessionID: 'parent-1', id: 'permission-1' },
-      },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(children).not.toHaveBeenCalled();
-    expect(status).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('fails closed when an id-less ask races a scheduled continuation', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await hook.event({
-      event: {
-        type: 'question.asked',
+        type: 'session.deleted',
         properties: { sessionID: 'parent-1' },
       },
     });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: {
-        type: 'question.replied',
-        properties: { sessionID: 'parent-1', requestID: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('clears only the resolved input wait and resumes on a later idle', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'permission.asked',
-        properties: { sessionID: 'parent-1', id: 'permission-1' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-2' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'question.replied',
-        properties: { sessionID: 'parent-1', requestID: 'unknown-question' },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: {
-        type: 'question.replied',
-        properties: { sessionID: 'parent-1', requestID: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'permission.replied',
-        properties: { sessionID: 'parent-1', requestID: 'permission-1' },
-      },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: {
-        type: 'question.rejected',
-        properties: { sessionID: 'parent-1', requestID: 'question-2' },
-      },
-    });
-    await flushContinuation();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('resumes on a later idle after a question rejection', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: {
-        type: 'question.rejected',
-        properties: { sessionID: 'parent-1', requestID: 'question-1' },
-      },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('invalidates an in-flight continuation when an input wait arrives', async () => {
-    let resolveTodo!: (value: { data: { status: string }[] }) => void;
-    const todo = mock(
-      () =>
-        new Promise<{ data: { status: string }[] }>((resolve) => {
-          resolveTodo = resolve;
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    resolveTodo({ data: [{ status: 'pending' }] });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('internal and synthetic messages do not clear an input wait', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-synthetic-wait' },
-      {
-        message: {
-          id: 'msg-synthetic-wait',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [
-          { type: 'text', synthetic: true, text: 'synthetic response' },
-          createInternalAgentTextPart('internal response'),
-        ],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('retains input waits across a session error', async () => {
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: {
-        type: 'question.asked',
-        properties: { sessionID: 'parent-1', id: 'question-1' },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.error', properties: { sessionID: 'parent-1' } },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(todo).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('clears stale input waits on session and server cleanup', async () => {
-    // Distinct session IDs: disposed must not clear process-global consumed from
-    // a prior deleted+idle iteration on the same id.
-    for (const { sessionID, lifecycleEvent } of [
-      {
-        sessionID: 'parent-deleted',
-        lifecycleEvent: {
-          type: 'session.deleted',
-          properties: { sessionID: 'parent-deleted' },
-        },
-      },
-      {
-        sessionID: 'parent-disposed',
-        lifecycleEvent: { type: 'server.instance.disposed' },
-      },
-    ] as const) {
-      const promptAsync = mock(async () => ({}));
-      const { hook } = createContinuationHook({
-        idleReconcileDelayMs: 0,
-        sessionClient: {
-          todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-          children: mock(async () => ({ data: [] })),
-          status: mock(async () => ({ data: {} })),
-          promptAsync,
-        },
-      });
-
-      await hook.event({
-        event: {
-          type: 'question.asked',
-          properties: { sessionID, id: 'question-1' },
-        },
-      });
-      await hook.event({ event: lifecycleEvent });
-      await hook.event({
-        event: { type: 'session.idle', properties: { sessionID } },
-      });
-      await flushContinuation();
-
-      expect(promptAsync).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  test('coalesces paired idle events and suppresses active children', async () => {
-    const promptAsync = mock(async () => ({}));
-    const children = mock(async () => ({ data: [{ id: 'child-1' }] }));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children,
-        status: mock(async () => ({ data: { 'child-1': { type: 'busy' } } })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await hook.event({
-      event: {
-        type: 'session.status',
-        properties: { sessionID: 'parent-1', status: { type: 'idle' } },
-      },
-    });
-    await flushContinuation();
-
-    expect(children).toHaveBeenCalledTimes(1);
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('runtime-shaped external messages rearm a consumed nudge', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-continue-1' },
-      {
-        message: {
-          id: 'msg-continue-1',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'continue' }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('output.message.id rearms when input.messageID is missing', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    hook.observeChatMessage(
-      { sessionID: 'parent-1' },
-      {
-        message: {
-          id: 'msg-output-id-only',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'continue' }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('ID-less output.message object identity rearms once', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-    const message = { role: 'user', sessionID: 'parent-1' };
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    hook.observeChatMessage(
-      { sessionID: 'parent-1' },
-      { message, parts: [{ type: 'text', text: 'continue' }] },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-
-    // Same object again must not open another epoch.
-    hook.observeChatMessage(
-      { sessionID: 'parent-1' },
-      { message, parts: [{ type: 'text', text: 'continue' }] },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('two hooks share ID-less output.message object identity', async () => {
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          continueOnIdle: true,
-          idleReconcileDelayMs: 0,
-          shouldManageSession: () => true,
-        },
-      );
-    const hookA = makeHook();
-    const hookB = makeHook();
-    const message = { role: 'user', sessionID: 'parent-1' };
-    const output = {
-      message,
-      parts: [{ type: 'text', text: 'continue' }],
-    };
-
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    hookA.observeChatMessage({ sessionID: 'parent-1' }, output);
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-
-    hookB.observeChatMessage({ sessionID: 'parent-1' }, output);
-    await hookB.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('distinct ID-less message objects each open a new epoch', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    const text = 'identical text must not dedupe distinct objects';
-    hook.observeChatMessage(
-      { sessionID: 'parent-1' },
-      {
-        message: { role: 'user', sessionID: 'parent-1' },
-        parts: [{ type: 'text', text }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-
-    hook.observeChatMessage(
-      { sessionID: 'parent-1' },
-      {
-        message: { role: 'user', sessionID: 'parent-1' },
-        parts: [{ type: 'text', text }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(3);
-  });
-
-  test('missing id and output.message fails closed without rearm', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    // sessionID only on input; no messageID and no output.message object.
-    hook.observeChatMessage(
-      {
-        sessionID: 'parent-1',
-        parts: [{ type: 'text', text: 'continue' }],
-      },
-      { parts: [{ type: 'text', text: 'continue' }] },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('same user message observed by two hooks rearms only one new epoch', async () => {
-    const promptAsync = mock(async () => ({}));
-    const sessionClient = {
-      todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-      children: mock(async () => ({ data: [] })),
-      status: mock(async () => ({ data: {} })),
-      promptAsync,
-    };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-          continueOnIdle: true,
-          idleReconcileDelayMs: 0,
-          shouldManageSession: () => true,
-        },
-      );
-    const hookA = makeHook();
-    const hookB = makeHook();
-    const userMessage = {
-      input: { sessionID: 'parent-1', messageID: 'msg-shared-1' },
-      output: {
-        message: {
-          id: 'msg-shared-1',
-          role: 'user' as const,
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'continue' }],
-      },
-    };
-
-    // Initial epoch dispatch.
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-
-    // Interleave: A observes → new-epoch idle on A → B observes same message.
-    hookA.observeChatMessage(userMessage.input, userMessage.output);
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-
-    hookB.observeChatMessage(userMessage.input, userMessage.output);
-    await hookB.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    // Same message must not open a third epoch.
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('shared observe always cancels each hook local pre-message idle timer', async () => {
-    const promptAsync = mock(async () => ({}));
-    const todo = mock(async () => ({ data: [{ status: 'pending' }] }));
-    const children = mock(async () => ({ data: [] }));
-    const status = mock(async () => ({ data: {} }));
-    const sessionClient = { todo, children, status, promptAsync };
-    const makeHook = () =>
-      createTaskSessionManagerHook(
-        {
-          client: { session: sessionClient },
-          directory: '/tmp',
-          worktree: '/tmp',
-        } as never,
-        {
-          maxSessionsPerAgent: 2,
-          maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-          continueOnIdle: true,
-          // Non-zero so B can hold a pending timer across the observe.
-          idleReconcileDelayMs: 40,
-          shouldManageSession: () => true,
-        },
-      );
-    const hookA = makeHook();
-    const hookB = makeHook();
-    const userMessage = {
-      input: { sessionID: 'parent-1', messageID: 'msg-shared-timer' },
-      output: {
-        message: {
-          id: 'msg-shared-timer',
-          role: 'user' as const,
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'text', text: 'continue' }],
-      },
-    };
-
-    // B arms a pre-message idle timer (must not fire after shared observe).
-    await hookB.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-
-    hookA.observeChatMessage(userMessage.input, userMessage.output);
-    // Global rearm already recorded; B must still invalidate local timer/token.
-    hookB.observeChatMessage(userMessage.input, userMessage.output);
-
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(todo).not.toHaveBeenCalled();
-    expect(children).not.toHaveBeenCalled();
-    expect(status).not.toHaveBeenCalled();
-    expect(promptAsync).not.toHaveBeenCalled();
-
-    // Only a fresh post-message idle may enter SDK / promptAsync.
-    await hookA.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    await flushContinuation();
-    expect(todo).toHaveBeenCalled();
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('file-only external messages rearm a consumed nudge', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-file-1' },
-      {
-        message: {
-          id: 'msg-file-1',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [{ type: 'file', filename: 'command-output.txt' }],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(2);
-  });
-
-  test('synthetic completion messages do not rearm a consumed nudge', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-synthetic-1' },
-      {
-        message: {
-          id: 'msg-synthetic-1',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [
-          {
-            type: 'text',
-            synthetic: true,
-            text: 'Background task completed: child-1',
-          },
-        ],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('nudge busy-to-idle cycle does not send a second unchanged nudge', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    await hook.event({
-      event: {
-        type: 'session.status',
-        properties: { sessionID: 'parent-1', status: { type: 'busy' } },
-      },
-    });
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('retry status invalidates a pending continuation evaluation', async () => {
-    let resolveTodo!: (value: { data: { status: string }[] }) => void;
-    const todo = mock(
-      () =>
-        new Promise<{ data: { status: string }[] }>((resolve) => {
-          resolveTodo = resolve;
-        }),
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo,
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    expect(todo).toHaveBeenCalledTimes(1);
-
-    await hook.event({
-      event: {
-        type: 'session.status',
-        properties: { sessionID: 'parent-1', status: { type: 'retry' } },
-      },
-    });
-    resolveTodo({ data: [{ status: 'pending' }] });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('terminal-unreconciled jobs suppress continuation nudges', async () => {
-    const board = new BackgroundJobBoard();
-    setupCompletedJob(board);
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      backgroundJobBoard: board,
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook['experimental.chat.messages.transform'](
-      {},
-      createMessages('parent-1'),
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('missing SDK response data fails closed without nudging', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: undefined })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not nudge when todos are completed or cancelled only', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({
-          data: [{ status: 'completed' }, { status: 'cancelled' }],
-        })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not nudge while the parent is active', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: { 'parent-1': { type: 'busy' } } })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not nudge while a child is retrying', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [{ id: 'child-1' }] })),
-        status: mock(async () => ({
-          data: { 'child-1': { type: 'retrying' } },
-        })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not rearm a consumed nudge for its actual internal part', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    hook.observeChatMessage(
-      { sessionID: 'parent-1', messageID: 'msg-internal-nudge' },
-      {
-        message: {
-          id: 'msg-internal-nudge',
-          role: 'user',
-          sessionID: 'parent-1',
-        },
-        parts: [createInternalAgentTextPart('Continue coordinating')],
-      },
-    );
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('keeps a rejected prompt consumed', async () => {
-    const promptAsync = mock(async () => {
-      throw new Error('prompt failed');
-    });
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('keeps a failed prompt response consumed', async () => {
-    const promptAsync = mock(async () => ({ error: 'prompt failed' }));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-  });
-
-  test('fails closed for missing or throwing SDK endpoints', async () => {
-    const missingPrompt = mock(async () => ({}));
-    const { hook: missingHook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: { promptAsync: missingPrompt },
-    });
-    const throwingPrompt = mock(async () => ({}));
-    const { hook: throwingHook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => {
-          throw new Error('todo unavailable');
-        }),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync: throwingPrompt,
-      },
-    });
-
-    for (const hook of [missingHook, throwingHook]) {
-      await hook.event({
-        event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-      });
-    }
-    await flushContinuation();
-
-    expect(missingPrompt).not.toHaveBeenCalled();
-    expect(throwingPrompt).not.toHaveBeenCalled();
-  });
-
-  test('does not nudge when fallback is already in progress', async () => {
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      isFallbackInProgress: () => true,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('does not nudge when fallback starts during evaluation', async () => {
-    let fallbackInProgress = false;
-    let releaseTodos: (() => void) | undefined;
-    const todos = new Promise<{ data: Array<{ status: string }> }>(
-      (resolve) => {
-        releaseTodos = () => resolve({ data: [{ status: 'pending' }] });
-      },
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      isFallbackInProgress: () => fallbackInProgress,
-      sessionClient: {
-        todo: mock(async () => todos),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    fallbackInProgress = true;
-    releaseTodos?.();
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('final gate blocks a terminal result that arrives during SDK queries', async () => {
-    const board = new BackgroundJobBoard();
-    let childrenCalls = 0;
-    let releaseLatestChildren: (() => void) | undefined;
-    const latestChildren = new Promise<{ data: Array<unknown> }>((resolve) => {
-      releaseLatestChildren = () => resolve({ data: [] });
-    });
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      backgroundJobBoard: board,
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => ({ data: [{ status: 'pending' }] })),
-        children: mock(async () => {
-          childrenCalls++;
-          return childrenCalls === 1 ? { data: [] } : latestChildren;
-        }),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    setupCompletedJob(board);
-    releaseLatestChildren?.();
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
-  });
-
-  test('instance disposal invalidates an evaluation whose timer already fired', async () => {
-    let releaseTodos: (() => void) | undefined;
-    const todos = new Promise<{ data: Array<{ status: string }> }>(
-      (resolve) => {
-        releaseTodos = () => resolve({ data: [{ status: 'pending' }] });
-      },
-    );
-    const promptAsync = mock(async () => ({}));
-    const { hook } = createContinuationHook({
-      idleReconcileDelayMs: 0,
-      sessionClient: {
-        todo: mock(async () => todos),
-        children: mock(async () => ({ data: [] })),
-        status: mock(async () => ({ data: {} })),
-        promptAsync,
-      },
-    });
-
-    await hook.event({
-      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-    });
-    await flushContinuation();
-    await hook.event({ event: { type: 'server.instance.disposed' } });
-    releaseTodos?.();
-    await flushContinuation();
-
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(next.hasInputWait('parent-1')).toBe(false);
   });
 });

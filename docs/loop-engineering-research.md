@@ -129,7 +129,7 @@ Osmani's framework identifies five primitives that compose a loop, plus durable 
 | Depth tracking | Yes | Yes | Native (OpenCode's subagent_depth) |
 | Session reuse | Yes | Yes | Yes (BackgroundJobBoard) |
 | Job tracking | Limited | Limited | Yes (Background Job Board with aliases) |
-| Cancellation | Yes | Yes | Yes (cancel_task tool) |
+| Cancellation | Yes | Yes | Yes (`task_cancel` tool) |
 | Parallel dispatch | Yes | Yes | Yes (explicit in orchestrator prompt) |
 
 **Verdict:** All three have sub-agent support. OpenCode's is the most structured with 9 specialized agents, a formal Background Job Board, session reuse, and a dedicated orchestrator that never implements directly.

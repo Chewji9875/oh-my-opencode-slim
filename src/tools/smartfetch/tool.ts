@@ -41,7 +41,7 @@ import {
 } from './network';
 import {
   decideSecondaryModelUse,
-  readSecondaryModelFromConfig,
+  resolveSecondaryModels,
   runSecondaryModelWithFallback,
 } from './secondary-model';
 import type { RedirectStep, SmartfetchOptions } from './types';
@@ -100,10 +100,12 @@ export function createWebfetchTool(
         ),
     },
     async execute(args, ctx) {
-      const secondaryModels = await readSecondaryModelFromConfig(
-        ctx.directory || pluginCtx.directory,
-        options.webfetchModels,
-      );
+      const secondaryModels = resolveSecondaryModels({
+        webfetchModels: options.webfetchModels,
+        smallModel: options.smallModelRef?.() ?? undefined,
+        explorerModel: options.explorerModel,
+        librarianModel: options.librarianModel,
+      });
       const normalized = normalizeUrl(args.url);
       const url = new URL(normalized.url);
       const cacheKey = buildCacheKey(
@@ -454,16 +456,19 @@ export function createWebfetchTool(
                         finalUrl,
                         args.extract_main,
                       )
-                    : {
-                        title: undefined,
-                        rawContent: cleanFetchedText(rawText),
-                        html: cleanFetchedText(rawText),
-                        text: cleanFetchedText(rawText),
-                        markdown: cleanFetchedText(rawText),
-                        extractedMain: false,
-                        canonicalUrl: undefined,
-                        headings: [],
-                      };
+                    : (() => {
+                        const cleaned = cleanFetchedText(rawText);
+                        return {
+                          title: undefined,
+                          rawContent: cleaned,
+                          html: cleaned,
+                          text: cleaned,
+                          markdown: cleaned,
+                          extractedMain: false,
+                          canonicalUrl: undefined,
+                          headings: [],
+                        };
+                      })();
 
                   fetchResult = {
                     requestedUrl: args.url,
@@ -717,6 +722,7 @@ export function createWebfetchTool(
             secondaryModels,
             args.prompt || '',
             fetchResult.markdown,
+            ctx.sessionID,
           );
         } catch (error: unknown) {
           secondaryModelError =

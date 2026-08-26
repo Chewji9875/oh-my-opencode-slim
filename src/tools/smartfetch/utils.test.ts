@@ -4,6 +4,7 @@ import {
   extractHeadingsFromMarkdown,
   joinRenderedContent,
   withCssTreeWarningsSuppressed,
+  withJsdomCssParsingErrorsSuppressed,
 } from './utils';
 
 // 200 段逗号分隔的 box-shadow 链 —— csstree/csstree#294 的复现案例，
@@ -18,6 +19,13 @@ const CSS_TREE_WARNING_HTML = (() => {
 .range-block__range::-webkit-slider-thumb { box-shadow: ${shadows.join(', ')}; }
 </style></head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 })();
+
+// Garbage CSS tokens that jsdom's CSS parser cannot make sense of; verified
+// to emit a "css-parsing" jsdomError ("Could not parse CSS stylesheet"),
+// which leaks to console.error when no custom virtualConsole is supplied.
+const CSS_PARSING_ERROR_HTML = `<!DOCTYPE html><html><head>
+<style>}}} ;;;; @@@</style>
+</head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 
 describe('smartfetch/utils', () => {
   test('extracts cleaned headings from markdown', () => {
@@ -90,6 +98,107 @@ describe('smartfetch/utils', () => {
       expect(console.warn).toBe(originalWarn);
     } finally {
       console.warn = originalWarn;
+    }
+  });
+
+  test('suppresses jsdom css-parsing errors during html extraction', async () => {
+    const originalError = console.error;
+    const errorCalls: unknown[][] = [];
+    console.error = (...args: unknown[]) => errorCalls.push(args);
+    try {
+      const result = await extractFromHtml(
+        CSS_PARSING_ERROR_HTML,
+        'https://example.com/',
+        false,
+      );
+
+      expect(errorCalls).toEqual([]);
+      expect(result.text).toContain('Hello');
+      expect(result.text).toContain('World');
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('suppresses css-parsing errors on the extractMain path too', async () => {
+    const originalError = console.error;
+    const errorCalls: unknown[][] = [];
+    console.error = (...args: unknown[]) => errorCalls.push(args);
+    try {
+      const result = await extractFromHtml(
+        CSS_PARSING_ERROR_HTML,
+        'https://example.com/',
+        true,
+      );
+
+      expect(errorCalls).toEqual([]);
+      expect(result.text).toContain('Hello');
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('forwards non-css-parsing jsdomErrors to console.error', () => {
+    const originalError = console.error;
+    const errorCalls: unknown[][] = [];
+    console.error = (...args: unknown[]) => errorCalls.push(args);
+    try {
+      withJsdomCssParsingErrorsSuppressed((vc) => {
+        vc.emit('jsdomError', {
+          type: 'resource-loading',
+          message: 'Failed to load resource',
+        });
+      });
+
+      expect(errorCalls).toHaveLength(1);
+      expect((errorCalls[0][0] as Error).message).toBe(
+        'Failed to load resource',
+      );
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('filters css-parsing errors but forwards other jsdomErrors', () => {
+    const originalError = console.error;
+    const errorCalls: unknown[][] = [];
+    console.error = (...args: unknown[]) => errorCalls.push(args);
+    try {
+      withJsdomCssParsingErrorsSuppressed((vc) => {
+        vc.emit('jsdomError', {
+          type: 'css-parsing',
+          message: 'Could not parse CSS stylesheet',
+        });
+        vc.emit('jsdomError', {
+          type: 'resource-loading',
+          message: 'Failed to load resource',
+        });
+      });
+
+      expect(errorCalls).toHaveLength(1);
+      expect((errorCalls[0][0] as Error).message).toBe(
+        'Failed to load resource',
+      );
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('clean css produces no console.error noise', async () => {
+    const originalError = console.error;
+    const errorCalls: unknown[][] = [];
+    console.error = (...args: unknown[]) => errorCalls.push(args);
+    try {
+      const result = await extractFromHtml(
+        CSS_TREE_WARNING_HTML,
+        'https://example.com/',
+        false,
+      );
+
+      expect(errorCalls).toEqual([]);
+      expect(result.text).toContain('Hello');
+    } finally {
+      console.error = originalError;
     }
   });
 });

@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/alvinunreal/oh-my-opencode-slim/stargazers">
-    <img src="img/v2.webp" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
+    <img src="img/v2.jpg" alt="oh-my-opencode-slim V2 Release" style="border-radius: 10px;">
   </a>
   <h3>✨ oh-my-opencode-slim ✨</h3>
 
@@ -146,12 +146,12 @@ bun run build
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "xhigh", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "xhigh", "skills": ["simplify"], "mcps": [] },
+      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
       "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
       "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
       "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "xhigh", "skills": [], "mcps": [] }
+      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -210,7 +210,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/orchestrator.png" width="240" style="border-radius: 10px;">
+      <img src="img/orchestrator.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>在复杂性的深渊中锻造而成。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -251,7 +251,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/explorer.png" width="240" style="border-radius: 10px;">
+      <img src="img/explorer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>传播知识的清风。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -292,7 +292,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/oracle.png" width="240" style="border-radius: 10px;">
+      <img src="img/oracle.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>十字路口的声音。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -336,7 +336,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/council.png" width="240" style="border-radius: 10px;">
+      <img src="img/council.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>集思广益，终成一断。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -382,7 +382,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/librarian.png" width="240" style="border-radius: 10px;">
+      <img src="img/librarian.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>理解的编织者。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -423,7 +423,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/designer.png" width="240" style="border-radius: 10px;">
+      <img src="img/designer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>美是不可或缺的。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -464,7 +464,7 @@ ping all agents
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
-      <img src="img/fixer.png" width="240" style="border-radius: 10px;">
+      <img src="img/fixer.jpg" width="240" style="border-radius: 10px;">
       <br><sub><i>愿景与现实之间的最后一步。</i></sub>
     </td>
     <td width="70%" valign="top">
@@ -604,6 +604,7 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 | **[Clonedeps](docs/clonedeps.md)** | 将选定的依赖源码克隆到被忽略的本地工作区中以供检查 |
 | **[Worktrees](docs/worktrees.md)** | 使用 `.slim/worktrees/` 通道进行隔离的并行或高风险编码工作 |
 | **[预设切换](docs/preset-switching.md)** | 使用 `/preset` 在运行时切换智能体模型预设 |
+| **[Interview](docs/interview.md)** | 通过基于浏览器的问答流程，将粗略想法转成结构化 markdown 规格 |
 | **[Companion](docs/companion.md)** | 用于解析、帮助和类型信息的浮动窗口 companion |
 
 ### ⚙️ 配置与参考

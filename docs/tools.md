@@ -44,13 +44,24 @@ Fast, structural code search and refactoring - more powerful than plain text gre
 
 | Tool | Description |
 |------|-------------|
-| `cancel_task` | Cancel a tracked background specialist task by native task ID or Background Job Board alias |
-| `wait_for_user` | Pause automatic incomplete-todo continuation until the next distinct external user message |
+| `task` | Start a specialist task and return its task ID |
+| `task_status` | Check the status of a task |
+| `task_result` | Retrieve a task's result |
+| `task_message` | Queue a non-interrupting message and return `queued` |
+| `task_cancel` | Stop a generation while retaining its session |
+| `task_revive` | Resume a retained session with a new instruction |
+| `wait_for_user` | Pause automatic orchestrator wake prompts until the next distinct external user message |
 
-`cancel_task` is orchestrator-only. It only cancels background tasks tracked for
-the current orchestrator session, and it does not roll back partial edits. After
-cancelling a write-capable task, inspect and reconcile file changes before
+The task controls use the task ID or Background Job Board alias for the task being
+managed. `task_message` does not interrupt the current generation. `task_cancel`
+stops the generation but retains its session; it does not roll back partial edits.
+After cancelling a write-capable task, inspect and reconcile file changes before
 launching replacement work.
+
+`task_revive` resumes a retained session with a new instruction. A cancelled or
+errored retained session may be revived immediately once its retained state has
+been verified safe. Acknowledgement controls parent and job-board consumption and
+reusable-pool display, not same-session revival.
 
 `wait_for_user` is also orchestrator-only. The orchestrator uses it as the final
 tool action after providing concrete instructions for external manual work. Its
@@ -62,6 +73,33 @@ that preceded the wait do not.
 See the background orchestration concepts in
 [Background Orchestration](background-orchestration.md) for the session
 lifecycle, cancellation, and explicit-wait edge cases behind these tools.
+
+---
+
+## Repeated Tool-Call Loop Guard
+
+A safety net for model-side infinite loops where a sub-agent (e.g. a model
+that can degenerate, such as DeepSeek V4 Flash in Explorer) re-issues the
+exact same tool call with identical arguments and gets identical results,
+making no progress. The plugin watches each session's consecutive identical
+tool calls — counting only calls that return results identical to the
+previous call, so a call returning new information (e.g. a file that was
+modified) never counts toward a block — and responds:
+
+- After the 3rd confirmed-identical result: appends a corrective notice to
+  the tool output telling the model to stop repeating and change approach.
+  Applies to all tools.
+- After the 5th confirmed-identical result: refuses the next identical call
+  for the read-only file tools `read`, `grep`, and `glob`, terminating the
+  loop. Other tools stay warn-only.
+
+The count is confirmed in `tool.execute.after`, so overlapping parallel
+calls cannot inflate it before their results are known.
+
+Exempt from the entire guard: the task-control and wait tools (`task`,
+`task_status`, `task_result`, `task_cancel`, `task_message`, `task_revive`,
+`wait_for_user`, `wait_for_background_tasks`) — those legitimately re-issue
+identical calls while polling a long-running background task.
 
 ---
 
