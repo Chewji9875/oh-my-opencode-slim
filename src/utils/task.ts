@@ -40,6 +40,16 @@ export function parseTaskIdFromTaskOutput(output: string): string | undefined {
   const xmlMatch = /<task\s+[^>]*\bid=["']([^"']+)["'][^>]*>/i.exec(output);
   if (xmlMatch) return xmlMatch[1];
 
+  // v2 host `subagent` tool output formats.
+  const subagentXml =
+    /<subagent\s+[^>]*\bsessionID=["']([^"']+)["'][^>]*>/i.exec(output);
+  if (subagentXml) return subagentXml[1];
+  const failed =
+    /Subagent (?:failed|cancelled) \(sessionID:\s*([^\s)]+)\)/i.exec(output);
+  if (failed) return failed[1];
+  const background = /\(sessionID:\s*([^\s)]+)\)/.exec(output);
+  if (background) return background[1];
+
   const lines = output.split(/\r?\n/);
 
   for (const line of lines) {
@@ -96,6 +106,19 @@ export function parseTaskStateFromOutput(
     );
   if (xmlMatch) return xmlMatch[1].toLowerCase() as TaskOutputState;
 
+  // v2 host `subagent` tool output formats.
+  const subagentXml =
+    /<subagent\s+[^>]*\bstate=["'](running|completed|error|cancelled)["'][^>]*>/i.exec(
+      output,
+    );
+  if (subagentXml) return subagentXml[1].toLowerCase() as TaskOutputState;
+
+  if (/Subagent failed \(sessionID:/i.test(output)) return 'error';
+  if (/Subagent cancelled \(sessionID:/i.test(output)) return 'cancelled';
+  if (/The subagent is working in the background \(sessionID:/i.test(output)) {
+    return 'running';
+  }
+
   for (const line of getTaskHeader(output).split(/\r?\n/)) {
     const match = /^state:\s*(running|completed|error|cancelled)\s*$/i.exec(
       line.trim(),
@@ -113,8 +136,14 @@ export function parseTaskResultFromOutput(output: string): string | undefined {
     output,
   );
   const result = match?.[2]?.trim();
+  if (result) return result;
 
-  return result || undefined;
+  // v2 `subagent` wraps its final text directly inside the tag.
+  const subagent = /<subagent[^>]*>\s*([\s\S]*?)\s*<\/subagent>/m.exec(output);
+  const subagentResult = subagent?.[1]?.trim();
+  if (subagentResult) return subagentResult;
+
+  return undefined;
 }
 
 function getTaskHeader(output: string): string {

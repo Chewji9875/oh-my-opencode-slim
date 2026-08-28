@@ -3,6 +3,7 @@ import {
   parseTaskIdFromTaskOutput,
   parseTaskLaunchOutput,
   parseTaskResultFromOutput,
+  parseTaskStateFromOutput,
   parseTaskStatusOutput,
   renderRunningTaskPlaceholder,
 } from './task';
@@ -267,5 +268,54 @@ describe('parseTaskResultFromOutput', () => {
     expect(
       parseTaskResultFromOutput('<task_error>data</task_result>'),
     ).toBeUndefined();
+  });
+});
+
+describe('v2 subagent output formats', () => {
+  test('parses subagent XML completion', () => {
+    const out = [
+      '<subagent sessionID="ses_a" state="completed" description="fix lint">',
+      'done',
+      '</subagent>',
+    ].join('\n');
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_a');
+    expect(parseTaskStateFromOutput(out)).toBe('completed');
+    expect(parseTaskResultFromOutput(out)).toBe('done');
+    const status = parseTaskStatusOutput(out);
+    expect(status).toMatchObject({ taskID: 'ses_a', state: 'completed' });
+  });
+
+  test('parses subagent XML error completion', () => {
+    const out =
+      '<subagent sessionID="ses_b" state="error" description="d">broken</subagent>';
+    expect(parseTaskStatusOutput(out)).toMatchObject({
+      taskID: 'ses_b',
+      state: 'error',
+      result: 'broken',
+    });
+  });
+
+  test('parses plain-text background launch', () => {
+    const out =
+      'The subagent is working in the background (sessionID: ses_c). You will be notified automatically when it finishes.';
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_c');
+    expect(parseTaskStateFromOutput(out)).toBe('running');
+    expect(parseTaskLaunchOutput(out)).toMatchObject({
+      taskID: 'ses_c',
+      state: 'running',
+    });
+  });
+
+  test('parses subagent failure message', () => {
+    const out = 'Subagent failed (sessionID: ses_d): rate limited';
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_d');
+    expect(parseTaskStateFromOutput(out)).toBe('error');
+  });
+
+  test('v1 <task> formats still parse unchanged', () => {
+    const out =
+      '<task id="ses_e" state="running">\n<task_result>\nx\n</task_result>\n</task>';
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_e');
+    expect(parseTaskStateFromOutput(out)).toBe('running');
   });
 });
