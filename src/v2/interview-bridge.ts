@@ -1,3 +1,4 @@
+import type { Server } from 'node:http';
 import type { InterviewConfig, PluginConfig } from '../config';
 import { DEFAULT_DASHBOARD_PORT } from '../interview/dashboard';
 import { createDashboardManager } from '../interview/dashboard-manager';
@@ -75,6 +76,10 @@ export function applyInterviewCommandParts(
 export function createV2InterviewBridge(
   ctx: V2Context,
   config?: InterviewConfig,
+  options: {
+    /** Already-listening server for the dashboard role to adopt. */
+    server?: Server;
+  } = {},
 ): V2InterviewBridge {
   const transcripts = new Map<string, InterviewMessage[]>();
   const activeText = new Map<string, string>();
@@ -145,6 +150,7 @@ export function createV2InterviewBridge(
           sessionClient: {
             list: async () => ({ data: [] }),
           } as never,
+          server: options.server,
         },
       )
     : null;
