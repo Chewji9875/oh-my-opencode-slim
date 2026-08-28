@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { bindFreePort } from '../interview/test-port';
 import {
   applyInterviewCommandParts,
   createV2InterviewBridge,
@@ -20,21 +20,6 @@ function createContext(overrides?: {
       prompt: overrides?.prompt,
     },
   };
-}
-
-async function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.listen(0, () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to get free port')));
-        return;
-      }
-      const port = address.port;
-      server.close(() => resolve(port));
-    });
-  });
 }
 
 describe('markerText', () => {
@@ -299,7 +284,7 @@ describe('v2 interview bridge', () => {
 
   test('shares one configured dashboard across multiple v2 sessions', async () => {
     const directory = `.tmp-v2-dashboard-${Date.now()}`;
-    const port = await findFreePort();
+    const { port, server } = await bindFreePort();
     const config = {
       outputFolder: directory,
       dashboard: true,
@@ -310,6 +295,7 @@ describe('v2 interview bridge', () => {
     const bridge1 = createV2InterviewBridge(
       createContext({ synthetic: synthetic1 }),
       config,
+      { server },
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
     const bridge2 = createV2InterviewBridge(
@@ -352,6 +338,11 @@ describe('v2 interview bridge', () => {
     } finally {
       await bridge1.dispose();
       await bridge2.dispose();
+      // Safety net: close the held server if the dashboard never adopted it.
+      if (server.listening) {
+        server.closeAllConnections();
+        server.close();
+      }
       await fs.rm(`${process.cwd()}/${directory}`, {
         recursive: true,
         force: true,
