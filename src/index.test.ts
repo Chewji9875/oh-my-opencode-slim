@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import type { MultiplexerConfig } from './config';
-import { OhMyOpenCodeLite as plugin, shouldEnableMultiplexer } from './index';
+import {
+  OhMyOpenCodeLite as plugin,
+  sessionManagerMultiplexerConfig,
+  shouldEnableMultiplexer,
+} from './index';
 import { readTuiSnapshot } from './tui-state';
 
 function createPluginClient(
@@ -548,6 +552,25 @@ describe('multiplexer host gating', () => {
     expect(shouldEnableMultiplexer(baseInput)).toBe(true); // v1 unchanged
     expect(shouldEnableMultiplexer({ hostFlavor: 'v2', ...baseInput })).toBe(
       false,
+    );
+  });
+
+  test('multiplexer session manager config is forced off on v2 hosts', () => {
+    const multiplexerConfig = {
+      type: 'tmux',
+      layout: 'main-vertical',
+      main_pane_size: 60,
+      zellij_pane_mode: 'agent-tab',
+    } satisfies MultiplexerConfig;
+
+    // v2: type forced to 'none' so the manager's env-based self-gate
+    // (which would fire inside tmux) cannot re-enable pane management.
+    expect(sessionManagerMultiplexerConfig('v2', multiplexerConfig).type).toBe(
+      'none',
+    );
+    // v1: the exact same config object is passed through untouched.
+    expect(sessionManagerMultiplexerConfig(undefined, multiplexerConfig)).toBe(
+      multiplexerConfig,
     );
   });
 });

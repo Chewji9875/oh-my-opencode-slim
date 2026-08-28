@@ -19,6 +19,7 @@ v2 registrations. v1 behavior is unchanged.
 | `types.ts` | v2 plugin context surface (`V2Context` + draft/event types), mirrored locally (v2 plugin package is not a build-time dependency). |
 | `session-submit.ts` | Shared `createSessionSubmit` (prompt-only user-prompt submit via `ctx.session.prompt`) + `textFromContent`; used by both the generic command bridge and the interview bridge to avoid a setup↔bridge import cycle. |
 | `client-shim.ts` | `buildPluginInput`: constructs a v1-shaped `PluginInput` (shimmed `client`, `process.cwd()` directory) for the v1 factory. |
+| `tui.ts` | v2 TUI plugin entry (`./tui` export → `dist/tui2.js`): re-exports the v1 dual-contract TUI (`../tui`) and extends its v2 `setup` with the `/preset` keymap flow (`ui.dialog.select` + toast; persists via `switchPresetOnDisk`). |
 | `adapters.ts` | Shape adapters: `parseModelRef`, `adaptPermissions` (v1 map → v2 Rule[] + v2 permissive base + `task`→`subagent`/`bash`→`execute` mapping), `rewritePromptForV2` (`task(`→`subagent(`), `adaptTool`, `applyAgentToDraft`. |
 | `interview-bridge.ts` | v2-only `/interview` marker command, trailing-message context bridge, v2 interview runtime, and per-session transcript projections. |
 | `setup-command.test.ts` | Unit tests for the command marker helpers, add-only draft registration, the shared submit helper, and the merged context-hook seam. |
