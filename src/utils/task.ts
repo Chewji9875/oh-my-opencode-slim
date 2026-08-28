@@ -47,9 +47,10 @@ export function parseTaskIdFromTaskOutput(output: string): string | undefined {
   const failed =
     /Subagent (?:failed|cancelled) \(sessionID:\s*([^\s)]+)\)/i.exec(output);
   if (failed) return failed[1];
-  const background = /\(sessionID:\s*([^\s)]+)\)/.exec(output);
-  if (background) return background[1];
 
+  // v1 `task_id:` line before the generic bracket pattern: a v1 output can
+  // quote a foreign `(sessionID: x)` in passing, and the explicit marker
+  // is the authoritative id.
   const lines = output.split(/\r?\n/);
 
   for (const line of lines) {
@@ -62,6 +63,9 @@ export function parseTaskIdFromTaskOutput(output: string): string | undefined {
 
     return match[1];
   }
+
+  const background = /\(sessionID:\s*([^\s)]+)\)/.exec(output);
+  if (background) return background[1];
 
   return undefined;
 }

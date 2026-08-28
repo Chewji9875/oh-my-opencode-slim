@@ -116,6 +116,14 @@ export function mapV2EventToV1(
         : undefined
       : undefined;
     if (statusType === 'idle' && typeof props.sessionID === 'string') {
+      // Double-idle invariant: on v2 an idle-tolerant consumer that watches
+      // BOTH the native `session.status` event and the synthesized
+      // `session.idle` receives idle twice per session. Safe today because
+      // every idle consumer is idempotent per session — idle-reconciliation
+      // guards repeats via its per-session timer maps
+      // (`idleReconcileTimers.has` / `childIdleReconcileTimers.has`,
+      // idle-reconciliation.ts:42,64). Any NEW idle consumer must tolerate
+      // duplicate idle delivery.
       out.push({
         type: 'session.idle',
         properties: { sessionID: props.sessionID },

@@ -318,4 +318,19 @@ describe('v2 subagent output formats', () => {
     expect(parseTaskIdFromTaskOutput(out)).toBe('ses_e');
     expect(parseTaskStateFromOutput(out)).toBe('running');
   });
+
+  test('v1 task_id line wins over a stray bracketed sessionID', () => {
+    const out = [
+      'Launched background task.',
+      'task_id: ses_v1',
+      'Related discussion mentions (sessionID: ses_other) in passing.',
+    ].join('\n');
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_v1');
+  });
+
+  test('v2 background-launch text still parses after precedence reorder', () => {
+    const out =
+      'The subagent is working in the background (sessionID: ses_c). You will be notified automatically when it finishes.';
+    expect(parseTaskIdFromTaskOutput(out)).toBe('ses_c');
+  });
 });

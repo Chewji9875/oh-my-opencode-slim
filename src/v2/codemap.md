@@ -118,7 +118,9 @@ expanding the global v2 client surface.
   `sessionManagerMultiplexerConfig`).
 - `src/tools/smartfetch/secondary-model.ts`: consumes the
   `experimental_v2.generateText` channel threaded by `setup` for one-shot
-  summaries; absent channel → v1 session path.
+  summaries; absent channel → secondary-model summaries are unavailable
+  (logged) — the v2 shim has no `session.create`/`tool.ids`, so the v1
+  session pipeline cannot substitute.
 - Build: `build:v2` bundles `src/index.ts` (which pulls in `src/v2/`) into
   `dist/server.js` (self-contained except `jsdom`); `build:tui` bundles
   `src/v2/tui.ts` into `dist/tui2.js`.

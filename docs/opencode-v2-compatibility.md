@@ -116,7 +116,7 @@ the rest, and a zero-registration load logs a loud health-check warning.
 | Event handling (session tracking, lifecycle, cache telemetry) | ✅ | ✅ event pump + additive v2→v1 synthesis | — |
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ `createToolExecuteBridges` with subagent→task normalization | — |
 | Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `mcp.transform` ≥ #45408; older builds degrade to config-only — see [the snippet](#restoring-built-in-mcps-on-older-v2-builds) |
-| webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | absent → summaries fall back to the session pipeline |
+| webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | absent → secondary-model summaries are unavailable (logged) |
 | Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | `switchModel` ≥ #43718; older builds steer on the current model with an honest log (fallback inactive) |
 | `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | TUI host needs `keymap.layer` + `ui.dialog.select`; config-file `preset` still applies at load |
 | Project directory | ✅ | ✅ `ctx.location.directory` | ≥ #45403; older builds use `process.cwd()` |
@@ -175,6 +175,12 @@ break this plugin:
 - **Command `execute` receives a prompt *object*, not a string**: v2 hands
   the handler a `PromptInput.Prompt`. The command bridge reads `.text`
   (`invocation?.prompt?.text ?? ''`) and never assumes a string.
+- **Duplicate idle delivery.** v2 deprecated `session.idle` in favor of
+  `session.status`; the adapter synthesizes `session.idle` additively, so an
+  idle-tolerant consumer watching both events sees idle twice per session.
+  Current consumers are idempotent per session (idle-reconciliation's
+  per-session timer guards); new idle consumers must tolerate duplicate
+  delivery.
 
 ## Installing on v2
 
@@ -268,8 +274,8 @@ spec while retaining frontmatter and Q&A history.
   `packages/core/src/tool/plugin/subagent.ts` sends a
   `session.synthetic` message with a `<subagent sessionID state …>`
   envelope to the parent). The capability stays v1-only (it also requires
-  host `session.get`/`todo`/`children`/`status`/`promptAsync` surfaces the
-  v2 shim does not shim).
+  host `todo`/`children` surfaces — and the v1 live session-`status` map —
+  that the v2 shim does not provide).
 - **`chat.headers`.** Not bridged (low value on v2 — an HTTP request hook
   exists if demand appears).
 
