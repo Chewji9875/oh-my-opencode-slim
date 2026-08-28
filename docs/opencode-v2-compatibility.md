@@ -76,13 +76,13 @@ the rest.
 |---|---|---|---|
 | Orchestrator + specialist agents | ✅ | ✅ | |
 | Agent prompts / system injection | ✅ | ✅ | via `session.hook("context")` |
-| Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2 |
-| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep needs a CLI binary (installed package, system binary, or lazy download); webfetch needs `jsdom` resolvable |
+| Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2; host `subagent` calls are auto-bridged into the background-job pipeline (name/args normalization + output parsing) |
+| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep needs a CLI binary (installed package, system binary, or lazy download); webfetch needs `jsdom` resolvable; webfetch secondary-model summaries work via `ctx.generate.text` |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ | |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ | |
 | Event handling (session tracking, lifecycle) | ✅ | ✅ | |
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ | |
-| Built-in MCPs (context7, grep.app) | ✅ | ⚠️ config-only | v2 has no programmatic MCP hook; add 2 lines to `opencode.json` — see [below](#restoring-built-in-mcps-on-v2) |
+| Built-in MCPs (context7, grep.app) | ✅ | ✅ | auto-registered via `ctx.mcp.transform` (needs a v2 build with #45408; older builds fall back to config-only — see [below](#restoring-built-in-mcps-on-v2)) |
 | `/preset` (interactive switcher) | ✅ | ❌ at load only | the switcher is a v1-TUI 3-level UI; on v2 set `"preset"` in the config file (applies at load) |
 | Foreground model fallback (rate-limit failover) | ✅ | ❌ | v2 locks the model at session creation; the plugin API has no per-prompt model override, session model-setter, or `/model` command, so mid-flight switching is impossible |
 | Orchestrator wake scheduler (`backgroundJobs.orchestratorWake`) | ✅ | ❌ | Requires host `session.get` / `todo` / `children` / `status` / `promptAsync`; the v2 shim lacks these APIs so the capability-gated feature stays inactive |
@@ -210,6 +210,6 @@ These are adapter/environment caveats that can be worked around:
   `jsdom` is resolvable to enable webfetch locally. AST-grep resolves its CLI
   independently and lazily downloads a binary when no package or system binary
   is available.
-- **directory source.** v2's plugin context does not expose the project
-  directory, so the adapter uses `process.cwd()`. Run `opencode2` from your
-  project root (or use `--standalone`, which sets cwd to the project).
+- **directory source.** Resolved from `ctx.location.directory` (v2 build with
+  #45403+) with a `process.cwd()` fallback for older builds. Run `opencode2`
+  from your project root when running an older build without `ctx.location`.
