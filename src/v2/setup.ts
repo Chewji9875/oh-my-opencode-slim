@@ -15,6 +15,7 @@ import { OhMyOpenCodeLite } from '../index';
 import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
 import { buildPluginInput } from './client-shim';
+import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { createV2InterviewBridge } from './interview-bridge';
 import {
   createSessionSubmit,
@@ -275,6 +276,88 @@ export function createSessionContextHandler(
   };
 }
 
+/** The v2→v1 tool.execute bridge pair produced by
+ * `createToolExecuteBridges`. */
+export interface V2ToolBridgeEvents {
+  beforeBridge: (
+    event: Record<string, unknown> & { input: unknown },
+  ) => Promise<void>;
+  afterBridge: (
+    event: Record<string, unknown> & { result?: unknown },
+  ) => Promise<void>;
+}
+
+/** Build the tool.execute.before/after v2→v1 bridges, including the
+ * `subagent`→`task` delegation normalization. Exported for tests. */
+export function createToolExecuteBridges(
+  before:
+    | ((
+        i: { tool: string; sessionID: string; callID: string },
+        o: { args: unknown },
+      ) => Promise<void>)
+    | undefined,
+  after: ((i: unknown, o: unknown) => Promise<void>) | undefined,
+): V2ToolBridgeEvents {
+  const beforeBridge = async (
+    event: Record<string, unknown> & { input: unknown },
+  ): Promise<void> => {
+    if (!before) return;
+    const e = event as unknown as V2ToolBeforeEvent;
+    const isDelegation = e.tool.toLowerCase() === 'subagent';
+    const argsView = isDelegation
+      ? subagentArgsToV1(e.input)
+      : { ...(e.input as object) };
+    const out: { args: unknown } = { args: argsView };
+    // Rethrow: v2 rejects the tool call when execute.before fails, which is
+    // how the v1 anti-duplicate / relaunch-lease guards enforce on v2.
+    await before(
+      { tool: toolNameToV1(e.tool), sessionID: e.sessionID, callID: e.id },
+      out,
+    );
+    // Hooks like apply-patch replace output.args with recovered/normalized
+    // arguments; write back (translated back to v2 names for delegation)
+    // so v2 executes the repaired input instead of the original.
+    e.input = isDelegation
+      ? v1ArgsToSubagent(out.args as Record<string, unknown>)
+      : out.args;
+  };
+
+  const afterBridge = async (
+    event: Record<string, unknown> & { result?: unknown },
+  ): Promise<void> => {
+    if (!after) return;
+    const e = event as unknown as V2ToolAfterEvent;
+    const isDelegation = e.tool.toLowerCase() === 'subagent';
+    // Map v2 Tool.Result.content (string | Content[]) -> v1 output.output
+    // string; the v1 after-hooks (postFileToolNudge, jsonErrorRecovery,
+    // taskSessionManagerAfter) read output.output to decide nudges.
+    const result = e.result as
+      | { content?: unknown; metadata?: Record<string, unknown> }
+      | undefined;
+    const rawContent = result?.content;
+    const content =
+      typeof rawContent === 'string'
+        ? rawContent
+        : Array.isArray(rawContent)
+          ? (rawContent as Array<{ type?: string; text?: string }>)
+              .filter((p) => p?.type === 'text')
+              .map((p) => p.text ?? '')
+              .join('')
+          : '';
+    await after(
+      {
+        tool: toolNameToV1(e.tool),
+        sessionID: e.sessionID,
+        callID: e.id,
+        args: isDelegation ? subagentArgsToV1(e.input) : e.input,
+      },
+      { output: content, title: '', metadata: result?.metadata ?? {} },
+    );
+  };
+
+  return { beforeBridge, afterBridge };
+}
+
 export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
   return async (ctx: V2Context): Promise<V2Cleanup> => {
     const sessionId = new Date()
@@ -514,57 +597,22 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const after = v1Hooks['tool.execute.after'] as
         | ((i: unknown, o: unknown) => Promise<void>)
         | undefined;
+      const bridges = createToolExecuteBridges(before, after);
       if (before) {
         const reg = await ctx.tool.hook('execute.before', async (event) => {
-          const e = event as V2ToolBeforeEvent;
           try {
-            const out = { args: e.input };
-            await before(
-              { tool: e.tool, sessionID: e.sessionID, callID: e.id },
-              out,
-            );
-            // Hooks like apply-patch replace output.args with recovered/
-            // normalized arguments; write back so v2 executes the repaired
-            // input instead of the original.
-            e.input = out.args;
+            await bridges.beforeBridge(event as never);
           } catch (err) {
-            log('[v2] tool.execute.before bridge failed', String(err));
+            log('[v2] tool.execute.before rejected call', String(err));
+            throw err; // v2 refuses the call (see createToolExecuteBridges)
           }
         });
         disposers.push(() => reg.dispose());
       }
       if (after) {
         const reg = await ctx.tool.hook('execute.after', async (event) => {
-          const e = event as V2ToolAfterEvent;
-          // Map v2 Tool.Result.content (string | Content[]) -> v1 output.output
-          // string; the v1 after-hooks (postFileToolNudge, jsonErrorRecovery,
-          // taskSessionManagerAfter) read output.output to decide nudges.
-          const result = e.result as
-            | {
-                content?: unknown;
-                metadata?: Record<string, unknown>;
-              }
-            | undefined;
-          const rawContent = result?.content;
-          const content =
-            typeof rawContent === 'string'
-              ? rawContent
-              : Array.isArray(rawContent)
-                ? (rawContent as Array<{ type?: string; text?: string }>)
-                    .filter((p) => p?.type === 'text')
-                    .map((p) => p.text ?? '')
-                    .join('')
-                : '';
           try {
-            await after(
-              {
-                tool: e.tool,
-                sessionID: e.sessionID,
-                callID: e.id,
-                args: e.input,
-              },
-              { output: content, title: '', metadata: result?.metadata ?? {} },
-            );
+            await bridges.afterBridge(event as never);
           } catch (err) {
             log('[v2] tool.execute.after bridge failed', String(err));
           }

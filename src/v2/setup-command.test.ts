@@ -6,6 +6,7 @@ import {
   applyCommandMarkerToContext,
   createCommandRegistration,
   createSessionContextHandler,
+  createToolExecuteBridges,
   parseCommandMarker,
   registerSynthCommands,
   stripCommandMarker,
@@ -530,5 +531,83 @@ describe('createSessionContextHandler (merged context hook seam)', () => {
       recursive: true,
       force: true,
     });
+  });
+});
+
+describe('tool execute bridge normalization', () => {
+  test('before bridge maps subagent call into v1 task shape and writes back', async () => {
+    const seen: Array<{ tool: string; args: unknown }> = [];
+    const before = async (
+      i: { tool: string; sessionID: string; callID: string },
+      o: { args: unknown },
+    ) => {
+      seen.push({ tool: i.tool, args: { ...(o.args as object) } });
+      (o.args as Record<string, unknown>).task_id = 'ses_rewritten';
+    };
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_1',
+      input: {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        sessionID: 'ses_old',
+      },
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(event);
+    expect(seen[0]).toMatchObject({ tool: 'task' });
+    expect(seen[0]?.args).toMatchObject({
+      subagent_type: 'fixer',
+      task_id: 'ses_old',
+    });
+    expect(event.input).toEqual({
+      agent: 'fixer',
+      description: 'd',
+      prompt: 'p',
+      sessionID: 'ses_rewritten',
+    });
+  });
+
+  test('before bridge rethrows hook rejection so v2 refuses the call', async () => {
+    const before = async () => {
+      throw new Error('duplicate spawn refused');
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await expect(
+      beforeBridge({
+        tool: 'subagent',
+        sessionID: 's',
+        agent: 'a',
+        messageID: 'm',
+        id: 'c',
+        input: {},
+      }),
+    ).rejects.toThrow('duplicate spawn refused');
+  });
+
+  test('after bridge presents subagent output under task name', async () => {
+    const seen: Array<{ tool: string; output: unknown }> = [];
+    const after = async (_i: unknown, o: { output: unknown }) => {
+      seen.push({ tool: 'task', output: o.output });
+    };
+    const { afterBridge } = createToolExecuteBridges(undefined, after);
+    await afterBridge({
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed',
+      result: {
+        content:
+          'The subagent is working in the background (sessionID: ses_x).',
+      },
+    });
+    expect(seen[0]?.output).toContain('(sessionID: ses_x)');
   });
 });
