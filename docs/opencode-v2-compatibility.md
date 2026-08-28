@@ -152,7 +152,7 @@ this adapter are changing quickly), pin an exact version:
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@2.0.3"]
+  "plugin": ["oh-my-opencode-slim@2.2.17"]
 }
 ```
 
@@ -188,7 +188,7 @@ Add to `~/.config/opencode2/opencode.json`:
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@2.0.3"]
+  "plugin": ["oh-my-opencode-slim@2.2.17"]
 }
 ```
 
