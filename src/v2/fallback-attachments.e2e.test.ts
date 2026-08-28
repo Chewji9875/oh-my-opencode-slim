@@ -30,9 +30,10 @@ interface Call {
   i: unknown;
 }
 
-function makeCtx(
-  overrides: Partial<V2Context['session']>,
-): { ctx: V2Context; seq: Call[] } {
+function makeCtx(overrides: Partial<V2Context['session']>): {
+  ctx: V2Context;
+  seq: Call[];
+} {
   const seq: Call[] = [];
   const ctx = {
     app: { name: 'opencode2', version: 'test' },
