@@ -15,7 +15,7 @@ import { OhMyOpenCodeLite } from '../index';
 import type { McpConfig } from '../mcp/types';
 import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
-import { buildPluginInput } from './client-shim';
+import { buildPluginInput, resolveV2Directory } from './client-shim';
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { createV2InterviewBridge } from './interview-bridge';
 import {
@@ -391,13 +391,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     }
     log('[v2] setup invoked', { app: ctx.app, cwd: process.cwd() });
 
-    // Prefer the host-reported location; fall back to cwd on hosts
-    // without ctx.location (or with an empty directory).
-    const location = ctx.location;
-    const directory =
-      typeof location?.directory === 'string' && location.directory
-        ? location.directory
-        : process.cwd();
+    // Directory/location resolution lives in the shim now (single source);
+    // setup still needs the directory for config loading and tool adapters.
+    const directory = resolveV2Directory(ctx);
     const disposers: Array<() => Promise<void> | void> = [];
     let v1Hooks: Record<string, unknown> | undefined;
 
@@ -429,7 +425,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       log('[v2] ctx.generate.text', {
         available: typeof generateText === 'function',
       });
-      const pluginInput = buildPluginInput(directory, generateChannel);
+      const pluginInput = buildPluginInput(ctx, generateChannel);
       log('[v2] calling OhMyOpenCodeLite...');
       v1Hooks = (await OhMyOpenCodeLite(
         pluginInput as never,

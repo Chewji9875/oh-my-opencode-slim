@@ -112,6 +112,23 @@ export interface V2Context {
       name: 'context',
       cb: (event: V2SessionContextEvent) => Promise<void>,
     ): Promise<V2Registration>;
+    /** v2 session.get — SessionInfo by id (runtime-probed). */
+    get?(input: { sessionID: string }): Promise<unknown>;
+    /** v2 session.interrupt — `continue: false` aborts the active run. */
+    interrupt?(input: {
+      sessionID: string;
+      continue?: boolean;
+    }): Promise<unknown>;
+    /** v2 session.switchModel — v2 prompts carry no model, so a model
+     * change must precede the prompt (runtime-probed). */
+    switchModel?(input: {
+      sessionID: string;
+      model: { id: string; providerID: string; variant?: string };
+    }): Promise<unknown>;
+    /** v2 session.context — full transcript; replaces v1 session.messages. */
+    context?(input: {
+      sessionID: string;
+    }): Promise<Array<Record<string, unknown>>>;
     /** v2 session.prompt — flat PromptInput ({sessionID, text, files?,
      * agents?, skills?, metadata?, delivery?, resume?}). */
     prompt?(input: Record<string, unknown>): Promise<unknown>;

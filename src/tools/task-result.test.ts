@@ -542,8 +542,7 @@ describe('task_result', () => {
       state: 'completed',
       resultSummary: 'complete findings',
     });
-    mockClient = (buildPluginInput('/test/project') as { client: never })
-      .client;
+    mockClient = (buildPluginInput({} as never) as { client: never }).client;
 
     const output = await tool.execute({ task_id: 'exp-1' }, {
       sessionID: 'parent-1',
