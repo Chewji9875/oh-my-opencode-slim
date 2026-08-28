@@ -403,7 +403,33 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
     try {
       log('[v2] importing v1 factory...');
-      const pluginInput = buildPluginInput(directory);
+      // Capability probe: v2 one-shot generation (`ctx.generate.text`),
+      // probed structurally since V2Context stays minimal by design.
+      // Powers the smartfetch secondary-model summaries without a temp
+      // session; absent on older hosts → no `experimental_v2` key at all.
+      const generateText = (
+        ctx as {
+          generate?: {
+            text?: (input: {
+              prompt: string;
+              model?: { id: string; providerID: string; variant?: string };
+            }) => Promise<{ text: string }>;
+          };
+        }
+      ).generate?.text;
+      const generateChannel =
+        typeof generateText === 'function'
+          ? {
+              generateText: (
+                prompt: string,
+                model?: { id: string; providerID: string; variant?: string },
+              ) => generateText({ prompt, ...(model ? { model } : {}) }),
+            }
+          : undefined;
+      log('[v2] ctx.generate.text', {
+        available: typeof generateText === 'function',
+      });
+      const pluginInput = buildPluginInput(directory, generateChannel);
       log('[v2] calling OhMyOpenCodeLite...');
       v1Hooks = (await OhMyOpenCodeLite(
         pluginInput as never,

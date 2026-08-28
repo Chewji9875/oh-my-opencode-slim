@@ -11,8 +11,31 @@
 
 import { log } from '../utils/logger';
 
-/** Build a v1-compatible PluginInput from the v2 context. */
-export function buildPluginInput(directory: string): Record<string, unknown> {
+/** v2 model reference accepted by `ctx.generate.text`. */
+export interface V2GenerateModelRef {
+  id: string;
+  providerID: string;
+  variant?: string;
+}
+
+/** Optional v2 capabilities threaded into the v1 PluginInput. Absent
+ * capabilities must leave the input object unchanged (v1 parity). */
+export interface ExperimentalV2 {
+  /** One-shot generation (`ctx.generate.text`); no session involved. */
+  generateText?: (
+    prompt: string,
+    model?: V2GenerateModelRef,
+  ) => Promise<{ text: string }>;
+}
+
+/** Build a v1-compatible PluginInput from the v2 context. The optional
+ * `v2` argument threads probed v2 capabilities (e.g. one-shot generation)
+ * through as `experimental_v2`; when absent no `experimental_v2` key is
+ * added so the v1 pipeline stays byte-identical. */
+export function buildPluginInput(
+  directory: string,
+  v2?: ExperimentalV2,
+): Record<string, unknown> {
   const client = {
     session: {
       // Accept both Hono-style ({path:{id}}) and flat ({sessionID}) calls.
@@ -66,5 +89,8 @@ export function buildPluginInput(directory: string): Record<string, unknown> {
     experimental_workspace: { register() {} },
     serverUrl: new URL('http://localhost:4096'),
     $: typeof Bun !== 'undefined' ? Bun.$ : undefined,
+    ...(v2?.generateText
+      ? { experimental_v2: { generateText: v2.generateText } }
+      : {}),
   };
 }
