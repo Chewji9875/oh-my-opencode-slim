@@ -2,7 +2,8 @@
 
 oh-my-opencode-slim installs and runs on **both** OpenCode v1 (`opencode`) and
 OpenCode v2 (`opencode2`) from a single published package. This document
-explains how the dual-compatibility works and what is supported on each host.
+explains how the dual-compatibility works, what is supported on each host, the
+minimum v2 build each feature needs, and how it degrades on older builds.
 
 ## How it works
 
@@ -11,6 +12,7 @@ The package's default export is an object:
 ```ts
 export default {
   id: 'oh-my-opencode-slim',
+  tui: true,             // marker: this package ships a `./tui` entry for v2 TUI hosts
   server: OhMyOpenCodeLite, // v1 plugin function (PluginInput) => Promise<Hooks>
   setup: createV2Setup(),   // v2 promise-plugin setup (ctx) => Promise<cleanup>
 };
@@ -24,8 +26,10 @@ export default {
   `packages/core/src/plugin/supervisor.ts`) decodes `default` as
   `{ id, setup }` (Effect Schema 4 rejects function defaults) and calls
   `setup(ctx)` via the promise-plugin bridge.
+- **v2 TUI** additionally loads the `./tui` entry (below) when the server-side
+  export declares `tui: true`.
 
-Two builds are produced:
+Three builds are produced:
 
 | Export | File | Build | Externals |
 |---|---|---|---|
@@ -39,22 +43,33 @@ v2's plugin resolver tries the `server` subpath first
 
 **Supported v2 builds:** verified on `beta-18269` and `beta-18286` (add-only
 command drafts; flat session `prompt`/`synthetic`/`rename`/`switchAgent`).
+Newer builds add the capabilities listed under
+[Capability floors](#capability-floors-and-version-policy).
 
 ## The v2 adapter (`src/v2/setup.ts`)
 
 `setup(ctx)` wraps the existing v1 factory rather than reimplementing it:
 
-1. Builds a v1-shaped `PluginInput` from the v2 context (`process.cwd()` for
-   `directory`; a shim `client` that delegates `session.abort/prompt/messages`,
-   `app.log`, and `tui.showToast` to the v2 context or graceful no-ops).
+1. Builds a v1-shaped `PluginInput` from the v2 context
+   (`src/v2/client-shim.ts`): the project directory from `ctx.location`
+   (v2 ≥ #45403; `process.cwd()` on older builds), and a shim `client` that
+   **really delegates** the v1 SDK call shapes to v2 flat session calls —
+   `session.get`, `session.abort`→`interrupt`, `session.messages`→`context`,
+   `session.prompt` (as `delivery: "steer"`), and `session.update`→`rename`.
+   The shim marks the input `hostFlavor: 'v2'` and never fakes success
+   shapes: methods the host lacks degrade with an honest log (or are omitted
+   entirely, as with `session.get`, so capability probes see the truth).
 2. Invokes `OhMyOpenCodeLite(pluginInput)` to reuse **all** existing build
    logic (config, agents, tools, hooks, job board, multiplexer, companion).
 3. Runs the v1 `config()` hook against a synthesized config to resolve agent
    models and the slash commands.
 4. Bridges the returned v1 `Hooks` into v2 registrations:
    - `agent` → `ctx.agent.transform` (model/prompt/permission adaptation +
-     `subagent`/`execute` permission mapping + prompt rewrite `task`→`subagent`)
+     `subagent`/`execute` permission mapping + prompt rewrite `task`→`subagent`
+     + `draft.default("orchestrator")`)
    - `tool` → `ctx.tool.transform` (zod shape → JSON schema; execute shimmed)
+   - `mcp` → `ctx.mcp.transform` (`draft.set(name, adaptMcpServer(cfg))` for
+     the built-in MCPs; v2 ≥ #45408, see below)
    - `command` → `ctx.command.transform` — v2 command drafts are add-only:
      `draft.add({name, description, execute})`. `execute` submits a
      `<omos-cmd-command data-name="...">` marker as a user prompt; the session
@@ -63,33 +78,103 @@ command drafts; flat session `prompt`/`synthetic`/`rename`/`switchAgent`).
    - a single `ctx.session.hook("context")` handles the system/messages
      transforms (SystemPart[]/Message.content shape conversion),
      `chat.message` agent tracking, and interview + generic command marker
-     dispatch
-   - `tool.execute.before/after` → `ctx.tool.hook`
-   - `event` → `ctx.event.subscribe()` loop
+     dispatch — mutating only the trailing message so earlier content stays
+     byte-identical (provider prompt-cache prefix reuse)
+   - `tool.execute.before/after` → `ctx.tool.hook` via
+     `createToolExecuteBridges` (`src/v2/setup.ts`): the host `subagent` tool
+     is normalized to v1 `task` semantics (name mapping, `agent`→
+     `subagent_type`, `sessionID`→`task_id`, and back after the hook so v2
+     executes the repaired input). A throwing `execute.before` **rethrows** —
+     v2 rejects the tool call, which is how the v1 anti-duplicate /
+     relaunch-lease guards enforce on v2
+   - `event` → `ctx.event.subscribe()` loop feeding `mapV2EventToV1`
+     (`src/v2/event-adapter.ts`): additive synthesis only — the raw v2 event
+     is always dispatched first (the interview bridge depends on it), then
+     synthesized v1 shapes: idle `session.status` → `session.idle`, flat
+     child `session.created` → v1 early-registration
+     `{info: {id, parentID, agent?}}`, and usage telemetry
+     (`session.usage.updated`/`session.step.ended`) → a deduplicated
+     completed-assistant `message.updated` for the cache monitor
+   - `generate.text` → one-shot generation channel probed on `ctx.generate`
+     and threaded as `experimental_v2.generateText`, powering the webfetch
+     secondary-model summaries without a temp session
    - `dispose` → returned cleanup
 
 Each bridge is independently try/catch-guarded so one failure cannot disable
-the rest.
+the rest, and a zero-registration load logs a loud health-check warning.
 
 ## Feature matrix
 
-| Capability | v1 (`opencode`) | v2 (`opencode2`) | Notes |
+| Capability | v1 (`opencode`) | v2 (`opencode2`) | Minimum v2 capability / degradation |
 |---|---|---|---|
-| Orchestrator + specialist agents | ✅ | ✅ | |
-| Agent prompts / system injection | ✅ | ✅ | via `session.hook("context")` |
-| Delegation to subagents | ✅ `task` | ✅ `subagent` | prompts rewritten for v2; host `subagent` calls are auto-bridged into the background-job pipeline (name/args normalization + output parsing) |
-| Tools (ast-grep, webfetch, task_message, task_cancel, task_revive, wait_for_user, acp_run) | ✅ | ✅* | `*` ast-grep needs a CLI binary (installed package, system binary, or lazy download); webfetch needs `jsdom` resolvable; webfetch secondary-model summaries work via `ctx.generate.text` |
-| Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ | |
-| Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ | |
-| Event handling (session tracking, lifecycle) | ✅ | ✅ | |
-| Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ | |
-| Built-in MCPs (context7, grep.app) | ✅ | ✅ | auto-registered via `ctx.mcp.transform` (needs a v2 build with #45408; older builds fall back to config-only — see [below](#restoring-built-in-mcps-on-v2)) |
-| `/preset` (interactive switcher) | ✅ | ✅ | v2 ships a TUI plugin entry (`./tui` → `dist/tui2.js`) with a `/preset` dialog (select or `/preset <name>` fast path); config-file `preset` still applies at load |
-| Foreground model fallback (rate-limit failover) | ✅ | ✅ | the v2 client shim translates the v1 re-prompt into `session.switchModel` + a `delivery:"steer"` prompt (needs a v2 build with #43718) |
-| Orchestrator wake scheduler (`backgroundJobs.orchestratorWake`) | ✅ | ❌ | Requires host `session.get` / `todo` / `children` / `status` / `promptAsync`; the v2 shim lacks these APIs so the capability-gated feature stays inactive |
-| Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ host-gated off | v1-TUI-pane integration; explicitly disabled on v2 hosts (v2 renders subagents natively) |
+| Orchestrator + specialist agents, prompts & permission mapping | ✅ | ✅ `ctx.agent.transform` | — |
+| Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | — |
+| Tools (ast-grep, webfetch, task_message/task_cancel/task_revive, wait_for_user, acp_run) | ✅ | ✅ `ctx.tool.transform` | ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
+| Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | command `execute` callbacks ≥ `beta-18269`; older builds register no commands |
+| `/interview` | ✅ | ✅ marker command + trailing-message context bridge | — |
+| Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ via the single context hook | — |
+| Event handling (session tracking, lifecycle, cache telemetry) | ✅ | ✅ event pump + additive v2→v1 synthesis | — |
+| Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ `createToolExecuteBridges` with subagent→task normalization | — |
+| Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `mcp.transform` ≥ #45408; older builds degrade to config-only — see [the snippet](#restoring-built-in-mcps-on-older-v2-builds) |
+| webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | absent → summaries fall back to the session pipeline |
+| Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | `switchModel` ≥ #43718; older builds steer on the current model with an honest log (fallback inactive) |
+| `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | TUI host needs `keymap.layer` + `ui.dialog.select`; config-file `preset` still applies at load |
+| Project directory | ✅ | ✅ `ctx.location.directory` | ≥ #45403; older builds use `process.cwd()` |
+| TUI default agent | ✅ orchestrator | ✅ orchestrator — `draft.default("orchestrator")`; recent v2 TUI builds honor `default_agent` and hoist the default to the head of the agent list | needs a recent v2 build |
+| Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
+| Orchestrator-wake scheduler | ✅ | ❌ evaluated, intentionally not ported | v2's built-in `subagent` tool posts completion notifications to the parent natively, which covers the wake scheduler's job; see [Limitations](#limitations) |
+| `chat.headers` (custom request headers) | ✅ | ❌ unbridged | low value: v2 exposes an HTTP request hook (`session.hook("http.request")`) — will bridge only if asked for |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
-| Default agent on new session | ✅ orchestrator | ⚠️ TUI shows `build` | v1 sets `default_agent`; v2's TUI ignores that field and defaults to the first agent in its list (`build`). `run`/API still default to orchestrator. See [limitations](#limitations) |
+
+## Capability floors and version policy
+
+v2 moves fast and beta numbers are CI build IDs, so floors are stated as
+upstream PR/commit references rather than versions:
+
+| Feature | Floor | Older-build behavior |
+|---|---|---|
+| Programmatic MCP registration (`ctx.mcp.transform`) | ≥ #45408 | MCPs stay config-only (logged); add them manually with [the snippet](#restoring-built-in-mcps-on-older-v2-builds) |
+| Foreground model switch (`ctx.session.switchModel`) | ≥ #43718 | re-prompt steers on the current model (logged) — rate-limit failover inactive |
+| Project directory (`ctx.location`) | ≥ #45403 | resolved from `process.cwd()` — run `opencode2` from your project root |
+| Command `execute` callbacks (add-only drafts) | ≥ `beta-18269` | slash commands do not register |
+
+Every v2 API the adapter touches is capability-probed at runtime
+(`typeof ctx.mcp?.transform === 'function'`, `s.switchModel`, `ctx.generate`,
+…), so one missing capability degrades that single feature with a log line
+instead of breaking the load.
+
+### Pin your plugin version on v2
+
+v2 **auto-refreshes unpinned npm plugins on every startup** (#45118) —
+`"oh-my-opencode-slim@latest"` effectively means "silently upgrade whenever a
+new version ships". During the current rapid-evolution window (both v2 and
+this adapter are changing quickly), pin an exact version:
+
+```json
+{
+  "plugin": ["oh-my-opencode-slim@2.0.3"]
+}
+```
+
+and bump it deliberately. The plugin logs its active capability set on load,
+so a pinned older build behaves exactly the same tomorrow as it does today.
+
+## Known upstream behaviors
+
+Behaviors of v2 itself that plugin authors should know about — none currently
+break this plugin:
+
+- **MCP tool namespace casing** (#45618): v2 changed the casing of generated
+  MCP tool-name namespaces. **Safe here** — neither the adapters nor the hooks
+  match raw MCP tool names; MCP access is granted per server name
+  (`"mcps": ["context7", "!gh_grep"]` in agent config), and the registration
+  uses our own server names via `draft.set(name, ...)`.
+- **`tool.execute.before` carries no `inputSchema`**: the v2 before-hook
+  event has no tool schema. We don't consume one — the bridge passes a mutable
+  `args` view and writes back what hooks produce.
+- **Command `execute` receives a prompt *object*, not a string**: v2 hands
+  the handler a `PromptInput.Prompt`. The command bridge reads `.text`
+  (`invocation?.prompt?.text ?? ''`) and never assumes a string.
 
 ## Installing on v2
 
@@ -97,9 +182,12 @@ Add to `~/.config/opencode2/opencode.json`:
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@latest"]
+  "plugin": ["oh-my-opencode-slim@2.0.3"]
 }
 ```
+
+(Pin the exact current version — see
+[version policy](#capability-floors-and-version-policy).)
 
 For local development, point at the built `dist/server.js` directly:
 
@@ -113,7 +201,8 @@ Then build:
 
 ```bash
 bun install
-bun run build   # produces dist/index.js (v1) AND dist/server.js (v2)
+bun run build   # produces dist/index.js (v1), dist/server.js (v2 server),
+                # dist/tui2.js (v2 TUI), dist/cli/
 ```
 
 Verify with `opencode2 run "list your specialist agents" --standalone` — the
@@ -126,17 +215,16 @@ Agent models are resolved the same way as v1 (per-agent `model` in
 set a working provider+model in your v2 config or the plugin's config file so
 delegated subagents can run.
 
-> **Rate-limit fallback is not available on v2.** v2 locks a session's model at
-> creation; the plugin context exposes no per-prompt model override, no
-> session-level model setter, and no `/model` command. If you hit a 429/rate
-> limit, switch the model manually (start a new session or change the configured
-> model) — the plugin cannot do this automatically on v2.
+Rate-limit fallback works on v2 builds with `switchModel` (≥ #43718): when the
+foreground model hits a rate limit, the plugin switches the session's model and
+steers the re-prompt through `delivery: "steer"`. On older builds the fallback
+stays inactive and logs honestly — switch the model manually there.
 
-## Restoring built-in MCPs on v2
+## Restoring built-in MCPs on older v2 builds
 
-v2 has no programmatic MCP-registration hook, so the plugin's two built-in
-remote MCPs are not auto-registered. They are plain remote URLs — copy this into
-your `~/.config/opencode2/opencode.json` to restore them:
+On v2 builds without `ctx.mcp.transform` (< #45408) the two built-in remote
+MCPs are not auto-registered. They are plain remote URLs — copy this into your
+`~/.config/opencode2/opencode.json` to restore them:
 
 ```json
 {
@@ -166,39 +254,23 @@ notifications, and renames. The markdown document remains the durable source
 of truth; completion responses without `<interview_state>` rewrite the current
 spec while retaining frontmatter and Q&A history.
 
-These are **v2 API constraints**, not adapter gaps — they cannot be fixed in the
-plugin without v2 adding the corresponding capability:
+### v1-only, by design
 
-- **Foreground model fallback impossible.** v2's `SessionPromptInput` has no
-  `model` field, the plugin `SessionDomain` exposes only
-  `create/get/prompt/generate/command/synthetic/interrupt` (no model setter),
-  and there is no `/model` command. A session's model is fixed at creation, so
-  the plugin cannot switch models on a rate-limited foreground session.
-  v1-only.
-- **Interactive `/preset` switcher impossible.** The switcher is a three-level
-  v1-TUI UI (`@opentui/solid`). v2 slash commands have had `execute` handlers
-  since beta-18269, but the plugin API offers no interactive multi-level TUI
-  UI, so the switcher stays v1-only. **Workaround:** set `"preset"` in
-  `oh-my-opencode-slim.json` — it applies at plugin load and resolves all agent
-  models correctly.
-- **No programmatic MCP registration.** v2's plugin context has no MCP domain.
-  Declare MCPs in `opencode.json` (snippet above).
-- **Multiplexer panes.** tmux/zellij/herdr integration is a v1-TUI feature; v2
-  renders subagents natively, so this is intentionally not ported.
-- **TUI default agent is `build`, not `orchestrator`.** v1 sets
-  `default_agent = "orchestrator"` in its config hook and the v1 TUI honors it.
-  The v2 adapter does call `ctx.agent.transform(draft => draft.default("orchestrator"))`,
-  which makes `run`/API default to the orchestrator — but the v2 TUI ignores the
-  `default_agent` config field entirely and instead defaults to the **first agent
-  in its list** (`list()[0]`, insertion order), which is v2's built-in `build`.
-  The plugin API offers no list-reorder, and `AgentDraft` has no "move to front".
-  Effect: `opencode2 run` and programmatic sessions use the orchestrator; opening
-  the v2 TUI / starting a new session there defaults to `build` (switch once; the
-  choice is persisted per-session via `saved.session[id].agent`, but each brand-new
-  session resets to `build`). Requires an upstream v2 change (TUI honoring
-  `default_agent`, or a list-order/default API for plugins) to fix.
+- **Multiplexer panes.** tmux/zellij/herdr integration is a v1-TUI feature;
+  v2 renders subagents natively, so the multiplexer is host-gated off on v2
+  (`shouldEnableMultiplexer` / `sessionManagerMultiplexerConfig` in
+  `src/index.ts`).
+- **Orchestrator-wake scheduler** (`backgroundJobs.orchestratorWake`).
+  Evaluated and intentionally not ported: the scheduler's job — nudging an
+  idle parent with unfinished work — is covered on v2 by the host's built-in
+  `subagent` tool, which posts completion notifications to the parent session
+  natively. The capability stays v1-only (it also requires host
+  `session.get`/`todo`/`children`/`status`/`promptAsync` surfaces the v2 shim
+  does not shim).
+- **`chat.headers`.** Not bridged (low value on v2 — an HTTP request hook
+  exists if demand appears).
 
-These are adapter/environment caveats that can be worked around:
+### Environment caveats
 
 - **Reduced/TUI-side hosts.** Some host processes load the plugin's `setup`
   with a reduced, TUI-side context that lacks `agent.transform` (and other
@@ -211,6 +283,10 @@ These are adapter/environment caveats that can be worked around:
   `jsdom` is resolvable to enable webfetch locally. AST-grep resolves its CLI
   independently and lazily downloads a binary when no package or system binary
   is available.
-- **directory source.** Resolved from `ctx.location.directory` (v2 build with
-  #45403+) with a `process.cwd()` fallback for older builds. Run `opencode2`
-  from your project root when running an older build without `ctx.location`.
+- **Companion app unverified on v2.** The companion is an independent desktop
+  app; test it separately against v2 hosts.
+- **Prompt-cache rules unchanged.** The v2 bridges reuse the v1 transform
+  pipeline under the same cache-safety contract: only trailing messages are
+  mutated, earlier content stays byte-identical, and the v1 enforcement suite
+  (`src/hooks/cache-safety.property.test.ts` and friends) covers the shared
+  transform code the v2 context hook invokes.
