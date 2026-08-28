@@ -391,7 +391,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     }
     log('[v2] setup invoked', { app: ctx.app, cwd: process.cwd() });
 
-    const directory = process.cwd();
+    // Prefer the host-reported location; fall back to cwd on hosts
+    // without ctx.location (or with an empty directory).
+    const location = ctx.location;
+    const directory =
+      typeof location?.directory === 'string' && location.directory
+        ? location.directory
+        : process.cwd();
     const disposers: Array<() => Promise<void> | void> = [];
     let v1Hooks: Record<string, unknown> | undefined;
 

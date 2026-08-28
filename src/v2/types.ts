@@ -85,6 +85,12 @@ export interface V2McpDraft {
 export interface V2Context {
   readonly app: { readonly name: string; readonly version: string };
   readonly options: Record<string, unknown>;
+  /** Host location (probe before use; fall back to process.cwd()). */
+  readonly location?: {
+    directory: string;
+    workspaceID?: string;
+    project: { id: string; directory: string; canonical: string };
+  };
   agent: {
     transform(cb: (draft: V2AgentDraft) => void): Promise<V2Registration>;
     reload(): Promise<unknown>;
