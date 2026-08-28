@@ -264,9 +264,12 @@ spec while retaining frontmatter and Q&A history.
   Evaluated and intentionally not ported: the scheduler's job — nudging an
   idle parent with unfinished work — is covered on v2 by the host's built-in
   `subagent` tool, which posts completion notifications to the parent session
-  natively. The capability stays v1-only (it also requires host
-  `session.get`/`todo`/`children`/`status`/`promptAsync` surfaces the v2 shim
-  does not shim).
+  natively (verified in the v2 source: `notifyWhenDone` in
+  `packages/core/src/tool/plugin/subagent.ts` sends a
+  `session.synthetic` message with a `<subagent sessionID state …>`
+  envelope to the parent). The capability stays v1-only (it also requires
+  host `session.get`/`todo`/`children`/`status`/`promptAsync` surfaces the
+  v2 shim does not shim).
 - **`chat.headers`.** Not bridged (low value on v2 — an HTTP request hook
   exists if demand appears).
 
