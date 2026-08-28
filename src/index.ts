@@ -133,6 +133,30 @@ async function probeJSDOM(): Promise<string | null> {
 // re-runs, it checks this variable and applies the runtime preset instead
 // of the config file's preset. State lives in RuntimeConfig.
 
+/**
+ * Decide whether multiplexer pane management initializes for a plugin
+ * input. v1 hosts (hostFlavor absent) keep the exact env-based
+ * conditions — configured type, resolvable multiplexer, inside-session
+ * env marker; v2 hosts, marked `hostFlavor: 'v2'` by the v2 client shim,
+ * are gated off before any multiplexer initialization runs.
+ */
+export function shouldEnableMultiplexer(input: {
+  hostFlavor?: string;
+  multiplexerConfig: MultiplexerConfig;
+}): boolean {
+  if ((input as { hostFlavor?: string }).hostFlavor === 'v2') {
+    log('[v2] multiplexer disabled on v2 host');
+    return false;
+  }
+  // Get multiplexer instance for capability checks (v1 path, unchanged)
+  const multiplexer = getMultiplexer(input.multiplexerConfig);
+  return (
+    input.multiplexerConfig.type !== 'none' &&
+    multiplexer !== null &&
+    multiplexer.isInsideSession()
+  );
+}
+
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   initLogger(sessionId);
@@ -268,12 +292,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Parse multiplexer config with defaults
     multiplexerConfig = runtime.multiplexer;
 
-    // Get multiplexer instance for capability checks
-    const multiplexer = getMultiplexer(multiplexerConfig);
-    multiplexerEnabled =
-      multiplexerConfig.type !== 'none' &&
-      multiplexer !== null &&
-      multiplexer.isInsideSession();
+    multiplexerEnabled = shouldEnableMultiplexer({
+      hostFlavor: (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
+        .hostFlavor,
+      multiplexerConfig,
+    });
 
     log('[plugin] initialized with multiplexer config', {
       multiplexerConfig,
