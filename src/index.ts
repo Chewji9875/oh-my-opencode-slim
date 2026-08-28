@@ -133,6 +133,46 @@ async function probeJSDOM(): Promise<string | null> {
 // re-runs, it checks this variable and applies the runtime preset instead
 // of the config file's preset. State lives in RuntimeConfig.
 
+/**
+ * Decide whether multiplexer pane management initializes for a plugin
+ * input. v1 hosts (hostFlavor absent) keep the exact env-based
+ * conditions — configured type, resolvable multiplexer, inside-session
+ * env marker; v2 hosts, marked `hostFlavor: 'v2'` by the v2 client shim,
+ * are gated off before any multiplexer initialization runs.
+ */
+export function shouldEnableMultiplexer(input: {
+  hostFlavor?: string;
+  multiplexerConfig: MultiplexerConfig;
+}): boolean {
+  if ((input as { hostFlavor?: string }).hostFlavor === 'v2') {
+    log('[v2] multiplexer disabled on v2 host');
+    return false;
+  }
+  // Get multiplexer instance for capability checks (v1 path, unchanged)
+  const multiplexer = getMultiplexer(input.multiplexerConfig);
+  return (
+    input.multiplexerConfig.type !== 'none' &&
+    multiplexer !== null &&
+    multiplexer.isInsideSession()
+  );
+}
+
+/**
+ * Config handed to MultiplexerSessionManager. The manager is created
+ * unconditionally (its lifecycle hooks are wired into the job coordinator),
+ * but it self-gates only on env (inside tmux/zellij) — which would
+ * incorrectly self-enable on a v2 host running inside tmux. v2 hosts are
+ * therefore forced to type 'none', which disables every manager path (all
+ * its public methods no-op when `enabled` is false). v1 hosts receive the
+ * real config object unchanged.
+ */
+export function sessionManagerMultiplexerConfig(
+  hostFlavor: string | undefined,
+  config: MultiplexerConfig,
+): MultiplexerConfig {
+  return hostFlavor === 'v2' ? { ...config, type: 'none' } : config;
+}
+
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   initLogger(sessionId);
@@ -268,12 +308,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Parse multiplexer config with defaults
     multiplexerConfig = runtime.multiplexer;
 
-    // Get multiplexer instance for capability checks
-    const multiplexer = getMultiplexer(multiplexerConfig);
-    multiplexerEnabled =
-      multiplexerConfig.type !== 'none' &&
-      multiplexer !== null &&
-      multiplexer.isInsideSession();
+    const hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
+      .hostFlavor;
+
+    multiplexerEnabled = shouldEnableMultiplexer({
+      hostFlavor,
+      multiplexerConfig,
+    });
 
     log('[plugin] initialized with multiplexer config', {
       multiplexerConfig,
@@ -355,10 +396,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     // Initialize MultiplexerSessionManager to handle OpenCode's built-in
-    // Task tool sessions
+    // Task tool sessions. On v2 hosts the multiplexer is host-gated off
+    // (shouldEnableMultiplexer), so the manager's config is forced to
+    // 'none' — otherwise its env-based self-gate could re-enable pane
+    // management inside tmux/zellij on a v2 host.
     multiplexerSessionManager = new MultiplexerSessionManager(
       ctx,
-      multiplexerConfig,
+      sessionManagerMultiplexerConfig(hostFlavor, multiplexerConfig),
       backgroundJobCoordinator,
     );
     backgroundJobCoordinator.addTerminalStateListener((taskID) => {
@@ -1411,6 +1455,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
 export default {
   id: 'oh-my-opencode-slim',
+  /**
+   * Marker for v2 TUI hosts: this package ships a TUI plugin entry (the
+   * `./tui` export → dist/tui2.js, which also serves v1 hosts). v1 hosts
+   * probe only the `server` field and ignore extra keys, so this field is
+   * inert on v1.
+   */
+  tui: true,
   server: OhMyOpenCodeLite,
   setup: createV2Setup(),
 };

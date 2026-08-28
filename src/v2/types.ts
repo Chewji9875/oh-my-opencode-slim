@@ -72,9 +72,25 @@ export interface V2ToolAfterEvent {
 export interface V2Registration {
   dispose(): Promise<void> | void;
 }
+/** v2 mcp transform draft (used after capability probing; RemoteConfig
+ * shape see packages/schema/src/mcp.ts — no `enabled`, it uses
+ * `disabled?: boolean`; the name is the map key, not in the config). */
+export interface V2McpDraft {
+  list(): Array<[string, Record<string, unknown>]>;
+  get(name: string): Record<string, unknown> | undefined;
+  set(name: string, config: Record<string, unknown>): void;
+  update(name: string, update: (c: Record<string, unknown>) => void): void;
+  remove(name: string): void;
+}
 export interface V2Context {
   readonly app: { readonly name: string; readonly version: string };
   readonly options: Record<string, unknown>;
+  /** Host location (probe before use; fall back to process.cwd()). */
+  readonly location?: {
+    directory: string;
+    workspaceID?: string;
+    project: { id: string; directory: string; canonical: string };
+  };
   agent: {
     transform(cb: (draft: V2AgentDraft) => void): Promise<V2Registration>;
     reload(): Promise<unknown>;
@@ -96,6 +112,23 @@ export interface V2Context {
       name: 'context',
       cb: (event: V2SessionContextEvent) => Promise<void>,
     ): Promise<V2Registration>;
+    /** v2 session.get — SessionInfo by id (runtime-probed). */
+    get?(input: { sessionID: string }): Promise<unknown>;
+    /** v2 session.interrupt — `continue: false` aborts the active run. */
+    interrupt?(input: {
+      sessionID: string;
+      continue?: boolean;
+    }): Promise<unknown>;
+    /** v2 session.switchModel — v2 prompts carry no model, so a model
+     * change must precede the prompt (runtime-probed). */
+    switchModel?(input: {
+      sessionID: string;
+      model: { id: string; providerID: string; variant?: string };
+    }): Promise<unknown>;
+    /** v2 session.context — full transcript; replaces v1 session.messages. */
+    context?(input: {
+      sessionID: string;
+    }): Promise<Array<Record<string, unknown>>>;
     /** v2 session.prompt — flat PromptInput ({sessionID, text, files?,
      * agents?, skills?, metadata?, delivery?, resume?}). */
     prompt?(input: Record<string, unknown>): Promise<unknown>;
@@ -108,6 +141,11 @@ export interface V2Context {
   };
   event: {
     subscribe(): AsyncIterable<Record<string, unknown>>;
+  };
+  /** v2 mcp domain (present on hosts ≥ #45408; probe before use). */
+  mcp?: {
+    transform(cb: (draft: V2McpDraft) => void): Promise<V2Registration>;
+    reload(): Promise<void>;
   };
 }
 
