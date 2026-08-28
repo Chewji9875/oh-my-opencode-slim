@@ -327,12 +327,12 @@ describe('v2 client shim foreground-fallback integration', () => {
       m: 'prompt',
       i: { sessionID: 'ses_1', delivery: 'steer' },
     });
-    expect(
-      (seq[1].i as { text: string }).text,
-    ).toContain('Fix the failing build');
-    expect(
-      (seq[1].i as { text: string }).text,
-    ).toContain('The previous model request failed');
+    expect((seq[1].i as { text: string }).text).toContain(
+      'Fix the failing build',
+    );
+    expect((seq[1].i as { text: string }).text).toContain(
+      'The previous model request failed',
+    );
 
     // Step 3: abort maps to interrupt with continue:false.
     await session.abort({ path: { id: 'ses_1' } });

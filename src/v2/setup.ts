@@ -17,6 +17,7 @@ import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
 import { buildPluginInput, resolveV2Directory } from './client-shim';
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
+import { mapV2EventToV1 } from './event-adapter';
 import { createV2InterviewBridge } from './interview-bridge';
 import {
   createSessionSubmit,
@@ -705,8 +706,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const next = await eventIterator.next();
               if (next.done) break;
               try {
+                // interviewBridge keeps the RAW v2 event; the v1 eventHook
+                // loop iterates raw + synthesized v1 shapes (idle,
+                // early-registration created, message.updated telemetry).
                 await interviewBridge.handleEvent(next.value);
-                if (eventHook) await eventHook({ event: next.value });
+                if (eventHook) {
+                  for (const ev of mapV2EventToV1(next.value)) {
+                    await eventHook({ event: ev });
+                  }
+                }
               } catch (err) {
                 log('[v2] event handler failed', String(err));
               }
