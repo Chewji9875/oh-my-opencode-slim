@@ -12,6 +12,7 @@
 import { loadPluginConfig } from '../config/loader';
 import { InterviewConfigSchema } from '../config/schema';
 import { OhMyOpenCodeLite } from '../index';
+import type { McpConfig } from '../mcp/types';
 import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
 import { buildPluginInput } from './client-shim';
@@ -358,6 +359,20 @@ export function createToolExecuteBridges(
   return { beforeBridge, afterBridge };
 }
 
+/** v1 McpConfig → v2 Mcp.ServerConfig（字段几乎同构；仅剔除 undefined）。 */
+export function adaptMcpServer(v1: McpConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: v1.type };
+  if (v1.type === 'remote') {
+    out.url = v1.url;
+    if (v1.headers) out.headers = v1.headers;
+    if (v1.oauth === false) out.oauth = false;
+  } else {
+    out.command = v1.command;
+    if (v1.environment) out.environment = v1.environment;
+  }
+  return out;
+}
+
 export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
   return async (ctx: V2Context): Promise<V2Cleanup> => {
     const sessionId = new Date()
@@ -508,6 +523,29 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
     } catch (err) {
       log('[v2] tool.transform failed', String(err));
+    }
+
+    // ── Built-in MCPs (ctx.mcp.transform, v2 ≥ #45408) ──
+    try {
+      const mcps = (v1Hooks.mcp ?? {}) as Record<string, McpConfig>;
+      const entries = Object.entries(mcps);
+      if (entries.length > 0 && typeof ctx.mcp?.transform === 'function') {
+        const reg = await ctx.mcp.transform((draft) => {
+          for (const [name, cfg] of entries) {
+            try {
+              draft.set(name, adaptMcpServer(cfg));
+            } catch (err) {
+              log('[v2] mcp adapt failed', { name, err: String(err) });
+            }
+          }
+        });
+        disposers.push(() => reg.dispose());
+        log('[v2] mcp servers registered', { count: entries.length });
+      } else if (entries.length > 0) {
+        log('[v2] ctx.mcp.transform unavailable; MCPs stay config-only');
+      }
+    } catch (err) {
+      log('[v2] mcp.transform failed', String(err));
     }
 
     // ── Commands (deepwork / reflect / loop slash commands) ──

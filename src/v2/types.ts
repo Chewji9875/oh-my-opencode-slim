@@ -72,6 +72,16 @@ export interface V2ToolAfterEvent {
 export interface V2Registration {
   dispose(): Promise<void> | void;
 }
+/** v2 mcp transform draft (used after capability probing; RemoteConfig
+ * shape see packages/schema/src/mcp.ts — no `enabled`, it uses
+ * `disabled?: boolean`; the name is the map key, not in the config). */
+export interface V2McpDraft {
+  list(): Array<[string, Record<string, unknown>]>;
+  get(name: string): Record<string, unknown> | undefined;
+  set(name: string, config: Record<string, unknown>): void;
+  update(name: string, update: (c: Record<string, unknown>) => void): void;
+  remove(name: string): void;
+}
 export interface V2Context {
   readonly app: { readonly name: string; readonly version: string };
   readonly options: Record<string, unknown>;
@@ -108,6 +118,11 @@ export interface V2Context {
   };
   event: {
     subscribe(): AsyncIterable<Record<string, unknown>>;
+  };
+  /** v2 mcp domain (present on hosts ≥ #45408; probe before use). */
+  mcp?: {
+    transform(cb: (draft: V2McpDraft) => void): Promise<V2Registration>;
+    reload(): Promise<void>;
   };
 }
 
