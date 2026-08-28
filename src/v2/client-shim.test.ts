@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import {
+  isReplayableUserMessage,
+  partsFromReplayMessage,
+} from '../hooks/types';
+import { createInternalAgentTextPart } from '../utils/internal-initiator';
 import { buildPluginInput } from './client-shim';
 import type { V2Context } from './types';
 
@@ -103,14 +108,14 @@ describe('v2 client shim delegation', () => {
         model: { id: 'claude-x', providerID: 'anthropic' },
       },
     });
+    // NOTE: assert `text` outside toMatchObject — Bun v1.4.0's
+    // toMatchObject mutates the received object when an asymmetric
+    // matcher (stringContaining) is nested inside it.
     expect(seq[1]).toMatchObject({
       m: 'prompt',
-      i: {
-        sessionID: 'ses_1',
-        delivery: 'steer',
-        text: expect.stringContaining('retry me'),
-      },
+      i: { sessionID: 'ses_1', delivery: 'steer' },
     });
+    expect((seq[1].i as { text: string }).text).toContain('retry me');
   });
 
   test('promptAsync without a body model prompts directly', async () => {
@@ -235,5 +240,145 @@ describe('v2 client shim delegation', () => {
   test('omits experimental_v2 entirely without extras', () => {
     const input = buildPluginInput(makeCtx({}));
     expect('experimental_v2' in (input as Record<string, unknown>)).toBe(false);
+  });
+});
+
+describe('v2 client shim foreground-fallback integration', () => {
+  test('replay → switchModel → steer prompt → interrupt flow', async () => {
+    const seq: Array<{ m: string; i: unknown }> = [];
+    const ctx = makeCtx({
+      switchModel: async (i: unknown) => {
+        seq.push({ m: 'switchModel', i });
+      },
+      prompt: async (i: unknown) => {
+        seq.push({ m: 'prompt', i });
+        return {};
+      },
+      interrupt: async (i: unknown) => {
+        seq.push({ m: 'interrupt', i });
+        return { interrupted: true };
+      },
+      context: async () => [
+        {
+          id: 'msg_1',
+          role: 'user',
+          content: [{ type: 'text', text: 'Fix the failing build' }],
+        },
+        {
+          id: 'msg_2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'on it' }],
+        },
+      ],
+    } as never);
+    const input = buildPluginInput(ctx);
+    const session = (
+      input.client as {
+        session: {
+          messages: (a: unknown) => Promise<{ data: unknown[] }>;
+          promptAsync: (a: unknown) => Promise<unknown>;
+          abort: (a: unknown) => Promise<unknown>;
+        };
+      }
+    ).session;
+
+    // Step 1 of the fallback flow: fetch the transcript and locate the last
+    // replayable user message using the real pipeline helpers.
+    const result = await session.messages({ path: { id: 'ses_1' } });
+    const lastUser = [...(result.data ?? [])]
+      .reverse()
+      .find(isReplayableUserMessage);
+    expect(lastUser).toBeDefined();
+    const replayParts = partsFromReplayMessage(lastUser!) as Array<{
+      type: 'text';
+      text: string;
+    }>;
+    expect(replayParts).toEqual([
+      { type: 'text', text: 'Fix the failing build' },
+    ]);
+
+    // Step 2: re-submit with the fallback model exactly like
+    // foreground-fallback does (replay parts + synthetic reminder).
+    await session.promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        parts: [
+          ...replayParts,
+          createInternalAgentTextPart(
+            'The previous model request failed and is being retried.',
+          ),
+        ],
+        model: { providerID: 'anthropic', modelID: 'claude-fallback' },
+        agent: 'orchestrator',
+      },
+    });
+
+    // v2 semantics: switchModel first (v1 {providerID, modelID} → v2
+    // {id, providerID}), then a non-blocking steer prompt carrying both the
+    // original user text and the synthetic reminder.
+    expect(seq[0]).toMatchObject({
+      m: 'switchModel',
+      i: {
+        sessionID: 'ses_1',
+        model: { id: 'claude-fallback', providerID: 'anthropic' },
+      },
+    });
+    expect(seq[1]).toMatchObject({
+      m: 'prompt',
+      i: { sessionID: 'ses_1', delivery: 'steer' },
+    });
+    expect(
+      (seq[1].i as { text: string }).text,
+    ).toContain('Fix the failing build');
+    expect(
+      (seq[1].i as { text: string }).text,
+    ).toContain('The previous model request failed');
+
+    // Step 3: abort maps to interrupt with continue:false.
+    await session.abort({ path: { id: 'ses_1' } });
+    expect(seq[2]).toEqual({
+      m: 'interrupt',
+      i: { sessionID: 'ses_1', continue: false },
+    });
+  });
+
+  test('mapped transcript messages satisfy the v1 message-parts shape', async () => {
+    const ctx = makeCtx({
+      context: async () => [
+        {
+          id: 'msg_1',
+          role: 'user',
+          content: [
+            { type: 'text', text: 'hello' },
+            { type: 'reasoning', text: 'inner' },
+          ],
+        },
+      ],
+    } as never);
+    const input = buildPluginInput(ctx);
+    const result = await (
+      input.client as {
+        session: {
+          messages: (a: unknown) => Promise<{ data: unknown[] }>;
+        };
+      }
+    ).session.messages({ sessionID: 'ses_1' });
+
+    // v1 SDK shape consumed by isUserMessageWithParts-based helpers.
+    expect(result.data).toEqual([
+      {
+        info: { id: 'msg_1', role: 'user' },
+        parts: [
+          { type: 'text', text: 'hello' },
+          { type: 'reasoning', text: 'inner' },
+        ],
+      },
+    ]);
+    const message = result.data[0];
+    expect(isReplayableUserMessage(message)).toBe(true);
+    expect(partsFromReplayMessage(message as never)).toEqual([
+      { type: 'text', text: 'hello' },
+      { type: 'reasoning', text: 'inner' },
+    ]);
   });
 });
