@@ -31,6 +31,7 @@ Two builds are produced:
 |---|---|---|---|
 | `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @opencode-ai/*, @opentui/* (shared with v1 host) |
 | `./server` | `dist/server.js` | `build:v2` | jsdom only (self-contained for v2) |
+| `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), so a v2 package install loads the self-contained
@@ -83,10 +84,10 @@ the rest.
 | Event handling (session tracking, lifecycle) | ✅ | ✅ | |
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ | |
 | Built-in MCPs (context7, grep.app) | ✅ | ✅ | auto-registered via `ctx.mcp.transform` (needs a v2 build with #45408; older builds fall back to config-only — see [below](#restoring-built-in-mcps-on-v2)) |
-| `/preset` (interactive switcher) | ✅ | ❌ at load only | the switcher is a v1-TUI 3-level UI; on v2 set `"preset"` in the config file (applies at load) |
-| Foreground model fallback (rate-limit failover) | ✅ | ❌ | v2 locks the model at session creation; the plugin API has no per-prompt model override, session model-setter, or `/model` command, so mid-flight switching is impossible |
+| `/preset` (interactive switcher) | ✅ | ✅ | v2 ships a TUI plugin entry (`./tui` → `dist/tui2.js`) with a `/preset` dialog (select or `/preset <name>` fast path); config-file `preset` still applies at load |
+| Foreground model fallback (rate-limit failover) | ✅ | ✅ | the v2 client shim translates the v1 re-prompt into `session.switchModel` + a `delivery:"steer"` prompt (needs a v2 build with #43718) |
 | Orchestrator wake scheduler (`backgroundJobs.orchestratorWake`) | ✅ | ❌ | Requires host `session.get` / `todo` / `children` / `status` / `promptAsync`; the v2 shim lacks these APIs so the capability-gated feature stays inactive |
-| Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ | v1-TUI-pane integration; v2 renders subagents natively instead |
+| Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ host-gated off | v1-TUI-pane integration; explicitly disabled on v2 hosts (v2 renders subagents natively) |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
 | Default agent on new session | ✅ orchestrator | ⚠️ TUI shows `build` | v1 sets `default_agent`; v2's TUI ignores that field and defaults to the first agent in its list (`build`). `run`/API still default to orchestrator. See [limitations](#limitations) |
 
