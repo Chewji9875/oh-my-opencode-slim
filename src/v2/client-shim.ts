@@ -130,7 +130,14 @@ export function buildPluginInput(
             });
             return { data: [] };
           },
-      status: async (_args: Record<string, unknown>) => ({ data: {} }),
+      // `status` is intentionally OMITTED: v2 has no equivalent of the v1
+      // live session-status map, and a stub returning `{data: {}}` would be
+      // an empty-but-valid map. getRuntimeSessionStatusSnapshot treats
+      // "status is a function" as the capability signal, so the stub let
+      // stop-confirmation mark still-running background jobs `stopped`
+      // after the grace (false terminalization). With the method absent,
+      // the lookup throws → snapshot.error → the reconciler's safe
+      // markStatusUncertain branch.
       list: async () => ({ data: [] }),
       prompt: s.prompt
         ? async (args: Record<string, unknown>) =>

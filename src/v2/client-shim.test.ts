@@ -203,6 +203,19 @@ describe('v2 client shim delegation', () => {
     ).rejects.toThrow(/unavailable/i);
   });
 
+  test('omits session.status — a fake empty map could falsely terminalize running jobs', () => {
+    // getRuntimeSessionStatusSnapshot treats "status is a function" as the
+    // capability signal; an empty-but-valid map lets stop-confirmation
+    // mark a still-running background job `stopped` after the grace.
+    // Omission keeps the lookup failing → snapshot.error → the safe
+    // markStatusUncertain branch.
+    const input = buildPluginInput(makeCtx({}));
+    const session = (input.client as { session: Record<string, unknown> })
+      .session;
+    expect('status' in session).toBe(false);
+    expect(session.status).toBeUndefined();
+  });
+
   test('hostFlavor, project, and directory come from location', () => {
     const input = buildPluginInput(makeCtx({}));
     expect(input.hostFlavor).toBe('v2');
@@ -289,7 +302,8 @@ describe('v2 client shim foreground-fallback integration', () => {
       .reverse()
       .find(isReplayableUserMessage);
     expect(lastUser).toBeDefined();
-    const replayParts = partsFromReplayMessage(lastUser!) as Array<{
+    if (!lastUser) throw new Error('expected a replayable user message');
+    const replayParts = partsFromReplayMessage(lastUser) as Array<{
       type: 'text';
       text: string;
     }>;
