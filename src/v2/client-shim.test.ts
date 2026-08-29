@@ -396,3 +396,96 @@ describe('v2 client shim foreground-fallback integration', () => {
     ]);
   });
 });
+
+describe('v2 client shim replay attachment preservation', () => {
+  test('promptAsync maps image/file parts into v2 prompt files', async () => {
+    const prompts: Array<Record<string, unknown>> = [];
+    const input = buildPluginInput(
+      makeCtx({
+        prompt: async (i: Record<string, unknown>) => {
+          prompts.push(i);
+          return {};
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { promptAsync: (a: unknown) => Promise<unknown> };
+      }
+    ).session.promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        parts: [
+          { type: 'text', text: 'analyze this' },
+          {
+            type: 'image',
+            url: 'data:image/png;base64,AAAA',
+            filename: 'shot.png',
+          },
+          { type: 'file', url: 'file:///proj/report.pdf' },
+          { type: 'reasoning', text: 'not user-visible' },
+        ],
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.text).toContain('analyze this');
+    expect(prompts[0]?.files).toEqual([
+      { uri: 'data:image/png;base64,AAAA', name: 'shot.png' },
+      { uri: 'file:///proj/report.pdf' },
+    ]);
+  });
+
+  test('non-text parts without uri are dropped and logged, prompt proceeds', async () => {
+    const prompts: Array<Record<string, unknown>> = [];
+    const input = buildPluginInput(
+      makeCtx({
+        prompt: async (i: Record<string, unknown>) => {
+          prompts.push(i);
+          return {};
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { promptAsync: (a: unknown) => Promise<unknown> };
+      }
+    ).session.promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        parts: [
+          { type: 'text', text: 'retry me' },
+          { type: 'image', mime: 'image/png' },
+        ],
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]?.text).toBe('retry me');
+    expect(prompts[0]?.files).toBeUndefined();
+  });
+
+  test('prompt translation carries files too', async () => {
+    const prompts: Array<Record<string, unknown>> = [];
+    const input = buildPluginInput(
+      makeCtx({
+        prompt: async (i: Record<string, unknown>) => {
+          prompts.push(i);
+          return {};
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { prompt: (a: unknown) => Promise<unknown> };
+      }
+    ).session.prompt({
+      path: { id: 'ses_1' },
+      body: {
+        parts: [
+          { type: 'text', text: 'look' },
+          { type: 'image', url: 'https://example.com/x.png' },
+        ],
+      },
+    });
+    expect(prompts[0]?.files).toEqual([{ uri: 'https://example.com/x.png' }]);
+  });
+});

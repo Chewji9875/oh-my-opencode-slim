@@ -64,6 +64,38 @@ function textFromBody(args: Record<string, unknown>): string {
     .join('\n');
 }
 
+/** Map non-text v1 prompt parts (images, files) into v2 prompt `files`
+ * entries. The fallback replay must not silently drop attachments: v1's
+ * prompt API carries parts natively, so a text-only translation would
+ * resend an attachment-dependent request without its content. Parts whose
+ * uri cannot be derived are logged and skipped (honest degradation). */
+function filesFromBody(
+  args: Record<string, unknown>,
+): Array<{ uri: string; name?: string }> {
+  const body = (args?.body ?? {}) as {
+    parts?: Array<Record<string, unknown>>;
+  };
+  const parts = Array.isArray(body.parts) ? body.parts : [];
+  const files: Array<{ uri: string; name?: string }> = [];
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (p.type === 'text') continue;
+    const uri = [p.uri, p.url].find((v) => typeof v === 'string' && v) as
+      | string
+      | undefined;
+    if (!uri) {
+      log('[v2][shim] non-text prompt part without uri dropped', {
+        type: typeof p.type === 'string' ? p.type : 'unknown',
+      });
+      continue;
+    }
+    const name =
+      (p.filename as string | undefined) ?? (p.name as string | undefined);
+    files.push({ uri, ...(name ? { name } : {}) });
+  }
+  return files;
+}
+
 /** v2 transcript message (content parts) → v1 SDK message view
  * (`{info: {id, role}, parts}`) expected by the v1 pipeline. */
 function toV1Message(m: Record<string, unknown>) {
@@ -140,12 +172,15 @@ export function buildPluginInput(
       // markStatusUncertain branch.
       list: async () => ({ data: [] }),
       prompt: s.prompt
-        ? async (args: Record<string, unknown>) =>
-            s.prompt?.({
+        ? async (args: Record<string, unknown>) => {
+            const files = filesFromBody(args);
+            return s.prompt?.({
               sessionID: sessionIDOf(args),
               text: textFromBody(args),
               delivery: 'steer',
-            })
+              ...(files.length > 0 ? { files } : {}),
+            });
+          }
         : async () => {
             throw new Error('[v2] session.prompt unavailable');
           },
@@ -167,10 +202,12 @@ export function buildPluginInput(
             );
           }
         }
+        const files = filesFromBody(args);
         return s.prompt({
           sessionID: sessionIDOf(args),
           text: textFromBody(args),
           delivery: 'steer',
+          ...(files.length > 0 ? { files } : {}),
         });
       },
       update: s.rename

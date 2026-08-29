@@ -145,7 +145,7 @@ v2 auto-refreshes unpinned plugins on startup, so pin an exact version while
 both v2 and this adapter evolve quickly:
 
 ```json
-{ "plugin": ["oh-my-opencode-slim@2.0.3"] }
+{ "plugin": ["oh-my-opencode-slim@2.2.17"] }
 ```
 
 Details, the feature matrix, and per-feature minimum v2 builds:
