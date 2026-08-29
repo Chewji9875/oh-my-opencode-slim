@@ -1184,6 +1184,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
         if (sessionID) {
           sessionLifecycle.dispatchSessionDeleted(sessionID);
+          toolLoopGuard.resetSession(sessionID);
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {

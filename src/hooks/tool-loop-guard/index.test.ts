@@ -89,28 +89,229 @@ describe('tool-loop-guard', () => {
     ).rejects.toThrow();
   });
 
-  test('task tool is exempt', async () => {
-    for (let i = 1; i <= 5; i++) {
-      await hook['tool.execute.before'](
-        beforeInput({ tool: 'task', callID: `t${i}` }),
-        { args: { subagent_type: 'explorer', prompt: 'find x' } },
-      );
-    }
-    // no throw
-  });
+  test('task_status with identical state: busy output appends warning on 3rd call and blocks on 5th call', async () => {
+    const statusOutput = [
+      'Task #1 (ses_child1)',
+      'state: busy',
+      'agent: fixer',
+      'last_activity_at: 2026-08-30T00:00:00.000Z',
+      'idle_for_seconds: 0',
+      'possibly_stuck: false',
+      '',
+      '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
+    ].join('\n');
 
-  test('polling tools are exempt from warn and block', async () => {
-    for (let i = 1; i <= 8; i++) {
+    for (let i = 1; i <= 5; i++) {
       await hook['tool.execute.before'](
         beforeInput({ tool: 'task_status', callID: `s${i}` }),
         { args: { task_id: 'child-1' } },
       );
-      const output = { output: 'state: running', metadata: {} };
+      const output = { output: statusOutput, metadata: {} };
       await hook['tool.execute.after'](
         afterInput({ tool: 'task_status', callID: `s${i}` }),
         output,
       );
-      expect(output.output).toBe('state: running'); // never warned
+      if (i < 3) {
+        expect(output.output).toBe(statusOutput);
+      } else {
+        expect(output.output).toContain(LOOP_GUARD_WARNING);
+      }
+    }
+
+    await expect(
+      hook['tool.execute.before'](
+        beforeInput({ tool: 'task_status', callID: 's6' }),
+        { args: { task_id: 'child-1' } },
+      ),
+    ).rejects.toThrow('infinite loop');
+  });
+
+  test('volatile idle_for_seconds changes do not break consecutive identical detection for task_status', async () => {
+    for (let i = 1; i <= 5; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'task_status', callID: `s${i}` }),
+        { args: { task_id: 'child-1' } },
+      );
+      const output = {
+        output: [
+          'Task #1 (ses_child1)',
+          'state: busy',
+          'agent: fixer',
+          `last_activity_at: 2026-08-30T00:00:${i.toString().padStart(2, '0')}.000Z`,
+          `idle_for_seconds: ${i * 5}`,
+          'possibly_stuck: false',
+          '',
+          '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
+        ].join('\n'),
+        metadata: {},
+      };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'task_status', callID: `s${i}` }),
+        output,
+      );
+      if (i < 3) {
+        expect(output.output).not.toContain(LOOP_GUARD_WARNING);
+      } else {
+        expect(output.output).toContain(LOOP_GUARD_WARNING);
+      }
+    }
+
+    await expect(
+      hook['tool.execute.before'](
+        beforeInput({ tool: 'task_status', callID: 's6' }),
+        { args: { task_id: 'child-1' } },
+      ),
+    ).rejects.toThrow('infinite loop');
+  });
+
+  test('task_result called repeatedly for a running task warns and blocks', async () => {
+    const runningOutput = [
+      'task_id: ses_child1',
+      'state: running',
+      'message: Task is still running. Wait for its terminal result.',
+      'next: use task_status to inspect the task',
+    ].join('\n');
+
+    for (let i = 1; i <= 5; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'task_result', callID: `r${i}` }),
+        { args: { task_id: 'ses_child1' } },
+      );
+      const output = { output: runningOutput, metadata: {} };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'task_result', callID: `r${i}` }),
+        output,
+      );
+      if (i < 3) {
+        expect(output.output).toBe(runningOutput);
+      } else {
+        expect(output.output).toContain(LOOP_GUARD_WARNING);
+      }
+    }
+
+    await expect(
+      hook['tool.execute.before'](
+        beforeInput({ tool: 'task_result', callID: 'r6' }),
+        { args: { task_id: 'ses_child1' } },
+      ),
+    ).rejects.toThrow('infinite loop');
+  });
+
+  test('genuine state change resets the consecutive run counter', async () => {
+    // 2 busy calls
+    for (let i = 1; i <= 2; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ tool: 'task_status', callID: `s${i}` }),
+        { args: { task_id: 'child-1' } },
+      );
+      const output = {
+        output: [
+          'Task #1 (ses_child1)',
+          'state: busy',
+          'agent: fixer',
+          'last_activity_at: 2026-08-30T00:00:00.000Z',
+          'idle_for_seconds: 0',
+          'possibly_stuck: false',
+        ].join('\n'),
+        metadata: {},
+      };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'task_status', callID: `s${i}` }),
+        output,
+      );
+      expect(output.output).not.toContain(LOOP_GUARD_WARNING);
+    }
+
+    // 3rd call has state change: completed
+    await hook['tool.execute.before'](
+      beforeInput({ tool: 'task_status', callID: 's3' }),
+      { args: { task_id: 'child-1' } },
+    );
+    const completedOutput = {
+      output: [
+        'Task #1 (ses_child1)',
+        'state: completed',
+        'agent: fixer',
+        'last_activity_at: 2026-08-30T00:00:00.000Z',
+        'idle_for_seconds: 0',
+        'possibly_stuck: false',
+      ].join('\n'),
+      metadata: {},
+    };
+    await hook['tool.execute.after'](
+      afterInput({ tool: 'task_status', callID: 's3' }),
+      completedOutput,
+    );
+    expect(completedOutput.output).not.toContain(LOOP_GUARD_WARNING);
+
+    // 4th call is completed again -> counter 2 -> no warning
+    await hook['tool.execute.before'](
+      beforeInput({ tool: 'task_status', callID: 's4' }),
+      { args: { task_id: 'child-1' } },
+    );
+    const completedOutput2 = {
+      output: [
+        'Task #1 (ses_child1)',
+        'state: completed',
+        'agent: fixer',
+        'last_activity_at: 2026-08-30T00:00:00.000Z',
+        'idle_for_seconds: 0',
+        'possibly_stuck: false',
+      ].join('\n'),
+      metadata: {},
+    };
+    await hook['tool.execute.after'](
+      afterInput({ tool: 'task_status', callID: 's4' }),
+      completedOutput2,
+    );
+    expect(completedOutput2.output).not.toContain(LOOP_GUARD_WARNING);
+
+    // 5th call is completed again -> counter 3 -> warning appended
+    await hook['tool.execute.before'](
+      beforeInput({ tool: 'task_status', callID: 's5' }),
+      { args: { task_id: 'child-1' } },
+    );
+    const completedOutput3 = {
+      output: [
+        'Task #1 (ses_child1)',
+        'state: completed',
+        'agent: fixer',
+        'last_activity_at: 2026-08-30T00:00:00.000Z',
+        'idle_for_seconds: 0',
+        'possibly_stuck: false',
+      ].join('\n'),
+      metadata: {},
+    };
+    await hook['tool.execute.after'](
+      afterInput({ tool: 'task_status', callID: 's5' }),
+      completedOutput3,
+    );
+    expect(completedOutput3.output).toContain(LOOP_GUARD_WARNING);
+  });
+
+  test('task and task lifecycle/control tools (cancel, message, revive, wait) remain exempt', async () => {
+    const exemptTools = [
+      { tool: 'task', args: { subagent_type: 'explorer', prompt: 'find x' } },
+      { tool: 'task_cancel', args: { task_id: 'child-1' } },
+      { tool: 'task_message', args: { task_id: 'child-1', message: 'hello' } },
+      { tool: 'task_revive', args: { task_id: 'child-1' } },
+      { tool: 'wait_for_user', args: {} },
+      { tool: 'wait_for_background_tasks', args: {} },
+    ];
+
+    for (const { tool: toolName, args } of exemptTools) {
+      for (let i = 1; i <= 8; i++) {
+        await hook['tool.execute.before'](
+          beforeInput({ tool: toolName, callID: `${toolName}_${i}` }),
+          { args },
+        );
+        const output = { output: 'ok', metadata: {} };
+        await hook['tool.execute.after'](
+          afterInput({ tool: toolName, callID: `${toolName}_${i}` }),
+          output,
+        );
+        expect(output.output).toBe('ok');
+      }
     }
   });
 

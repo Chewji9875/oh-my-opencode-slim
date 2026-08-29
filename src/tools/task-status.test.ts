@@ -33,12 +33,37 @@ describe('task_status', () => {
     client = { session: { status } };
     const { task_status } = makeTool({ board });
 
-    await expect(
-      task_status.execute({ task_id: 'ses_child1' }, {
-        sessionID: 'parent-1',
-      } as any),
-    ).resolves.toContain('state: busy');
+    const output = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(output).toContain('state: busy');
+    expect(output).toContain(
+      '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
+    );
     expect(status).toHaveBeenCalledTimes(1);
+  });
+
+  test('includes guidance for active states (retry, running)', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'implement',
+    });
+    const status = mock(async () => ({
+      data: { ses_child1: { type: 'retry' } },
+    }));
+    client = { session: { status } };
+    const { task_status } = makeTool({ board });
+
+    const output = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(output).toContain('state: retry');
+    expect(output).toContain(
+      '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
+    );
   });
 
   test('flags a busy child without recent activity as possibly stuck', async () => {

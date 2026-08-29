@@ -26,11 +26,12 @@ import { log } from '../../utils/logger';
  *
  * Scope is deliberately narrow to avoid breaking legitimate repeated calls:
  * - All tools warn at N confirmed-identical consecutive calls.
- * - Only the read-only file-analysis tools hard-block: polling tools
- *   (task_*, wait_for_*) legitimately re-issue identical calls waiting on a
- *   long-running background task and must never be refused.
- * - The task tool is exempt entirely for both axes; task-session-manager
- *   owns its own duplicate-spawn guards (#1056/#1070).
+ * - Read-only file-analysis tools (read, grep, glob) and task supervision
+ *   tools (task_status, task_result) hard-block after confirmed identical
+ *   results to prevent infinite loops (#1071).
+ * - The task tool and management tools (task_cancel, task_message,
+ *   task_revive, wait_for_*) remain exempt; task-session-manager owns its
+ *   own duplicate-spawn guards (#1056/#1070).
  *
  * Precedent: json-error-recovery (output warning) and task-session-manager
  * (before-hook refusal).
@@ -40,13 +41,11 @@ const LOOP_GUARD_WARN_AT = 3;
 const LOOP_GUARD_BLOCK_AT = 5;
 
 /**
- * Tools exempt from the entire guard: long-lived task supervision/polling
+ * Tools exempt from the entire guard: long-lived task management / lifecycle
  * tools whose identical repeated invocation is legitimate.
  */
 const LOOP_GUARD_EXEMPT: Record<string, true> = {
   task: true,
-  task_status: true,
-  task_result: true,
   task_cancel: true,
   task_message: true,
   task_revive: true,
@@ -55,14 +54,17 @@ const LOOP_GUARD_EXEMPT: Record<string, true> = {
 };
 
 /**
- * Tools that may be hard-blocked when repeated. Read-only file analysis is
- * the reported loop surface (#1071); anything with side effects or that
- * polls external state stays warn-only.
+ * Tools that may be hard-blocked when repeated. Read-only file analysis
+ * (#1071) and task polling/supervision (task_status, task_result) hard-block
+ * after confirmed identical results to prevent infinite loops; anything with
+ * side effects stays warn-only.
  */
 const LOOP_GUARD_BLOCK_TOOLS: Record<string, true> = {
   read: true,
   grep: true,
   glob: true,
+  task_status: true,
+  task_result: true,
 };
 
 const LOOP_GUARD_MARKER = '[REPEATED TOOL CALLS - STOP]';
@@ -84,6 +86,21 @@ const MAX_TRACKED_SESSIONS = 512;
 /** Deterministic fingerprint of tool + args, insensitive to key order. */
 function fingerprint(tool: string, args: unknown): string {
   return `${tool.toLowerCase()}:${stableStringify(args)}`;
+}
+
+/**
+ * Normalizes tool output prior to fingerprinting so that volatile dynamic
+ * fields (e.g. timestamps or elapsed counters in status polling) do not defeat
+ * consecutive identical detection.
+ */
+function normalizeOutput(tool: string, output: unknown): unknown {
+  if (typeof output !== 'string') return output;
+  if (tool === 'task_status') {
+    return output
+      .replace(/^last_activity_at:\s*.*$/gm, 'last_activity_at: <normalized>')
+      .replace(/^idle_for_seconds:\s*.*$/gm, 'idle_for_seconds: <normalized>');
+  }
+  return output;
 }
 
 function stableStringify(value: unknown): string {
@@ -182,7 +199,10 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
 
       const key = input.callID ? callKeys.get(input.callID) : undefined;
       if (input.callID) callKeys.delete(input.callID);
-      const outputHash = fingerprint(tool, output.output);
+      const outputHash = fingerprint(
+        tool,
+        normalizeOutput(tool, output.output),
+      );
 
       const existing = sessions.get(sessionID);
       let state: SessionState;
