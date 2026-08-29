@@ -427,4 +427,29 @@ describe('tool-loop-guard', () => {
       String(out.output).split(LOOP_GUARD_WARNING.trim()).length - 1;
     expect(count).toBe(1);
   });
+
+  test('resetSession clears loop guard state for a specific session', async () => {
+    for (let i = 1; i <= 3; i++) {
+      await runIdenticalCall(`c${i}`, { filePath: 'a.ts' });
+    }
+    // After 3 calls, warning is appended
+    const o3 = await runIdenticalCall('c3_check', { filePath: 'a.ts' });
+    expect(o3.output).toContain(LOOP_GUARD_WARNING);
+
+    // Reset session
+    hook.resetSession('s1');
+
+    // Next call starts fresh with no warning
+    const fresh = await runIdenticalCall('c4_fresh', { filePath: 'a.ts' });
+    expect(fresh.output).toBe('...file contents...');
+  });
+
+  test('resetForTests clears all tracked sessions', async () => {
+    await runIdenticalCall('c1', { filePath: 'a.ts' });
+    await runIdenticalCall('c2', { filePath: 'a.ts' });
+    hook.resetForTests();
+
+    const o1 = await runIdenticalCall('c3', { filePath: 'a.ts' });
+    expect(o1.output).toBe('...file contents...');
+  });
 });
