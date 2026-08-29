@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import type { MultiplexerConfig } from './config';
-import {
+import pluginModuleDefault, {
   OhMyOpenCodeLite as plugin,
   sessionManagerMultiplexerConfig,
   shouldEnableMultiplexer,
@@ -572,5 +572,29 @@ describe('multiplexer host gating', () => {
     expect(sessionManagerMultiplexerConfig(undefined, multiplexerConfig)).toBe(
       multiplexerConfig,
     );
+  });
+});
+
+describe('v1 host plugin module contract', () => {
+  // OpenCode v1.18.23+ validates a plugin module's default export before
+  // loading it:
+  //   - `server`, when present, must be a function
+  //   - `tui`, when present, must be a function
+  //   - a module must not declare both `server` and `tui`
+  // A boolean `tui: true` marker on the server entry violates the second
+  // and third rules, so the whole plugin fails to load with
+  // "Plugin ... has invalid tui export" (observed on v1.18.25). The TUI
+  // entry ships separately via the `./tui` package export.
+  test('server entry keeps a callable server export and no tui key', () => {
+    expect(typeof pluginModuleDefault).toBe('object');
+    expect(pluginModuleDefault).not.toBeNull();
+
+    const module = pluginModuleDefault as Record<string, unknown>;
+
+    // v1 loader: `server` present must be a function.
+    expect(typeof module.server).toBe('function');
+    // v1 loader: `tui` must be absent (or a function in a tui-only module);
+    // a server module declaring `tui` is rejected outright.
+    expect('tui' in module).toBe(false);
   });
 });

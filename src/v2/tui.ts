@@ -7,8 +7,10 @@
  * flow — v2 hosts get the sidebar plus an interactive preset switcher
  * (dialog select → on-disk persist → toast feedback).
  *
- * On v2 hosts this entry is loaded only when the server-side default export
- * (src/index.ts) declares `tui: true`.
+ * Hosts discover this entry through the package.json `./tui` export
+ * (exports-map probe in the host's `kind: "tui"` loader pass); the
+ * server-side default export (src/index.ts) plays no role in that — in
+ * fact it must stay free of any `tui` key (see the note there).
  */
 import type { PluginConfig } from '../config';
 import { loadPluginConfig } from '../config/loader';

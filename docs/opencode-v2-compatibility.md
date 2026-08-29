@@ -12,22 +12,28 @@ The package's default export is an object:
 ```ts
 export default {
   id: 'oh-my-opencode-slim',
-  tui: true,             // marker: this package ships a `./tui` entry for v2 TUI hosts
   server: OhMyOpenCodeLite, // v1 plugin function (PluginInput) => Promise<Hooks>
   setup: createV2Setup(),   // v2 promise-plugin setup (ctx) => Promise<cleanup>
 };
 ```
 
+There is deliberately **no `tui` key** on this export: hosts validate a
+server plugin module's `tui` field (it must be a function and must not
+coexist with `server`), so a boolean `tui: true` marker makes every
+v1.18.23+ host — and v2's byte-identical `readV1Plugin` — reject the whole
+plugin with "invalid tui export".
+
 - **v1 loader** (`readV1Plugin` in `packages/opencode/src/plugin/shared.ts`)
   detects an object with a `server` field and calls `plugin.server(input)`.
-  This is the original, unchanged v1 code path — v1 behavior is identical to
-  previous releases.
+  Extra keys (such as `setup`) are ignored on this path.
 - **v2 loader** (`PluginModule` schema in
   `packages/core/src/plugin/supervisor.ts`) decodes `default` as
   `{ id, setup }` (Effect Schema 4 rejects function defaults) and calls
   `setup(ctx)` via the promise-plugin bridge.
-- **v2 TUI** additionally loads the `./tui` entry (below) when the server-side
-  export declares `tui: true`.
+- **v2 TUI** loads the `./tui` entry (below) unconditionally: the TUI
+  runtime runs its own `kind: "tui"` loader pass over the same plugin list
+  and resolves the entry through the package's `exports["./tui"]` map —
+  the server-side export plays no role in that discovery.
 
 Three builds are produced:
 
