@@ -1455,13 +1455,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
 export default {
   id: 'oh-my-opencode-slim',
-  /**
-   * Marker for v2 TUI hosts: this package ships a TUI plugin entry (the
-   * `./tui` export → dist/tui2.js, which also serves v1 hosts). v1 hosts
-   * probe only the `server` field and ignore extra keys, so this field is
-   * inert on v1.
-   */
-  tui: true,
+  // NOTE: do not add a `tui` key here. OpenCode v1.18.23+ (and v2's
+  // byte-identical readV1Plugin) validate the default export of a server
+  // plugin module: `tui`, when present, must be a function and must not
+  // coexist with `server` — a boolean marker makes the whole plugin fail
+  // to load with "invalid tui export". The TUI entry is discovered
+  // separately by hosts through the package.json `./tui` export
+  // (dist/tui2.js), never through this module.
   server: OhMyOpenCodeLite,
   setup: createV2Setup(),
 };
