@@ -6,5 +6,8 @@ export { createWebfetchTool } from './smartfetch';
 export { createTaskMessageTool } from './task-message';
 export { createTaskResultTool } from './task-result';
 export { createTaskReviveTool } from './task-revive';
-export { createTaskStatusTool } from './task-status';
+export {
+  createTaskStatusTool,
+  normalizeTaskStatusOutput,
+} from './task-status';
 export { createWaitForUserTool } from './wait-for-user';

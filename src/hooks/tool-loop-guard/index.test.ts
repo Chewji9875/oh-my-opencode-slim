@@ -32,6 +32,50 @@ describe('tool-loop-guard', () => {
     return output;
   }
 
+  async function runToolCall(
+    tool: string,
+    callID: string,
+    args: unknown,
+    toolOutput: unknown,
+  ) {
+    await hook['tool.execute.before'](beforeInput({ tool, callID }), { args });
+    const output = { output: toolOutput, metadata: {} };
+    await hook['tool.execute.after'](afterInput({ tool, callID }), output);
+    return output;
+  }
+
+  function makeTaskStatusOutput(
+    overrides: {
+      state?: string;
+      lastActivityAt?: string;
+      idleForSeconds?: number;
+      guidance?: boolean;
+    } = {},
+  ) {
+    const state = overrides.state ?? 'busy';
+    const lastActivityAt =
+      overrides.lastActivityAt ?? '2026-08-30T00:00:00.000Z';
+    const idleForSeconds = overrides.idleForSeconds ?? 0;
+    const lines = [
+      'Task #1 (ses_child1)',
+      `state: ${state}`,
+      'agent: fixer',
+      `last_activity_at: ${lastActivityAt}`,
+      `idle_for_seconds: ${idleForSeconds}`,
+      'possibly_stuck: false',
+    ];
+    if (
+      overrides.guidance ??
+      (state === 'busy' || state === 'running' || state === 'retry')
+    ) {
+      lines.push(
+        '',
+        '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
+      );
+    }
+    return lines.join('\n');
+  }
+
   test('leaves output untouched for first and second identical calls', async () => {
     const o1 = await runIdenticalCall('c1', { filePath: 'a.ts' });
     const o2 = await runIdenticalCall('c2', { filePath: 'a.ts' });
@@ -90,26 +134,14 @@ describe('tool-loop-guard', () => {
   });
 
   test('task_status with identical state: busy output appends warning on 3rd call and does not block at call 5 and beyond', async () => {
-    const statusOutput = [
-      'Task #1 (ses_child1)',
-      'state: busy',
-      'agent: fixer',
-      'last_activity_at: 2026-08-30T00:00:00.000Z',
-      'idle_for_seconds: 0',
-      'possibly_stuck: false',
-      '',
-      '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
-    ].join('\n');
+    const statusOutput = makeTaskStatusOutput();
 
     for (let i = 1; i <= 6; i++) {
-      await hook['tool.execute.before'](
-        beforeInput({ tool: 'task_status', callID: `s${i}` }),
-        { args: { task_id: 'child-1' } },
-      );
-      const output = { output: statusOutput, metadata: {} };
-      await hook['tool.execute.after'](
-        afterInput({ tool: 'task_status', callID: `s${i}` }),
-        output,
+      const output = await runToolCall(
+        'task_status',
+        `s${i}`,
+        { task_id: 'child-1' },
+        statusOutput,
       );
       if (i < 3) {
         expect(output.output).toBe(statusOutput);
@@ -121,26 +153,15 @@ describe('tool-loop-guard', () => {
 
   test('volatile idle_for_seconds changes do not break consecutive identical detection for task_status', async () => {
     for (let i = 1; i <= 6; i++) {
-      await hook['tool.execute.before'](
-        beforeInput({ tool: 'task_status', callID: `s${i}` }),
-        { args: { task_id: 'child-1' } },
-      );
-      const output = {
-        output: [
-          'Task #1 (ses_child1)',
-          'state: busy',
-          'agent: fixer',
-          `last_activity_at: 2026-08-30T00:00:${i.toString().padStart(2, '0')}.000Z`,
-          `idle_for_seconds: ${i * 5}`,
-          'possibly_stuck: false',
-          '',
-          '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
-        ].join('\n'),
-        metadata: {},
-      };
-      await hook['tool.execute.after'](
-        afterInput({ tool: 'task_status', callID: `s${i}` }),
-        output,
+      const rawOutput = makeTaskStatusOutput({
+        lastActivityAt: `2026-08-30T00:00:${i.toString().padStart(2, '0')}.000Z`,
+        idleForSeconds: i * 5,
+      });
+      const output = await runToolCall(
+        'task_status',
+        `s${i}`,
+        { task_id: 'child-1' },
+        rawOutput,
       );
       if (i < 3) {
         expect(output.output).not.toContain(LOOP_GUARD_WARNING);
@@ -159,14 +180,11 @@ describe('tool-loop-guard', () => {
     ].join('\n');
 
     for (let i = 1; i <= 6; i++) {
-      await hook['tool.execute.before'](
-        beforeInput({ tool: 'task_result', callID: `r${i}` }),
-        { args: { task_id: 'ses_child1' } },
-      );
-      const output = { output: runningOutput, metadata: {} };
-      await hook['tool.execute.after'](
-        afterInput({ tool: 'task_result', callID: `r${i}` }),
-        output,
+      const output = await runToolCall(
+        'task_result',
+        `r${i}`,
+        { task_id: 'ses_child1' },
+        runningOutput,
       );
       if (i < 3) {
         expect(output.output).toBe(runningOutput);
@@ -179,91 +197,39 @@ describe('tool-loop-guard', () => {
   test('genuine state change resets the consecutive run counter', async () => {
     // 2 busy calls
     for (let i = 1; i <= 2; i++) {
-      await hook['tool.execute.before'](
-        beforeInput({ tool: 'task_status', callID: `s${i}` }),
-        { args: { task_id: 'child-1' } },
-      );
-      const output = {
-        output: [
-          'Task #1 (ses_child1)',
-          'state: busy',
-          'agent: fixer',
-          'last_activity_at: 2026-08-30T00:00:00.000Z',
-          'idle_for_seconds: 0',
-          'possibly_stuck: false',
-        ].join('\n'),
-        metadata: {},
-      };
-      await hook['tool.execute.after'](
-        afterInput({ tool: 'task_status', callID: `s${i}` }),
-        output,
+      const output = await runToolCall(
+        'task_status',
+        `s${i}`,
+        { task_id: 'child-1' },
+        makeTaskStatusOutput({ state: 'busy' }),
       );
       expect(output.output).not.toContain(LOOP_GUARD_WARNING);
     }
 
     // 3rd call has state change: completed
-    await hook['tool.execute.before'](
-      beforeInput({ tool: 'task_status', callID: 's3' }),
-      { args: { task_id: 'child-1' } },
-    );
-    const completedOutput = {
-      output: [
-        'Task #1 (ses_child1)',
-        'state: completed',
-        'agent: fixer',
-        'last_activity_at: 2026-08-30T00:00:00.000Z',
-        'idle_for_seconds: 0',
-        'possibly_stuck: false',
-      ].join('\n'),
-      metadata: {},
-    };
-    await hook['tool.execute.after'](
-      afterInput({ tool: 'task_status', callID: 's3' }),
-      completedOutput,
+    const completedOutput = await runToolCall(
+      'task_status',
+      's3',
+      { task_id: 'child-1' },
+      makeTaskStatusOutput({ state: 'completed' }),
     );
     expect(completedOutput.output).not.toContain(LOOP_GUARD_WARNING);
 
     // 4th call is completed again -> counter 2 -> no warning
-    await hook['tool.execute.before'](
-      beforeInput({ tool: 'task_status', callID: 's4' }),
-      { args: { task_id: 'child-1' } },
-    );
-    const completedOutput2 = {
-      output: [
-        'Task #1 (ses_child1)',
-        'state: completed',
-        'agent: fixer',
-        'last_activity_at: 2026-08-30T00:00:00.000Z',
-        'idle_for_seconds: 0',
-        'possibly_stuck: false',
-      ].join('\n'),
-      metadata: {},
-    };
-    await hook['tool.execute.after'](
-      afterInput({ tool: 'task_status', callID: 's4' }),
-      completedOutput2,
+    const completedOutput2 = await runToolCall(
+      'task_status',
+      's4',
+      { task_id: 'child-1' },
+      makeTaskStatusOutput({ state: 'completed' }),
     );
     expect(completedOutput2.output).not.toContain(LOOP_GUARD_WARNING);
 
     // 5th call is completed again -> counter 3 -> warning appended
-    await hook['tool.execute.before'](
-      beforeInput({ tool: 'task_status', callID: 's5' }),
-      { args: { task_id: 'child-1' } },
-    );
-    const completedOutput3 = {
-      output: [
-        'Task #1 (ses_child1)',
-        'state: completed',
-        'agent: fixer',
-        'last_activity_at: 2026-08-30T00:00:00.000Z',
-        'idle_for_seconds: 0',
-        'possibly_stuck: false',
-      ].join('\n'),
-      metadata: {},
-    };
-    await hook['tool.execute.after'](
-      afterInput({ tool: 'task_status', callID: 's5' }),
-      completedOutput3,
+    const completedOutput3 = await runToolCall(
+      'task_status',
+      's5',
+      { task_id: 'child-1' },
+      makeTaskStatusOutput({ state: 'completed' }),
     );
     expect(completedOutput3.output).toContain(LOOP_GUARD_WARNING);
   });

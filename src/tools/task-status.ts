@@ -11,6 +11,17 @@ import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
 const z = tool.schema;
 const ACTIVE_STATES = new Set(['busy', 'running', 'retry']);
 
+/**
+ * Normalizes dynamic / volatile fields in task_status output (timestamps and
+ * elapsed seconds) so that consecutive status reports can be compared for
+ * identical semantic status.
+ */
+export function normalizeTaskStatusOutput(output: string): string {
+  return output
+    .replace(/^last_activity_at:\s*.*$/gm, 'last_activity_at: <normalized>')
+    .replace(/^idle_for_seconds:\s*.*$/gm, 'idle_for_seconds: <normalized>');
+}
+
 export function createTaskStatusTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;

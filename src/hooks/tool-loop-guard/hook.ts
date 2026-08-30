@@ -1,3 +1,4 @@
+import { normalizeTaskStatusOutput } from '../../tools/task-status';
 import { log } from '../../utils/logger';
 
 /**
@@ -96,9 +97,7 @@ function fingerprint(tool: string, args: unknown): string {
 function normalizeOutput(tool: string, output: unknown): unknown {
   if (typeof output !== 'string') return output;
   if (tool === 'task_status') {
-    return output
-      .replace(/^last_activity_at:\s*.*$/gm, 'last_activity_at: <normalized>')
-      .replace(/^idle_for_seconds:\s*.*$/gm, 'idle_for_seconds: <normalized>');
+    return normalizeTaskStatusOutput(output);
   }
   return output;
 }
