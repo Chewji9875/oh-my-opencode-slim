@@ -89,7 +89,7 @@ describe('tool-loop-guard', () => {
     ).rejects.toThrow();
   });
 
-  test('task_status with identical state: busy output appends warning on 3rd call and blocks on 5th call', async () => {
+  test('task_status with identical state: busy output appends warning on 3rd call and does not block at call 5 and beyond', async () => {
     const statusOutput = [
       'Task #1 (ses_child1)',
       'state: busy',
@@ -101,7 +101,7 @@ describe('tool-loop-guard', () => {
       '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
     ].join('\n');
 
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 6; i++) {
       await hook['tool.execute.before'](
         beforeInput({ tool: 'task_status', callID: `s${i}` }),
         { args: { task_id: 'child-1' } },
@@ -117,17 +117,10 @@ describe('tool-loop-guard', () => {
         expect(output.output).toContain(LOOP_GUARD_WARNING);
       }
     }
-
-    await expect(
-      hook['tool.execute.before'](
-        beforeInput({ tool: 'task_status', callID: 's6' }),
-        { args: { task_id: 'child-1' } },
-      ),
-    ).rejects.toThrow('infinite loop');
   });
 
   test('volatile idle_for_seconds changes do not break consecutive identical detection for task_status', async () => {
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 6; i++) {
       await hook['tool.execute.before'](
         beforeInput({ tool: 'task_status', callID: `s${i}` }),
         { args: { task_id: 'child-1' } },
@@ -155,16 +148,9 @@ describe('tool-loop-guard', () => {
         expect(output.output).toContain(LOOP_GUARD_WARNING);
       }
     }
-
-    await expect(
-      hook['tool.execute.before'](
-        beforeInput({ tool: 'task_status', callID: 's6' }),
-        { args: { task_id: 'child-1' } },
-      ),
-    ).rejects.toThrow('infinite loop');
   });
 
-  test('task_result called repeatedly for a running task warns and blocks', async () => {
+  test('task_result called repeatedly for a running task warns on 3rd call and does not block at call 5 and beyond', async () => {
     const runningOutput = [
       'task_id: ses_child1',
       'state: running',
@@ -172,7 +158,7 @@ describe('tool-loop-guard', () => {
       'next: use task_status to inspect the task',
     ].join('\n');
 
-    for (let i = 1; i <= 5; i++) {
+    for (let i = 1; i <= 6; i++) {
       await hook['tool.execute.before'](
         beforeInput({ tool: 'task_result', callID: `r${i}` }),
         { args: { task_id: 'ses_child1' } },
@@ -188,13 +174,6 @@ describe('tool-loop-guard', () => {
         expect(output.output).toContain(LOOP_GUARD_WARNING);
       }
     }
-
-    await expect(
-      hook['tool.execute.before'](
-        beforeInput({ tool: 'task_result', callID: 'r6' }),
-        { args: { task_id: 'ses_child1' } },
-      ),
-    ).rejects.toThrow('infinite loop');
   });
 
   test('genuine state change resets the consecutive run counter', async () => {

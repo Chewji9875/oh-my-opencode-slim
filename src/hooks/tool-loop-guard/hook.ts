@@ -25,11 +25,13 @@ import { log } from '../../utils/logger';
  *   A refusal only happens after the run is already confirmed identical.
  *
  * Scope is deliberately narrow to avoid breaking legitimate repeated calls:
- * - All tools warn at N confirmed-identical consecutive calls.
- * - Read-only file-analysis tools (read, grep, glob) and task supervision
- *   tools (task_status, task_result) hard-block after confirmed identical
- *   results to prevent infinite loops (#1071).
- * - The task tool and management tools (task_cancel, task_message,
+ * - All non-exempt tools warn at N confirmed-identical consecutive calls.
+ * - Only read-only file-analysis tools (read, grep, glob) hard-block after M
+ *   confirmed identical results to prevent infinite loops (#1071).
+ * - External async process/task supervision tools (task_status, task_result)
+ *   warn at N calls but stay warn-only (never hard-block) to avoid deadlocking
+ *   terminal result retrieval for long-running background tasks.
+ * - Task management and lifecycle tools (task, task_cancel, task_message,
  *   task_revive, wait_for_*) remain exempt; task-session-manager owns its
  *   own duplicate-spawn guards (#1056/#1070).
  *
@@ -54,17 +56,15 @@ const LOOP_GUARD_EXEMPT: Record<string, true> = {
 };
 
 /**
- * Tools that may be hard-blocked when repeated. Read-only file analysis
- * (#1071) and task polling/supervision (task_status, task_result) hard-block
- * after confirmed identical results to prevent infinite loops; anything with
- * side effects stays warn-only.
+ * Tools that may be hard-blocked when repeated. Only read-only file analysis
+ * (read, grep, glob) hard-blocks after confirmed identical results (#1071).
+ * External task supervision tools (task_status, task_result) and tools with
+ * side effects stay warn-only to prevent terminal result retrieval deadlocks.
  */
 const LOOP_GUARD_BLOCK_TOOLS: Record<string, true> = {
   read: true,
   grep: true,
   glob: true,
-  task_status: true,
-  task_result: true,
 };
 
 const LOOP_GUARD_MARKER = '[REPEATED TOOL CALLS - STOP]';
