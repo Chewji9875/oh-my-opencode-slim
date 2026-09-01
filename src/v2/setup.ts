@@ -187,7 +187,7 @@ export interface V2SessionContextHandlerDeps {
   commandBefore?: V1CommandBeforeHook;
   /** v1 `chat.message` hook (agent tracking). */
   chatMessage?: (
-    input: { sessionID: string; agent?: string },
+    input: { sessionID: string; agent?: string; messageID?: string },
     output: unknown,
   ) => Promise<void>;
   /** v1 `experimental.chat.system.transform` hook. */
@@ -228,8 +228,15 @@ export function createSessionContextHandler(
     // Agent tracking (chat.message equivalent).
     if (deps.chatMessage) {
       try {
+        const userMessage = [...event.messages]
+          .reverse()
+          .find((message) => message.role === 'user');
         await deps.chatMessage(
-          { sessionID: event.sessionID, agent: event.agent },
+          {
+            sessionID: event.sessionID,
+            agent: event.agent,
+            ...(userMessage?.id ? { messageID: userMessage.id } : {}),
+          },
           undefined,
         );
       } catch (err) {
@@ -289,6 +296,74 @@ export interface V2ToolBridgeEvents {
   ) => Promise<void>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function textContent(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value
+    .filter(isRecord)
+    .filter((part) => part.type === 'text')
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('');
+}
+
+function renderOutput(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Copy a v1 after-hook's string output back into v2 without changing the
+ * representation chosen by the v2 tool. In particular, image/file parts
+ * must survive a v1 hook which can only see the concatenated text output.
+ */
+function updateToolResultContent(
+  original: unknown,
+  originalText: string,
+  updated: unknown,
+): unknown {
+  const text = typeof updated === 'string' ? updated : renderOutput(updated);
+  if (typeof original === 'string') return text;
+  if (!Array.isArray(original)) return updated;
+
+  // The common after-hook mutation appends a warning. Put only the suffix on
+  // the last text part so mixed content keeps its original ordering.
+  if (text.startsWith(originalText) && text.length > originalText.length) {
+    const suffix = text.slice(originalText.length);
+    for (let index = original.length - 1; index >= 0; index -= 1) {
+      const part = original[index];
+      if (isRecord(part) && part.type === 'text') {
+        return original.map((entry, entryIndex) =>
+          entryIndex === index
+            ? { ...part, text: `${part.text ?? ''}${suffix}` }
+            : entry,
+        );
+      }
+    }
+  }
+
+  let replacedTextPart = false;
+  const content = original.map((part) => {
+    if (!isRecord(part) || part.type !== 'text') return part;
+    if (replacedTextPart) return { ...part, text: '' };
+    replacedTextPart = true;
+    return { ...part, text };
+  });
+  if (!replacedTextPart && text !== '') {
+    content.push({ type: 'text', text });
+  }
+  return content;
+}
+
 /** Build the tool.execute.before/after v2→v1 bridges, including the
  * `subagent`→`task` delegation normalization. Exported for tests. */
 export function createToolExecuteBridges(
@@ -334,18 +409,35 @@ export function createToolExecuteBridges(
     // string; the v1 after-hooks (postFileToolNudge, jsonErrorRecovery,
     // taskSessionManagerAfter) read output.output to decide nudges.
     const result = e.result as
-      | { content?: unknown; metadata?: Record<string, unknown> }
+      | {
+          content?: unknown;
+          output?: unknown;
+          metadata?: Record<string, unknown>;
+        }
       | undefined;
     const rawContent = result?.content;
-    const content =
-      typeof rawContent === 'string'
-        ? rawContent
-        : Array.isArray(rawContent)
-          ? (rawContent as Array<{ type?: string; text?: string }>)
-              .filter((p) => p?.type === 'text')
-              .map((p) => p.text ?? '')
-              .join('')
-          : '';
+    const hasRenderableContent =
+      result !== undefined &&
+      (typeof rawContent === 'string' ||
+        (Array.isArray(rawContent) && rawContent.length > 0));
+    const rawOutput = result?.output;
+    const content = hasRenderableContent
+      ? textContent(rawContent)
+      : renderOutput(rawOutput);
+    const originalMetadata = result?.metadata;
+    const initialTitle =
+      isRecord(result?.metadata) && typeof result.metadata.title === 'string'
+        ? result.metadata.title
+        : '';
+    const output: {
+      output: unknown;
+      title: string;
+      metadata: Record<string, unknown>;
+    } = {
+      output: content,
+      title: initialTitle,
+      metadata: isRecord(originalMetadata) ? originalMetadata : {},
+    };
     await after(
       {
         tool: toolNameToV1(e.tool),
@@ -353,8 +445,41 @@ export function createToolExecuteBridges(
         callID: e.id,
         args: isDelegation ? subagentArgsToV1(e.input) : e.input,
       },
-      { output: content, title: '', metadata: result?.metadata ?? {} },
+      output,
     );
+
+    if (result) {
+      const updatedText =
+        typeof output.output === 'string'
+          ? output.output
+          : renderOutput(output.output);
+      if (updatedText !== content) {
+        if (hasRenderableContent) {
+          result.content = updateToolResultContent(
+            rawContent,
+            content,
+            output.output,
+          );
+        } else if (Object.hasOwn(result, 'output')) {
+          // Keep output as the machine-readable value. The hook's transformed
+          // text belongs in the model-visible content field.
+          result.content = updatedText;
+        }
+      }
+      const metadataChanged =
+        isRecord(output.metadata) &&
+        output.metadata !== originalMetadata &&
+        (isRecord(originalMetadata) || Object.keys(output.metadata).length > 0);
+      if (metadataChanged) {
+        result.metadata = output.metadata;
+      }
+      if (output.title !== initialTitle) {
+        result.metadata = {
+          ...(isRecord(result.metadata) ? result.metadata : {}),
+          title: output.title,
+        };
+      }
+    }
   };
 
   return { beforeBridge, afterBridge };

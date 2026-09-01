@@ -151,6 +151,60 @@ describe('tool-loop-guard', () => {
     }
   });
 
+  test('task_status and task_result share one stream for the same running task', async () => {
+    const statusOutput = makeTaskStatusOutput({ state: 'busy' });
+    const resultOutput = [
+      'task_id: ses_child1',
+      'state: running',
+      'message: Task is still running. Wait for its terminal result.',
+    ].join('\n');
+
+    for (let i = 1; i <= 3; i++) {
+      const output = await runToolCall(
+        i % 2 === 1 ? 'task_status' : 'task_result',
+        `poll${i}`,
+        { task_id: 'ses_child1' },
+        i % 2 === 1 ? statusOutput : resultOutput,
+      );
+      if (i < 3) expect(output.output).not.toContain(LOOP_GUARD_WARNING);
+      else expect(output.output).toContain(LOOP_GUARD_WARNING);
+    }
+  });
+
+  test('a new parent turn resets polling counters but not within-turn detection', async () => {
+    const statusOutput = makeTaskStatusOutput();
+
+    await runToolCall(
+      'task_status',
+      'turn-1-status',
+      { task_id: 'ses_child1' },
+      statusOutput,
+    );
+    const withinTurn = await runToolCall(
+      'task_result',
+      'turn-1-result',
+      { task_id: 'ses_child1' },
+      'task_id: ses_child1\nstate: running',
+    );
+    expect(withinTurn.output).not.toContain(LOOP_GUARD_WARNING);
+    await runToolCall(
+      'task_status',
+      'turn-1-status-2',
+      { task_id: 'ses_child1' },
+      statusOutput,
+    );
+
+    hook.resetTurn('s1');
+
+    const newTurn = await runToolCall(
+      'task_result',
+      'turn-2-result',
+      { task_id: 'ses_child1' },
+      'task_id: ses_child1\nstate: running',
+    );
+    expect(newTurn.output).not.toContain(LOOP_GUARD_WARNING);
+  });
+
   test('volatile idle_for_seconds changes do not break consecutive identical detection for task_status', async () => {
     for (let i = 1; i <= 6; i++) {
       const rawOutput = makeTaskStatusOutput({
@@ -396,5 +450,22 @@ describe('tool-loop-guard', () => {
 
     const o1 = await runIdenticalCall('c3', { filePath: 'a.ts' });
     expect(o1.output).toBe('...file contents...');
+  });
+
+  test('session reset removes pending calls and ignores late after hooks', async () => {
+    await hook['tool.execute.before'](
+      beforeInput({ tool: 'task_status', callID: 'pending' }),
+      { args: { task_id: 'ses_child1' } },
+    );
+    hook.resetSession('s1');
+
+    for (let i = 1; i <= 4; i++) {
+      const output = { output: makeTaskStatusOutput(), metadata: {} };
+      await hook['tool.execute.after'](
+        afterInput({ tool: 'task_status', callID: `late-${i}` }),
+        output,
+      );
+      expect(output.output).not.toContain(LOOP_GUARD_WARNING);
+    }
   });
 });

@@ -11,17 +11,6 @@ import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
 const z = tool.schema;
 const ACTIVE_STATES = new Set(['busy', 'running', 'retry']);
 
-/**
- * Normalizes dynamic / volatile fields in task_status output (timestamps and
- * elapsed seconds) so that consecutive status reports can be compared for
- * identical semantic status.
- */
-export function normalizeTaskStatusOutput(output: string): string {
-  return output
-    .replace(/^last_activity_at:\s*.*$/gm, 'last_activity_at: <normalized>')
-    .replace(/^idle_for_seconds:\s*.*$/gm, 'idle_for_seconds: <normalized>');
-}
-
 export function createTaskStatusTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
@@ -75,7 +64,7 @@ export function createTaskStatusTool(options: {
           details.push(`last_status_error: ${report.lastStatusError}`);
         }
       }
-      if (ACTIVE_STATES.has(report.state)) {
+      if (!report.uncertain && ACTIVE_STATES.has(report.state)) {
         details.push('');
         details.push(
           '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',

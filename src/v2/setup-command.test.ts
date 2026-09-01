@@ -1,5 +1,9 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import {
+  createToolLoopGuardHook,
+  LOOP_GUARD_WARNING,
+} from '../hooks/tool-loop-guard/hook';
 import { createV2InterviewBridge, markerText } from './interview-bridge';
 import { createSessionSubmit } from './session-submit';
 import {
@@ -482,7 +486,7 @@ describe('createSessionContextHandler (merged context hook seam)', () => {
     await handler(event);
 
     expect(chatCalls).toEqual([
-      { sessionID: 'ses_cmd', agent: 'orchestrator' },
+      { sessionID: 'ses_cmd', agent: 'orchestrator', messageID: 'u' },
     ]);
     expect(event.system).toEqual([
       { type: 'text', text: 'base' },
@@ -609,5 +613,225 @@ describe('tool execute bridge normalization', () => {
       },
     });
     expect(seen[0]?.output).toContain('(sessionID: ses_x)');
+  });
+
+  test('after bridge leaves unchanged mixed content untouched', async () => {
+    const content = [
+      { type: 'text', text: 'before' },
+      { type: 'image', source: { type: 'url', url: 'image://one' } },
+      { type: 'text', text: 'after' },
+    ];
+    const event = {
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed' as const,
+      result: { content },
+    };
+    const { afterBridge } = createToolExecuteBridges(undefined, async () => {});
+
+    await afterBridge(event);
+
+    expect(event.result.content).toBe(content);
+    expect(event.result.content).toEqual(content);
+  });
+
+  test('after bridge retains output-only result fallback', async () => {
+    const event = {
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed' as const,
+      result: { output: 'fallback output' },
+    };
+    const { afterBridge } = createToolExecuteBridges(undefined, async () => {});
+
+    await afterBridge(event);
+
+    expect(event.result).toEqual({ output: 'fallback output' });
+  });
+
+  test('after bridge renders changing structured outputs distinctly', async () => {
+    const seen: unknown[] = [];
+    const { afterBridge } = createToolExecuteBridges(
+      undefined,
+      async (_input, output: { output: unknown }) => {
+        seen.push(output.output);
+      },
+    );
+    const makeEvent = (value: number) => ({
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: `c-${value}`,
+      input: {},
+      status: 'completed' as const,
+      result: { content: [], output: { value } },
+    });
+
+    await afterBridge(makeEvent(1));
+    await afterBridge(makeEvent(2));
+
+    expect(seen).toEqual(['{"value":1}', '{"value":2}']);
+  });
+
+  test('after bridge keeps structured output when appending warning text', async () => {
+    const event = {
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed' as const,
+      result: { content: [], output: { value: 1 } },
+    };
+    const { afterBridge } = createToolExecuteBridges(
+      undefined,
+      async (_input, output: { output: unknown }) => {
+        output.output = `${output.output}\nwarning`;
+      },
+    );
+
+    await afterBridge(event);
+
+    expect(event.result.output).toEqual({ value: 1 });
+    expect(event.result.content).toBe('{"value":1}\nwarning');
+  });
+
+  test('after bridge preserves string content when the v1 output changes', async () => {
+    const event = {
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed' as const,
+      result: { content: 'original' },
+    };
+    const { afterBridge } = createToolExecuteBridges(
+      undefined,
+      async (_input, output: { output: unknown }) => {
+        output.output = 'rewritten';
+      },
+    );
+
+    await afterBridge(event);
+
+    expect(event.result.content).toBe('rewritten');
+  });
+
+  test('after bridge appends warnings without disturbing mixed content order', async () => {
+    const event = {
+      tool: 'subagent',
+      sessionID: 's',
+      agent: 'a',
+      messageID: 'm',
+      id: 'c',
+      input: {},
+      status: 'completed' as const,
+      result: {
+        content: [
+          { type: 'text', text: 'before' },
+          { type: 'image', source: { type: 'url', url: 'image://one' } },
+          { type: 'text', text: 'after' },
+        ],
+      },
+    };
+    const { afterBridge } = createToolExecuteBridges(
+      undefined,
+      async (
+        _input,
+        output: { output: unknown; metadata: Record<string, unknown> },
+      ) => {
+        output.output = 'beforeafter\nwarning';
+      },
+    );
+
+    await afterBridge(event);
+
+    expect(event.result.content).toEqual([
+      { type: 'text', text: 'before' },
+      { type: 'image', source: { type: 'url', url: 'image://one' } },
+      { type: 'text', text: 'after\nwarning' },
+    ]);
+  });
+
+  test('context continuations do not reset alternating poll detection', async () => {
+    const loopGuard = createToolLoopGuardHook();
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      chatMessage: async (input) => {
+        if (input.messageID) {
+          loopGuard.observeNewUserMessage(input.sessionID, input.messageID);
+        }
+      },
+    });
+    const context = makeEvent(
+      [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: [{ type: 'text', text: 'poll' }],
+        },
+      ],
+      { sessionID: 'ses_parent' },
+    );
+    const poll = async (
+      tool: string,
+      callID: string,
+      output: string,
+    ): Promise<unknown> => {
+      await loopGuard['tool.execute.before'](
+        { tool, sessionID: 'ses_parent', callID },
+        { args: { task_id: 'ses_child' } },
+      );
+      const result = { output };
+      await loopGuard['tool.execute.after'](
+        { tool, sessionID: 'ses_parent', callID },
+        result,
+      );
+      return result.output;
+    };
+
+    await handler(context);
+    await poll('task_status', 'poll-1', 'task_id: ses_child\nstate: busy');
+    await handler(context);
+    await poll('task_result', 'poll-2', 'task_id: ses_child\nstate: running');
+    await handler(context);
+    const third = await poll(
+      'task_status',
+      'poll-3',
+      'task_id: ses_child\nstate: busy',
+    );
+
+    expect(third).toContain(LOOP_GUARD_WARNING);
+
+    await handler(
+      makeEvent(
+        [
+          {
+            id: 'user-2',
+            role: 'user',
+            content: [{ type: 'text', text: 'next' }],
+          },
+        ],
+        { sessionID: 'ses_parent' },
+      ),
+    );
+    const nextTurn = await poll(
+      'task_result',
+      'poll-4',
+      'task_id: ses_child\nstate: running',
+    );
+    expect(nextTurn).not.toContain(LOOP_GUARD_WARNING);
   });
 });

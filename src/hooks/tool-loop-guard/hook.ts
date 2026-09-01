@@ -1,4 +1,3 @@
-import { normalizeTaskStatusOutput } from '../../tools/task-status';
 import { log } from '../../utils/logger';
 
 /**
@@ -21,6 +20,10 @@ import { log } from '../../utils/logger';
  *   args call produced an output byte-identical to the prior call. A call
  *   that returns NEW information resets the run, so it can never accumulate
  *   toward a block (a legitimate re-read after the file changed).
+ * - task_status/task_result use a separate task-ID/lifecycle-state stream, so
+ *   alternating polls are still recognized without treating tool changes as
+ *   progress. The stream resets at a parent turn boundary or meaningful
+ *   action.
  * - tool.execute.before never increments the counter, so overlapping
  *   parallel calls cannot inflate the count before their results are known.
  *   A refusal only happens after the run is already confirmed identical.
@@ -89,19 +92,6 @@ function fingerprint(tool: string, args: unknown): string {
   return `${tool.toLowerCase()}:${stableStringify(args)}`;
 }
 
-/**
- * Normalizes tool output prior to fingerprinting so that volatile dynamic
- * fields (e.g. timestamps or elapsed counters in status polling) do not defeat
- * consecutive identical detection.
- */
-function normalizeOutput(tool: string, output: unknown): unknown {
-  if (typeof output !== 'string') return output;
-  if (tool === 'task_status') {
-    return normalizeTaskStatusOutput(output);
-  }
-  return output;
-}
-
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
@@ -125,6 +115,45 @@ interface SessionState {
   lastOutput: string;
 }
 
+interface CallState {
+  sessionID: string;
+  key: string;
+  taskID?: string;
+}
+
+interface TaskSupervisionState {
+  lifecycleState: string;
+  runs: number;
+}
+
+const TASK_SUPERVISION_TOOLS = new Set(['task_status', 'task_result']);
+
+function taskIDFromArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== 'object' || Array.isArray(args))
+    return undefined;
+  const taskID = (args as Record<string, unknown>).task_id;
+  return typeof taskID === 'string' && taskID.trim() !== ''
+    ? taskID.trim()
+    : undefined;
+}
+
+function taskIDFromOutput(output: unknown): string | undefined {
+  if (typeof output !== 'string') return undefined;
+  const match = output.match(/(?:task_id:\s*|Task\s+[^\n(]*\()([^\s)]+)/i);
+  return match?.[1];
+}
+
+function lifecycleStateFromOutput(output: unknown): string | undefined {
+  if (typeof output !== 'string') return undefined;
+  const state = output.match(/^state:\s*([\w-]+)/im)?.[1]?.toLowerCase();
+  if (!state) return undefined;
+  const normalized = state === 'busy' ? 'running' : state;
+  const uncertain =
+    /state:\s*[^\n]*\(unconfirmed\)/i.test(output) ||
+    /^status_uncertain:\s*true$/im.test(output);
+  return uncertain ? `${normalized}:uncertain` : normalized;
+}
+
 export interface ToolLoopGuardHook {
   'tool.execute.before': (
     input: { tool: string; sessionID?: string; callID?: string },
@@ -134,14 +163,24 @@ export interface ToolLoopGuardHook {
     input: { tool: string; sessionID?: string; callID?: string },
     output: { output: unknown; metadata?: unknown },
   ) => Promise<void>;
+  observeNewUserMessage(sessionID: string, messageID: string): void;
+  resetTurn(sessionID: string): void;
   resetSession(sessionID: string): void;
   resetForTests(): void;
 }
 
 export function createToolLoopGuardHook(): ToolLoopGuardHook {
   const sessions = new Map<string, SessionState>();
-  /** Fingerprint per callID so `after` can re-check without re-deriving args. */
-  const callKeys = new Map<string, string>();
+  /** Per-call state so `after` can re-check without re-deriving args. */
+  const callKeys = new Map<string, CallState>();
+  /** Polling state is shared by task_status/task_result for each task. */
+  const taskSupervision = new Map<string, Map<string, TaskSupervisionState>>();
+  /** Last durable user-message identity observed for each session. */
+  const userMessageIdentities = new Map<string, string>();
+
+  function resetTaskSupervision(sessionID: string): void {
+    taskSupervision.delete(sessionID);
+  }
 
   /** Prune the session map to MAX_TRACKED_SESSIONS (FIFO by insertion). */
   function keepSessionsBounded(): void {
@@ -160,9 +199,26 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       const sessionID = input.sessionID;
       if (!sessionID) return;
       const tool = input.tool.toLowerCase();
-      if (LOOP_GUARD_EXEMPT[tool]) return;
+      if (LOOP_GUARD_EXEMPT[tool]) {
+        resetTaskSupervision(sessionID);
+        return;
+      }
 
       const key = fingerprint(tool, output.args);
+      if (TASK_SUPERVISION_TOOLS.has(tool)) {
+        if (input.callID) {
+          callKeys.set(input.callID, {
+            sessionID,
+            key,
+            taskID: taskIDFromArgs(output.args),
+          });
+        }
+        return;
+      }
+
+      // A non-polling tool call is a meaningful action. It starts a new
+      // supervision observation, while alternating polling tools do not.
+      resetTaskSupervision(sessionID);
       const existing = sessions.get(sessionID);
 
       // Refuse only on a CONFIRMED identical run: the previous BLOCK_AT
@@ -184,7 +240,7 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
         );
       }
 
-      if (input.callID) callKeys.set(input.callID, key);
+      if (input.callID) callKeys.set(input.callID, { sessionID, key });
     },
 
     'tool.execute.after': async (
@@ -196,12 +252,46 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       const tool = input.tool.toLowerCase();
       if (LOOP_GUARD_EXEMPT[tool]) return;
 
-      const key = input.callID ? callKeys.get(input.callID) : undefined;
+      const call = input.callID ? callKeys.get(input.callID) : undefined;
       if (input.callID) callKeys.delete(input.callID);
-      const outputHash = fingerprint(
-        tool,
-        normalizeOutput(tool, output.output),
-      );
+      // An after hook without a matching before hook is stale. In particular,
+      // do not let a late after hook recreate state after session deletion.
+      if (!input.callID || !call) return;
+      if (TASK_SUPERVISION_TOOLS.has(tool)) {
+        const taskID = taskIDFromOutput(output.output) ?? call?.taskID;
+        const lifecycleState = lifecycleStateFromOutput(output.output);
+        if (!taskID || !lifecycleState) return;
+
+        let states = taskSupervision.get(sessionID);
+        if (!states) {
+          states = new Map();
+          taskSupervision.set(sessionID, states);
+        }
+        const previous = states.get(taskID);
+        const state: TaskSupervisionState = {
+          lifecycleState,
+          runs:
+            previous?.lifecycleState === lifecycleState ? previous.runs + 1 : 1,
+        };
+        states.set(taskID, state);
+        if (
+          state.runs >= LOOP_GUARD_WARN_AT &&
+          typeof output.output === 'string' &&
+          !output.output.includes(LOOP_GUARD_MARKER)
+        ) {
+          log('[tool-loop-guard] warned repeated task supervision', {
+            sessionID,
+            tool,
+            taskID,
+            lifecycleState,
+            runs: state.runs,
+          });
+          output.output += `\n${LOOP_GUARD_WARNING}`;
+        }
+        return;
+      }
+      const key = call?.key;
+      const outputHash = fingerprint(tool, output.output);
 
       const existing = sessions.get(sessionID);
       let state: SessionState;
@@ -235,15 +325,34 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
       output.output += `\n${LOOP_GUARD_WARNING}`;
     },
 
+    /** Record a new durable user message, once per message identity. */
+    observeNewUserMessage(sessionID: string, messageID: string): void {
+      if (userMessageIdentities.get(sessionID) === messageID) return;
+      userMessageIdentities.set(sessionID, messageID);
+      resetTaskSupervision(sessionID);
+    },
+
+    /** Clear task supervision state at a completed parent turn. */
+    resetTurn(sessionID: string): void {
+      resetTaskSupervision(sessionID);
+    },
+
     /** Clear all state for a finished/deleted session. */
     resetSession(sessionID: string): void {
       sessions.delete(sessionID);
+      resetTaskSupervision(sessionID);
+      userMessageIdentities.delete(sessionID);
+      for (const [callID, call] of callKeys) {
+        if (call.sessionID === sessionID) callKeys.delete(callID);
+      }
     },
 
     /** Test seam: wipe state between cases. */
     resetForTests(): void {
       sessions.clear();
       callKeys.clear();
+      taskSupervision.clear();
+      userMessageIdentities.clear();
     },
   };
 }

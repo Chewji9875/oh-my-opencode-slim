@@ -1038,6 +1038,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // by session so child activity refreshes the correct stuck timer.
       const eventSessionID = resolveEventSessionID(event);
       const statusType = event.properties?.status?.type;
+      if (
+        eventSessionID &&
+        sessionMetadata.getAgent(eventSessionID) === 'orchestrator' &&
+        (event.type === 'session.idle' ||
+          (event.type === 'session.status' && statusType === 'idle'))
+      ) {
+        toolLoopGuard.resetTurn(eventSessionID);
+      }
+      if (eventSessionID && event.type === 'session.deleted') {
+        toolLoopGuard.resetSession(eventSessionID);
+      }
       if (eventSessionID) {
         applyActivityEvent(taskActivityTracker, event);
         if (
@@ -1184,7 +1195,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
         if (sessionID) {
           sessionLifecycle.dispatchSessionDeleted(sessionID);
-          toolLoopGuard.resetSession(sessionID);
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
@@ -1315,6 +1325,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       taskSessionManagerHook.observeChatMessage(input, output);
       orchestratorWakeScheduler.observeChatMessage(input, output);
+      const messageID = input.messageID ?? output?.message?.id;
+      if (messageID) {
+        toolLoopGuard.observeNewUserMessage(input.sessionID, messageID);
+      }
     },
 
     // Inject orchestrator system prompt for serve-mode sessions. In serve

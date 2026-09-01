@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../utils/background-job-board';
-import { createTaskStatusTool, normalizeTaskStatusOutput } from './task-status';
+import { createTaskStatusTool } from './task-status';
 
 let client: Record<string, any>;
 mock.module('../utils/opencode-client', () => ({ getClient: () => client }));
@@ -113,6 +113,7 @@ describe('task_status', () => {
     expect(output).toContain('state: running (unconfirmed)');
     expect(output).toContain('status_uncertain: true');
     expect(output).toContain('last_status_error: host status read failed');
+    expect(output).not.toContain('[guidance]: The task is still running.');
     // An uncertain board fallback must never drive an automatic nudge.
     expect(output).toContain('possibly_stuck: false');
   });
@@ -142,6 +143,7 @@ describe('task_status', () => {
     expect(output).toContain(
       'last_status_error: malformed live status entry for session',
     );
+    expect(output).not.toContain('[guidance]: The task is still running.');
     expect(output).toContain('possibly_stuck: false');
   });
 
@@ -176,6 +178,7 @@ describe('task_status', () => {
     expect(output).toContain('status_uncertain: true');
     expect(output).toContain('last_status_error');
     expect(output).toContain('timed out');
+    expect(output).not.toContain('[guidance]: The task is still running.');
     expect(output).toContain('possibly_stuck: false');
   });
 
@@ -198,6 +201,7 @@ describe('task_status', () => {
     expect(output).toContain(
       'last_status_error: no live status entry for session',
     );
+    expect(output).not.toContain('[guidance]: The task is still running.');
     expect(output).toContain('possibly_stuck: false');
   });
 
@@ -215,29 +219,5 @@ describe('task_status', () => {
         sessionID: 'parent-2',
       } as any),
     ).rejects.toThrow('Unknown task ID or alias');
-  });
-});
-
-describe('normalizeTaskStatusOutput', () => {
-  test('normalizes last_activity_at and idle_for_seconds lines', () => {
-    const raw = [
-      'Task #1 (ses_child1)',
-      'state: busy',
-      'agent: fixer',
-      'last_activity_at: 2026-08-30T12:34:56.789Z',
-      'idle_for_seconds: 42',
-      'possibly_stuck: false',
-    ].join('\n');
-    const normalized = normalizeTaskStatusOutput(raw);
-    expect(normalized).toBe(
-      [
-        'Task #1 (ses_child1)',
-        'state: busy',
-        'agent: fixer',
-        'last_activity_at: <normalized>',
-        'idle_for_seconds: <normalized>',
-        'possibly_stuck: false',
-      ].join('\n'),
-    );
   });
 });
